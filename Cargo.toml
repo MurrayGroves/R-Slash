@@ -1,0 +1,30 @@
+[package]
+name = "booty-bot-rs"
+version = "0.1.0"
+edition = "2018"
+default-run = "coordinator"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio-tungstenite = "*"
+tungstenite = "*"
+serde = {version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures = { version = "0.3"}
+log = "0.4"
+env_logger = "*"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread"]}
+reqwest = { version = "*", features = ["json"]}
+serenity = { version = "0.10", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
+crossbeam = { version = "*"}
+crossbeam-utils = { version = "*"}
+
+[[bin]]
+name = "coordinator"
+path = "src/coordinator/main.rs"
+
+[[bin]]
+name = "shard"
+path = "src/shard/main.rs"
