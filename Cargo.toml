@@ -1,5 +1,5 @@
 [package]
-name = "booty-bot-rs"
+name = "r-slash"
 version = "0.1.0"
 edition = "2018"
 default-run = "coordinator"
@@ -8,18 +8,20 @@ default-run = "coordinator"
 
 [dependencies]
 tokio-tungstenite = "*"
-tungstenite = "*"
+tungstenite = "0.17.2"
 serde = {version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures = { version = "0.3"}
 log = "0.4"
 env_logger = "*"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread"]}
-reqwest = { version = "*", features = ["json"]}
+tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time"]}
+reqwest = { version = "*", features = ["json", "rustls-tls"]}
 serenity = { version = "0.10", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
-crossbeam = { version = "*"}
-crossbeam-utils = { version = "*"}
+crossbeam = "*"
+crossbeam-utils = "*"
+redis = "*"
+rand = { version = "*", features = ["alloc"]}
 
 [[bin]]
 name = "coordinator"
@@ -28,3 +30,10 @@ path = "src/coordinator/main.rs"
 [[bin]]
 name = "shard"
 path = "src/shard/main.rs"
+
+[[bin]]
+name = "downloader"
+path = "src/downloader/main.rs"
+
+[profile.release]
+debug = true
