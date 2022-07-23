@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: discord-interface
+spec:
+  selector:
+    matchLabels:
+      app: discord-interface
+  replicas: 1
+  template:
+    metadata:
+        labels:
+            app: discord-interface
+    spec:
+      containers:
+        - name: discord-interface
+          image: registry.murraygrov.es/discord-interface:dev
+          imagePullPolicy: Always
+          tty: true
+          env:
+            - name: DISCORD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: discord-credentials
+                  key: DISCORD_TOKEN
+            - name: DISCORD_APPLICATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: discord-credentials
+                  key: DISCORD_APPLICATION_ID
+            - name: RUST_LOG
+              value: "discord_interface=info"
+      imagePullSecrets:
+        - name: murraygroves-registry-secret

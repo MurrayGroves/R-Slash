@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: discord-shards
+spec:
+  selector:
+    matchLabels:
+      app: discord-shard
+  replicas: 1
+  template:
+    metadata:
+        labels:
+            app: discord-shard
+    spec:
+      volumes:
+        - name: config
+          configMap:
+            name: discord-config
+
+      containers:
+        - name: discord-shard
+          image: registry.murraygrov.es/discord-shard:dev
+          imagePullPolicy: Always
+          tty: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/config
+          env:
+            - name: DISCORD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: discord-credentials
+                  key: DISCORD_TOKEN
+            - name: DISCORD_APPLICATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: discord-credentials
+                  key: DISCORD_APPLICATION_ID
+            - name: RUST_LOG
+              value: "discord_shard=info"
+            - name: SHARD_ID
+              value: "0"
+            - name: TOTAL_SHARDS
+              value: "1"
+      imagePullSecrets:
+        - name: murraygroves-registry-secret
