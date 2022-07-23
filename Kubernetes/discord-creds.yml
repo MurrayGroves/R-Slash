@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: discord-credentials
+type: Opaque
+stringData:
+    DISCORD_TOKEN: "MjkxMjU1OTg2NzQyNjI0MjU2.GeHJNI.vIQtFk9940KMWhPbLl9dny59I8RtSDgBleMagk"
+    DISCORD_APPLICATION_ID: "291255986742624256"

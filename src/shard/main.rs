@@ -3,6 +3,7 @@ use std::{fs, thread};
 use std::io::Write;
 use std::collections::HashMap;
 use std::iter::FromIterator;
+use std::env;
 use crossbeam_utils;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -121,7 +122,7 @@ async fn send_heartbeat(health: Option<u8>, guild_count: Option<usize>, user_cou
 /// The time at which the initial heartbeat was made on startup
 async fn heartbeat_loop(mut data: tokio::sync::RwLockWriteGuard<'_, TypeMap>, initial_heartbeat: u64) {
     let mut last_heartbeat = initial_heartbeat;
-    loop {
+    /* loop {
         if last_heartbeat == 0 {
             warn!("NO HEARTBEAT");
             sleep(Duration::from_millis(10000)).await; // Sleep until on_ready() has completed and first heartbeat is sent.
@@ -134,12 +135,12 @@ async fn heartbeat_loop(mut data: tokio::sync::RwLockWriteGuard<'_, TypeMap>, in
             time_to_heartbeat = 56000;
         }
         sleep(Duration::from_millis(time_to_heartbeat as u64)).await; // Sleep until we need to send a heartbeat
-    }
+    } */
 }
 
 /// Check slash commands config for changes, and update
 async fn update_slash_commands(http: &Arc<Http>) {
-    let config = fs::read_to_string("slash_commands.json").expect("Couldn't read slash_commands.json");  // Read config file in
+    let config = fs::read_to_string("/etc/config/slash-commands.json").expect("Couldn't read slash_commands.json");  // Read config file in
     let config: Vec<HashMap<String, String>> = serde_json::from_str(&config)  // Convert config string into Vec of Hashmaps
     .expect("slash_commands.json is not proper JSON");
 
@@ -175,6 +176,10 @@ async fn update_slash_commands(http: &Arc<Http>) {
     fs::write("slash_commands.json", &json).expect("Unable to write to slash_commands.json");
 }
 
+async fn get_subreddit(command: &ApplicationCommandInteraction, ctx: &Context) -> String {
+    return "passed".to_string();
+}
+
 /// Discord event handler
 struct Handler;
 
@@ -202,6 +207,7 @@ impl EventHandler for Handler {
         if let Interaction::ApplicationCommand(command) = interaction {
             let content = match command.data.name.as_str() {
                 "ping" => "Hey, I'm alive!".to_string(),
+                "get_subreddit" => get_subreddit(&command, &ctx).await,
                 _ => "Encountered error, please report in support server: `interaction response not found`".to_string(),
             };
 
@@ -224,17 +230,10 @@ impl EventHandler for Handler {
 /// Reads config file, starts websocket server, gets shard info from Discord, starts loops and starts sub-programs.
 #[tokio::main]
 async fn main() {
-    let coordinator = tokio_tungstenite::connect_async("ws://127.0.0.1:9002").await.expect("Failed to connect to coordinator");
-    let response = coordinator.1.into_body();
-    let coordinator = coordinator.0;
-    let mut streams = coordinator.split();
-    let mut write = streams.0;
-    let read = streams.1;
-
-    let token = std::env::args().nth(3).expect("no token given");
-    let application_id: u64 = std::env::args().nth(4).expect("no application_id given").parse().expect("Failed to convert application_id to u64");
-    let shard_id: usize = std::env::args().nth(1).expect("no shard_id given").parse().expect("Failed to convert shard_id to usize");
-    let total_shards: usize = std::env::args().nth(2).expect("no total_shards given").parse().expect("Failed to convert total_shards to usize");
+    let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
+    let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
+    let shard_id: usize = env::var("SHARD_ID").expect("SHARD_ID not set").parse().expect("Failed to convert shard_id to usize");
+    let total_shards: usize = env::var("TOTAL_SHARDS").expect("TOTAL_SHARDS not set").parse().expect("Failed to convert total_shards to usize");
 
     let shard_id_logger = shard_id.clone();
     env_logger::builder()
@@ -243,11 +242,7 @@ async fn main() {
     })
     .init();
 
-    let mut write = ConfigValue::websocket_write(write);
-
     let contents:HashMap<String, ConfigValue> = HashMap::from_iter([
-        ("coordinator_write".to_string(), write),
-        ("coordinator_read".to_string(), ConfigValue::websocket_read(read)),
         ("last_heartbeat".to_string(), ConfigValue::U64(0)),
         ("shard_id".to_string(), ConfigValue::U64(shard_id as u64)),
     ]);
