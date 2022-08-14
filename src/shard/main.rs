@@ -11,6 +11,7 @@ use serenity::model::prelude::RoleId;
 use serenity::builder::{CreateApplicationCommandPermissionsData, CreateApplicationCommandPermissionData};
 use serenity::model::interactions::application_command::ApplicationCommandPermissionType;
 use serenity::model::id::{GuildId};
+use serenity::model::gateway::GatewayIntents;
 use serenity::{
     async_trait,
     model::{
@@ -41,13 +42,20 @@ use futures::executor::block_on;
 use std::fs::File;
 use serenity::http::Http;
 
+use kube;
+use kube::ResourceExt;
+use k8s_openapi;
+use kube::api::ListParams;
+
+use redis;
+use redis::Commands;
+
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
 pub enum ConfigValue {
     U64(u64),
     RoleId(RoleId),
     Bool(bool),
-    websocket_write(SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>),
-    websocket_read(SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>)
+    DB(redis::Connection)
 }
 
 /// Stores config values required for operation of the downloader
@@ -83,60 +91,6 @@ async fn check_admin(user: serenity::model::user::User) -> bool { // Check if a 
     return admin == *user.id.as_u64();
 }
 
-/// Send a heartbeat to the coordinator
-///
-/// Returns the current time since the Epoch
-/// # Arguments
-/// ## data
-/// A thread-safe wrapper of the [Config](ConfigStruct)
-async fn send_heartbeat(health: Option<u8>, guild_count: Option<usize>, user_count: Option<usize>, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>) -> u64 {
-    let shard_id = match data.get::<ConfigStruct>().unwrap().get("shard_id").unwrap() {
-            ConfigValue::U64(x) => Ok(*x),
-            _ => Err(0),
-    }.unwrap();
-
-
-    let mut websocket = match data.get_mut::<ConfigStruct>().unwrap().get_mut("coordinator_write").unwrap() {
-        ConfigValue::websocket_write(x) => Ok(x),
-        _ => Err(0)
-    }.unwrap();
-
-
-
-    let health:u8 = health.unwrap_or(0);
-    let guild_count:usize = guild_count.unwrap_or(0);
-    let user_count:usize = user_count.unwrap_or(0);
-
-    let heartbeat = format!("{{\"type\": \"heartbeat\", \"shard_id\": {:?}, \"health\": {:?}, \"guild_count\": {:?}, \"user_count\": {:?}}}", shard_id, health, guild_count, user_count);
-
-    websocket.send(tungstenite::Message::from(heartbeat.as_bytes())).await;
-    return get_epoch_ms();
-}
-
-/// Starts the loop that sends heartbeats
-///
-/// # Arguments
-/// ## data
-/// A thread-safe wrapper of the [Config](ConfigStruct)
-/// ## initial_heartbeat
-/// The time at which the initial heartbeat was made on startup
-async fn heartbeat_loop(mut data: tokio::sync::RwLockWriteGuard<'_, TypeMap>, initial_heartbeat: u64) {
-    let mut last_heartbeat = initial_heartbeat;
-    /* loop {
-        if last_heartbeat == 0 {
-            warn!("NO HEARTBEAT");
-            sleep(Duration::from_millis(10000)).await; // Sleep until on_ready() has completed and first heartbeat is sent.
-            continue;
-        }
-        let mut time_to_heartbeat:i64= ((last_heartbeat + 57000) as i64 - (get_epoch_ms() as i64));  // How long until we need to send a heartbeat
-        if time_to_heartbeat < 1500 {  // If less than 1.5 seconds until need to send a heartbeat
-            debug!("SENDING HEARTBEAT");
-            last_heartbeat = send_heartbeat(Some(0), Some(0), Some(0), &mut data).await;
-            time_to_heartbeat = 56000;
-        }
-        sleep(Duration::from_millis(time_to_heartbeat as u64)).await; // Sleep until we need to send a heartbeat
-    } */
-}
 
 /// Check slash commands config for changes, and update
 async fn update_slash_commands(http: &Arc<Http>) {
@@ -187,24 +141,23 @@ struct Handler;
 impl EventHandler for Handler {
     /// Fires when the client is connected to the gateway
     async fn ready(&self, ctx: Context, ready: Ready) {
-        info!("Shard {} connected as {}, on {} servers.", ready.shard.unwrap()[0], ready.user.name, ready.guilds.len());
-        let guilds = ctx.cache.guild_count().await;
-        let users = ctx.cache.user_count().await;
-
-        if ready.shard.unwrap()[0] == 0 { // If shard 0, update slash commands
-            update_slash_commands(&ctx.http).await;
-        }
-
-        let mut data = ctx.data.write().await;
-        let initial_heartbeat = send_heartbeat(Some(0), Some(guilds), Some(users), &mut data).await;
-
-        heartbeat_loop(data, initial_heartbeat).await;
+        info!("Shard {} connected as {}, on {} servers!", ready.shard.unwrap()[0], ready.user.name, ready.guilds.len());
+        let guilds = ctx.cache.guild_count();
+        let users = ctx.cache.user_count();
     }
 
     /// Fires when a slash command or other interaction is received
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         debug!("Interaction received");
         if let Interaction::ApplicationCommand(command) = interaction {
+            match command.guild_id {
+                Some(guild_id) => {
+                    info!("{:?} ({:?}) > {:?} ({:?}) : /{} {:?}", guild_id.name(&ctx.cache).unwrap(), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
+                },
+                None => {
+                    info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
+                }
+            }
             let content = match command.data.name.as_str() {
                 "ping" => "Hey, I'm alive!".to_string(),
                 "get_subreddit" => get_subreddit(&command, &ctx).await,
@@ -225,15 +178,45 @@ impl EventHandler for Handler {
     }
 }
 
-/// Run on startup
-///
-/// Reads config file, starts websocket server, gets shard info from Discord, starts loops and starts sub-programs.
+
+async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge::gateway::ShardManager>>, mut total_shards: u64) {
+    let db_client = redis::Client::open("redis://redis/").unwrap();
+    let mut con = db_client.get_connection().expect("Can't connect to redis");
+
+    loop {
+        let _ = sleep(Duration::from_secs(60));
+
+        let db_total_shards: redis::RedisResult<u64> = con.get("total_shards");
+        let db_total_shards: u64 = db_total_shards.expect("Failed to get or convert total_shards");
+
+        if db_total_shards != total_shards {
+            debug!("Total shards changed from {} to {}, re-identifying with Discord.", total_shards, db_total_shards);
+
+            let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
+            let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
+
+            total_shards = db_total_shards;
+
+            let mut shard_manager = shard_manager.lock().await;
+            shard_manager.set_shards(shard_id, 1, total_shards).await;
+            shard_manager.initialize().expect("Failed to initialise new shard manager");
+        }
+    }
+}
+
+
 #[tokio::main]
 async fn main() {
     let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
     let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
-    let shard_id: usize = env::var("SHARD_ID").expect("SHARD_ID not set").parse().expect("Failed to convert shard_id to usize");
-    let total_shards: usize = env::var("TOTAL_SHARDS").expect("TOTAL_SHARDS not set").parse().expect("Failed to convert total_shards to usize");
+    let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
+    let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
+
+    let db_client = redis::Client::open("redis://redis/").unwrap();
+    let mut con = db_client.get_connection().expect("Can't connect to redis");
+
+    let total_shards: redis::RedisResult<u64> = con.get("total_shards");
+    let total_shards: u64 = total_shards.expect("Failed to get or convert total_shards");
 
     let shard_id_logger = shard_id.clone();
     env_logger::builder()
@@ -242,23 +225,37 @@ async fn main() {
     })
     .init();
 
-    let contents:HashMap<String, ConfigValue> = HashMap::from_iter([
-        ("last_heartbeat".to_string(), ConfigValue::U64(0)),
-        ("shard_id".to_string(), ConfigValue::U64(shard_id as u64)),
-    ]);
 
-    let mut client = Client::builder(token)
+    debug!("Booting with {:?} total shards", total_shards);
+
+    debug!("Printing debug");
+    info!("Printing info");
+    warn!("Printing warn");
+    error!("Printing error");
+
+    let mut client = Client::builder(token,  GatewayIntents::non_privileged() | GatewayIntents::GUILD_MEMBERS)
         .event_handler(Handler)
         .application_id(application_id)
         .await
         .expect("Error creating client");
+
+    let contents:HashMap<String, ConfigValue> = HashMap::from_iter([
+        ("shard_id".to_string(), ConfigValue::U64(shard_id as u64)),
+        ("db_connection".to_string(), ConfigValue::DB(con)),
+    ]);
 
     {
         let mut data = client.data.write().await;
         data.insert::<ConfigStruct>(contents);
     }
 
-    if let Err(why) = block_on(client.start_shard(shard_id as u64, total_shards as u64)) {
+
+    let shard_manager = client.shard_manager.clone();
+    tokio::spawn(async move {
+       monitor_total_shards(shard_manager, total_shards).await;
+    });
+
+    if let Err(why) = block_on(client.start_shard(shard_id, total_shards as u64)) {
         error!("Client error: {:?}", why);
     }
 }

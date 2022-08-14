@@ -26,7 +26,6 @@ use rand::distributions::WeightedIndex;
 use rand::thread_rng;
 use rand::prelude::Distribution;
 use reqwest::header::{USER_AGENT, HeaderMap};
-use serenity::model::guild::Region::UsEast;
 use serenity::prelude::TypeMapKey;
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)

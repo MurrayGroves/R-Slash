@@ -1,9 +1,8 @@
 FROM ubuntu:latest
 
-ADD target/debug/discord-interface /usr/bin/discord-interface
 
-RUN apt-get -y update
-RUN apt-get -y install wget
-RUN wget http://security.debian.org/debian-security/pool/updates/main/o/openssl/libssl1.1_1.1.0l-1~deb9u6_amd64.deb
+ADD "http://security.debian.org/debian-security/pool/updates/main/o/openssl/libssl1.1_1.1.0l-1~deb9u6_amd64.deb" .
 RUN dpkg -i libssl1.1*deb
+
+ADD target/debug/discord-interface /usr/bin/discord-interface
 ENTRYPOINT ["/usr/bin/discord-interface"]
