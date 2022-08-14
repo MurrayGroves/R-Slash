@@ -17,13 +17,15 @@ env_logger = "*"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time"]}
 reqwest = { version = "*", features = ["json", "rustls-tls"]}
-serenity = { version = "0.10", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
+serenity = { version = "0.11", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
 crossbeam = "*"
 crossbeam-utils = "*"
 redis = "*"
 rand = { version = "*", features = ["alloc"]}
 kube = { version = "0.73.0", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.15.0", features = ["v1_24"] }
+quit = "*"
+base64 = "*"
 
 [[bin]]
 name = "discord-interface"
@@ -36,6 +38,15 @@ path = "src/shard/main.rs"
 [[bin]]
 name = "downloader"
 path = "src/downloader/main.rs"
+
+[[bin]]
+name = "update-commands"
+path = "src/update-commands/main.rs"
+
+[[bin]]
+name = "rslash-manager"
+path = "src/rslash-manager/main.rs"
+
 
 [profile.release]
 debug = true

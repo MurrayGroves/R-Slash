@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: discord-config
-  namespace: r-slash
-data:
-  slash-commands.json: |
-    [{"description":"Check that the bot is alive!","name":"ping","hash":"16924988710685177456"}]
