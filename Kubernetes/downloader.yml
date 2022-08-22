@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reddit-downloader
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: reddit-downloader
+  replicas: 1
+  template:
+    metadata:
+        labels:
+            app: reddit-downloader
+    spec:
+      containers:
+        - name: reddit-downloader
+          image: registry.murraygrov.es/reddit-downloader:dev
+          imagePullPolicy: Never # Always
+          tty: true
+          env:
+            - name: REDDIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: reddit-credentials
+                  key: REDDIT_TOKEN
+            - name: REDDIT_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: reddit-credentials
+                  key: REDDIT_CLIENT_ID
+            - name: GFYCAT_CLIENT
+              valueFrom:
+                secretKeyRef:
+                    name: gfycat-credentials
+                    key: GFYCAT_CLIENT
+            - name: GFYCAT_SECRET
+              valueFrom:
+                secretKeyRef:
+                    name: gfycat-credentials
+                    key: GFYCAT_SECRET
+            - name: SUBREDDIT_LIST
+              valueFrom:
+                secretKeyRef:
+                  name: configuration
+                  key: SUBREDDIT_LIST
+            - name: RUST_LOG
+              value: "downloader=debug"
+      imagePullSecrets:
+        - name: murraygroves-registry-secret

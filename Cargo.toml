@@ -17,7 +17,7 @@ env_logger = "*"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time"]}
 reqwest = { version = "*", features = ["json", "rustls-tls"]}
-serenity = { version = "0.11", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
+serenity = { version = "0.11.5", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
 crossbeam = "*"
 crossbeam-utils = "*"
 redis = "*"

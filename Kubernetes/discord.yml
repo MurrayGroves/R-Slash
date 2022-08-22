@@ -55,6 +55,14 @@ spec:
           image: registry.murraygrov.es/discord-shard:dev
           imagePullPolicy: Never # Always
           tty: true
+          livenessProbe:
+            exec:
+              command:
+                - cat
+                - /etc/probes/live
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 2
           env:
             - name: DISCORD_TOKEN
               valueFrom:
