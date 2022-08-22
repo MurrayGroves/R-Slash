@@ -82,3 +82,33 @@ type: Opaque
 stringData:
     DISCORD_TOKEN: "MjkxMjU1OTg2NzQyNjI0MjU2.GeHJNI.vIQtFk9940KMWhPbLl9dny59I8RtSDgBleMagk"
     DISCORD_APPLICATION_ID: "291255986742624256"
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: reddit-credentials
+type: Opaque
+stringData:
+    REDDIT_TOKEN: "AbqYCMOt7mkTDFTYid-e2UxA2Gs"
+    REDDIT_CLIENT_ID: "lHbWNxacD4UKfw"
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: configuration
+type: Opaque
+stringData:
+    SUBREDDIT_LIST: "gifs,pics"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gfycat-credentials
+type: Opaque
+stringData:
+    GFYCAT_CLIENT: "2_CJUJYg"
+    GFYCAT_SECRET: "sOpBYyzZeewcGgYf264SFnHeggtmBq7MfrE8l_1ZvxDFWSn1fAQlLBDfbc0eMuhM"

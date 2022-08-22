@@ -7,11 +7,11 @@ use std::env;
 use crossbeam_utils;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use serenity::model::prelude::RoleId;
-use serenity::builder::{CreateApplicationCommandPermissionsData, CreateApplicationCommandPermissionData};
+use serenity::model::prelude::{CurrentUser, RoleId, Sticker, User, VoiceState};
+use serenity::builder::{CreateApplicationCommandPermissionsData, CreateApplicationCommandPermissionData, CreateEmbed};
 use serenity::model::interactions::application_command::ApplicationCommandPermissionType;
-use serenity::model::id::{GuildId};
-use serenity::model::gateway::GatewayIntents;
+use serenity::model::id::{ApplicationId, ChannelId, EmojiId, GuildId, IntegrationId, MessageId, StickerId};
+use serenity::model::gateway::{GatewayIntents, Presence};
 use serenity::{
     async_trait,
     model::{
@@ -40,6 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::{RwLockWriteGuard, Arc};
 use futures::executor::block_on;
 use std::fs::File;
+use std::panic::catch_unwind;
 use serenity::http::Http;
 
 use kube;
@@ -48,7 +49,15 @@ use k8s_openapi;
 use kube::api::ListParams;
 
 use redis;
-use redis::Commands;
+use redis::{Commands, from_redis_value, RedisResult};
+use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
+use serenity::json::Value;
+use serenity::model::application::command::CommandPermission;
+use serenity::model::channel::{Channel, ChannelCategory, GuildChannel, PartialGuildChannel, Reaction, StageInstance};
+use serenity::model::event::{ChannelPinsUpdateEvent, GuildMembersChunkEvent, GuildMemberUpdateEvent, GuildScheduledEventUserAddEvent, GuildScheduledEventUserRemoveEvent, InviteCreateEvent, InviteDeleteEvent, MessageUpdateEvent, ThreadListSyncEvent, ThreadMembersUpdateEvent, TypingStartEvent, VoiceServerUpdateEvent};
+use serenity::model::guild::automod::{ActionExecution, Rule};
+use serenity::model::guild::{Emoji, Guild, Integration, Member, PartialGuild, Role, ScheduledEvent, ThreadMember, UnavailableGuild};
+use serenity::utils::Colour;
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
 pub enum ConfigValue {
@@ -68,12 +77,50 @@ impl TypeMapKey for ConfigStruct {
 }
 
 
+/// Represents a Reddit post
+#[derive(Debug)]
+pub struct Post {
+    /// The score (upvotes-downvotes) of the post
+    score: i64,
+    /// A URl to the post
+    url: String,
+    title: String,
+    /// Embed URL of the post media
+    embed_url: String,
+    /// Name of the author of the post
+    author: String,
+    /// The post's unique ID
+    id: String,
+}
+
+#[derive(Debug)]
+pub struct FakeEmbed {
+    title: String,
+    description: String,
+    url: String,
+    color: Colour,
+    footer: String,
+    image: String,
+    thumbnail: String,
+}
+
+
+fn get_redis_con() -> redis::Connection {
+    let db_client = redis::Client::open("redis://redis/").unwrap();
+    return db_client.get_connection().expect("Can't connect to redis");
+}
+
+
 /// Returns current milliseconds since the Epoch
 fn get_epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+fn unbox<T>(value: Box<T>) -> T {
+    *value
 }
 
 /// Checks if a user is a bot administrator
@@ -91,47 +138,40 @@ async fn check_admin(user: serenity::model::user::User) -> bool { // Check if a 
     return admin == *user.id.as_u64();
 }
 
+async fn get_subreddit(command: &ApplicationCommandInteraction, ctx: &Context) -> FakeEmbed {
+    let mut con = get_redis_con();
 
-/// Check slash commands config for changes, and update
-async fn update_slash_commands(http: &Arc<Http>) {
-    let config = fs::read_to_string("/etc/config/slash-commands.json").expect("Couldn't read slash_commands.json");  // Read config file in
-    let config: Vec<HashMap<String, String>> = serde_json::from_str(&config)  // Convert config string into Vec of Hashmaps
-    .expect("slash_commands.json is not proper JSON");
+    let options = &command.data.options;
+    let subreddit = options[0].value.clone();
+    let subreddit = subreddit.unwrap();
+    let subreddit = subreddit.as_str().unwrap().to_string();
 
-    let mut new_config:Vec<HashMap<String, String>> = Vec::new();
-    for cur_command in config {
-        let empty = String::new();
-        let mut to_hash = String::new();
-        to_hash.push_str(cur_command.get("name").unwrap_or(&empty));
-        to_hash.push_str(cur_command.get("description").unwrap_or(&empty));
-        let old_hash:u64 = match cur_command.get("hash") {
-            Some(x) => x.parse().expect("Failed to parse hash"),
-            None => 0,
-        };
-        let mut hasher =  DefaultHasher::new();
-        to_hash.hash(&mut hasher);
-        let to_hash = hasher.finish();
+    let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 1).unwrap();
+    index -= 1;
+    let length: u16 = con.llen(format!("subreddit:{}:posts", &subreddit)).unwrap();
+    index = length - index - 1;
 
-        if &to_hash != &old_hash { // If changes have been made
-            ApplicationCommand::create_global_application_command(http, |command| {
-                command
-                    .name(cur_command.get("name").unwrap_or(&"".to_string()))
-                    .description(cur_command.get("description").unwrap_or(&"".to_string()))
-            }).await;
-            info!("Creating new command: {}", cur_command.get("name").unwrap_or(&"".to_string()));
-        }
-
-        let mut new_command: HashMap<String, String> = cur_command.clone();
-        new_command.insert("hash".to_string(), to_hash.to_string());
-        new_config.push(new_command);
-
+    if index >= length {
+        let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 0).unwrap();
+        index = 0;
     }
-    let json:String = serde_json::to_string(&new_config).expect("Failed to convert new config to json");
-    fs::write("slash_commands.json", &json).expect("Unable to write to slash_commands.json");
-}
 
-async fn get_subreddit(command: &ApplicationCommandInteraction, ctx: &Context) -> String {
-    return "passed".to_string();
+    let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 5*60).unwrap();
+
+    let post: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(index).arg(index).query(&mut con).unwrap();
+    let post: HashMap<String, redis::Value> = con.hgetall(&post[0]).unwrap();
+
+    let embed = FakeEmbed {
+        title: from_redis_value(&post.get("title").unwrap().clone()).unwrap(),
+        description: from_redis_value(&post.get("author").unwrap().clone()).unwrap(),
+        url: from_redis_value(&post.get("url").unwrap().clone()).unwrap(),
+        color: Colour::from_rgb(0, 255, 0),
+        footer: "".to_string(),
+        image: from_redis_value(&post.get("embed_url").unwrap().clone()).unwrap(),
+        thumbnail: "".to_string(),
+    };
+
+    return embed;
 }
 
 /// Discord event handler
@@ -144,6 +184,27 @@ impl EventHandler for Handler {
         info!("Shard {} connected as {}, on {} servers!", ready.shard.unwrap()[0], ready.user.name, ready.guilds.len());
         let guilds = ctx.cache.guild_count();
         let users = ctx.cache.user_count();
+
+        fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+        let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
+        file.write_all(b"alive").expect("Unable to write to /etc/probes/live");
+    }
+
+    /// Fires when the shard's status is updated
+    async fn shard_stage_update(&self, _: Context, event: ShardStageUpdateEvent) {
+        debug!("Shard stage changed");
+        let alive = match event.new {
+            serenity::gateway::ConnectionStage::Connected => true,
+            _ => false,
+        };
+
+        if alive {
+            fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+            let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
+            file.write_all(b"alive").expect("Unable to write to /etc/probes/live");
+        } else {
+            fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
+        }
     }
 
     /// Fires when a slash command or other interaction is received
@@ -158,17 +219,51 @@ impl EventHandler for Handler {
                     info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
                 }
             }
-            let content = match command.data.name.as_str() {
-                "ping" => "Hey, I'm alive!".to_string(),
-                "get_subreddit" => get_subreddit(&command, &ctx).await,
-                _ => "Encountered error, please report in support server: `interaction response not found`".to_string(),
+            let fake_embed = match command.data.name.as_str() {
+                "ping" => {
+                    FakeEmbed {
+                        title: "Pong!".to_string(),
+                        description: "".to_string(), // TODO - Add latency
+                        url: "".to_string(),
+                        color: Colour::from_rgb(0, 255, 0),
+                        footer: "".to_string(),
+                        image: "".to_string(),
+                        thumbnail: "".to_string(),
+                    }
+                },
+
+                "get" => {
+                    get_subreddit(&command, &ctx).await
+                },
+
+                _ => {
+                    FakeEmbed {
+                        title: "Unknown command".to_string(),
+                        description: "".to_string(),
+                        url: "".to_string(),
+                        color: Colour::from_rgb(255, 0, 0),
+                        footer: "".to_string(),
+                        image: "".to_string(),
+                        thumbnail: "".to_string(),
+                    }
+                }
             };
+
+            debug!("{:?}", fake_embed);
 
             if let Err(why) = command
                 .create_interaction_response(&ctx.http, |response| {
                     response
                         .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|message| message.content(content))
+                        .interaction_response_data(|message| message.embed(|e: &mut CreateEmbed| {
+                            e.title(fake_embed.title.clone())
+                                .description(fake_embed.description.clone())
+                                .url(fake_embed.url.clone())
+                                .color(fake_embed.color.clone())
+                                .image(fake_embed.image.clone())
+                                .thumbnail(fake_embed.thumbnail.clone())
+
+            }))
                 })
                 .await
             {
@@ -255,7 +350,14 @@ async fn main() {
        monitor_total_shards(shard_manager, total_shards).await;
     });
 
-    if let Err(why) = block_on(client.start_shard(shard_id, total_shards as u64)) {
-        error!("Client error: {:?}", why);
+    let thread = tokio::spawn(async move {
+       client.start_shard(shard_id, total_shards as u64).await;
+    });
+
+    match thread.await {
+        Ok(_) => {},
+        Err(_) => {
+            fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
+        }
     }
 }

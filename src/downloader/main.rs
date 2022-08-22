@@ -27,6 +27,8 @@ use rand::thread_rng;
 use rand::prelude::Distribution;
 use reqwest::header::{USER_AGENT, HeaderMap};
 use serenity::prelude::TypeMapKey;
+use std::env;
+use serde_json::Value::Null;
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
 pub enum ConfigValue {
@@ -75,7 +77,6 @@ impl From<Post> for Vec<(String, String)> {
     }
 }
 
-struct Handler;
 
 /// Returns current milliseconds since the Epoch
 fn get_epoch_ms() -> u64 {
@@ -83,76 +84,6 @@ fn get_epoch_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
-}
-
-/// Makes a websocket request to the [coordinator](coordinator)
-///
-/// Returns a String containing the coordinator's response.
-/// # Arguments
-/// ## data
-/// A thread-safe wrapper of the [Config](ConfigStruct)
-/// ## request
-/// A [HashMap](std::collections::HashMap) of [String](String) - [Value](serde_json::Value) mappings.
-async fn websocket_request(data: &mut Arc<Mutex<HashMap<String, ConfigValue>>>, request: HashMap<&str, serde_json::Value>) -> String {
-    let mut data = data.lock().await;
-    let request = serde_json::to_string(&request).unwrap();
-
-    let mut websocket_write = match data.get_mut("coordinator_write").unwrap() {
-        ConfigValue::websocket_write(x) => Ok(x),
-        _ => Err(0)
-    }.unwrap();
-
-    websocket_write.send(tungstenite::Message::from(request.as_bytes())).await;
-
-    let mut websocket_read = match data.get_mut("coordinator_read").unwrap() {
-        ConfigValue::websocket_read(x) => Ok(x),
-        _ => Err(0)
-    }.unwrap();
-
-
-    let resp = websocket_read.next().await;
-    let resp = resp.unwrap().unwrap().into_text().unwrap();
-
-    return resp;
-}
-
-/// Send a heartbeat to the coordinator
-///
-/// Returns the current time since the Epoch
-/// # Arguments
-/// ## data
-/// A thread-safe wrapper of the [Config](ConfigStruct)
-async fn send_heartbeat(data: &mut Arc<Mutex<HashMap<String, ConfigValue>>>) -> u64 {
-    let heartbeat = HashMap::from([("type", Value::from("heartbeat")), ("shard_id", Value::from(-1))]);
-    websocket_request(data, heartbeat).await;
-    return get_epoch_ms();
-}
-
-/// Starts the loop that sends heartbeats
-///
-/// # Arguments
-/// ## data
-/// A thread-safe wrapper of the [Config](ConfigStruct)
-/// ## initial_heartbeat
-/// The time at which the initial heartbeat was made on startup
-async fn heartbeat_loop(mut data: Arc<Mutex<HashMap<String, ConfigValue>>>, initial_heartbeat: u64) {
-    debug!("heartbeat_loop started");
-    let mut last_heartbeat = initial_heartbeat as isize;
-    loop {
-        if last_heartbeat == 0 {
-            warn!("NO HEARTBEAT");
-            sleep(Duration::from_millis(10000)).await; // Sleep until on_ready() has completed and first heartbeat is sent.
-            continue;
-        }
-        let mut time_to_heartbeat:isize = (last_heartbeat + 57000) - (get_epoch_ms() as isize);  // How long until we need to send a heartbeat
-        if time_to_heartbeat < 1500 {  // If less than 1.5 seconds until need to send a heartbeat
-            debug!("SENDING HEARTBEAT");
-            last_heartbeat = send_heartbeat(&mut data).await as isize;
-            debug!("Heartbeat sent");
-            time_to_heartbeat = 56000;
-        }
-        sleep(Duration::from_millis(time_to_heartbeat as u64)).await; // Sleep until we need to send a heartbeat
-    }
 }
 
 /// Request an access token from Reddit
@@ -251,7 +182,7 @@ async fn get_access_token(con: &mut redis::Connection, reddit_client: String, re
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>) { // Get the top 1000 most recent posts and store them in the DB
+async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut oauthToken) { // Get the top 1000 most recent posts and store them in the DB
     debug!("Placeholder: {:?}", subreddit);
 
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await;
@@ -333,19 +264,37 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
         // If removed_by_category is present then post is removed
         // For imgur, get url, and replace extension with .mp4 (might not have any extension), if url has gallery in it, get url from media/oembed/thumbnail_url and replace with .mp4 again
         // For i.redd.it just take the L and use the url
+        let post = post["data"].clone();
         debug!("{:?} - {:?}", post["title"], post["url"]);
         let mut url = post["url"].clone().to_string();
 
-        if post.get("removed_by_category").is_some() {
+        if post.get("removed_by_category").unwrap_or(&Null) == &Null {
+            debug!("Post removed by moderator");
             continue;
         }
 
-        if url.contains("gfycat") || url.contains("redgifs") {
-            url = post["media"]["oembed"]["thumbnail_url"].clone().to_string();
-            url = url.replace("thumbs", "giant");
-            url = url.replace("size-restricted", "");
-            url = url.replace(".gifv", ".mp4");
-            url = url.replace(".gif", ".mp4");
+        if post["author"].to_string().replace('"', "") == "[deleted]" {
+            debug!("Post removed by author");
+            continue;
+        }
+
+        if url.contains("gfycat") {
+            let id = url.split("/").last().unwrap().split(".").next().unwrap().replace('"', "");
+
+            if gfycat_token.expires_at < get_epoch_ms() - 1000 {
+                gfycat_token.refresh().await;
+            }
+
+            let auth = format!("Bearer {}", gfycat_token.token);
+
+            let res = web_client
+                .get(format!("https://api.gfycat.com/v1/gfycats/{}", id))
+                .header("Authorization", auth)
+                .send()
+                .await.expect("Failed to request from gfycat");
+
+            let results: serde_json::Value = res.json().await.unwrap();
+            url = results.get("gfyItem").unwrap().get("gifUrl").unwrap().to_string();
 
         } else if url.contains("imgur") {
             if url.contains("gallery") {
@@ -358,18 +307,29 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
             }
         }
 
-        let post = &post["data"];
+        let res = web_client
+            .head(&url)
+            .send()
+            .await.expect("Failed to send head request");
+
+        let length = res.content_length().unwrap_or(0);
+        if length > 15000000 {
+            debug!("Content bigger than 15MB, skipping."); // Otherwise Discord takes too long to load the content
+            continue;
+        }
+
+
         debug!("Post Score: {:?}", post["score"]);
         post_scores.push(post["score"].clone().as_i64().unwrap_or(0));
         debug!("Post Scores {:?}", post_scores);
 
         let post_object = Post {
             score: real_scores[post["id"].as_str().expect("Failed to convert post ID to str")],
-            url: post["full_link"].to_string(),
-            title: post["title"].to_string(),
-            embed_url: url.to_string(),
-            author: post["author"].to_string(),
-            id: post["id"].to_string(),
+            url: format!("https://reddit.com{}", post["permalink"].to_string().replace('"', "")),
+            title: post["title"].to_string().replace('"', ""),
+            embed_url: url.to_string().replace('"', ""),
+            author: post["author"].to_string().replace('"', ""),
+            id: post["id"].to_string().replace('"', ""),
         };
 
         posts.push(post_object);
@@ -405,7 +365,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
 
     let mut keys = Vec::new();
     for post in shuffled_posts {
-        let key = format!("subreddit:{}:post:{}", subreddit.clone(), post.id);
+        let key = format!("subreddit:{}:post:{}", subreddit.clone(), post.id.replace('"', ""));
         keys.push(key.clone());
         let value = Vec::from(post);
         let _:() = con.hset_multiple(key, &value).unwrap();
@@ -416,13 +376,55 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
     
 }
 
+#[derive(Debug)]
+struct oauthToken {
+    token: String,
+    expires_at: u64,
+    client_id: String,
+    client_secret: String,
+    url: String,
+}
+
+impl oauthToken {
+    async fn new(client_id: String, client_secret: String, url: String) -> oauthToken {
+        let web_client = reqwest::Client::new();
+
+        let mut post_data = HashMap::new();
+        post_data.insert("client_id", client_id.clone());
+        post_data.insert("client_secret", client_secret.clone());
+        post_data.insert("grant_type", "client_credentials".to_string());
+
+        let res = web_client
+        .post(&url)
+        .json(&post_data)
+        .send()
+        .await.expect(&*format!("Failed to request access token at {}", &url));
+
+        let results: serde_json::Value = res.json().await.unwrap();
+
+        return oauthToken {
+            token: results["access_token"].to_string(),
+            expires_at: results["expires_in"].as_u64().unwrap() + get_epoch_ms(),
+            client_id,
+            client_secret,
+            url,
+        };
+    }
+
+    async fn refresh(&mut self) {
+        let new = oauthToken::new(self.client_id.clone(), self.client_secret.clone(), self.url.clone()).await;
+        self.token = new.token;
+        self.expires_at = new.expires_at;
+    }
+}
+
 /// Start the downloading loop
 ///
 /// # Arguments
 /// ## data
 /// A thread-safe wrapper of the [Config](ConfigStruct)
 async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
-    let db_client = redis::Client::open("redis://127.0.0.1/").unwrap();
+    let db_client = redis::Client::open("redis://redis/").unwrap();
     let mut con = db_client.get_connection().expect("Can't connect to redis");
 
     let web_client = reqwest::Client::new();
@@ -442,6 +444,10 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
         }.clone();
     }
 
+    let gfycat_client = env::var("GFYCAT_CLIENT").expect("GFYCAT_CLIENT not set");
+    let gfycat_secret = env::var("GFYCAT_SECRET").expect("GFYCAT_SECRET not set");
+    let mut gfycat_token = oauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await;
+
     let mut last_run = 0;
     loop {
         if last_run > (get_epoch_ms() - 10000*60) { // Only download every 10 minutes, to avoid rate limiting (and also it's just not necessary)
@@ -450,23 +456,19 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
         }
         last_run = get_epoch_ms();
 
-        let get_subreddit_list = HashMap::from([("type", Value::from("get_subreddit_list"))]);
-        let resp = websocket_request(&mut data.clone(), get_subreddit_list).await;
-
-        debug!("Response to get_subreddit_list received: {:?}", resp);
-
-        let subreddits:Vec<String> = serde_json::from_str(&resp).unwrap();
+        let subreddits = env::var("SUBREDDIT_LIST").expect("SUBREDDIT_LIST not set");
+        let subreddits: Vec<&str> = subreddits.split(",").collect();
 
         for subreddit in subreddits {
             debug!("Getting subreddit: {:?}", subreddit);
             let last_updated = con.get(&subreddit).unwrap_or(0u64);
             debug!("{:?} was last updated at {:?}", &subreddit, last_updated);
-            get_subreddit(subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None).await;
+            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token).await;
             let _:() = con.set(&subreddit, get_epoch_ms()).unwrap();
-            debug!("Got subreddit: {:?}", subreddit);
+            info!("Got subreddit: {:?}", subreddit);
         }
 
-        debug!("All subreddits updated");
+        info!("All subreddits updated");
 
     }
 }
@@ -482,26 +484,10 @@ async fn main() {
     })
     .init();
 
-    let coordinator = tokio_tungstenite::connect_async("ws://127.0.0.1:9002").await.expect("Failed to connect to coordinator");
-    let response = coordinator.1.into_body();
-    let coordinator = coordinator.0;
-    let mut streams = coordinator.split();
-    let mut write = streams.0;
-    let read = streams.1;
-
-    let mut write = ConfigValue::websocket_write(write);
-
-    let config = fs::read_to_string("config.json").expect("Couldn't read config.json");  // Read config file in
-    let config: HashMap<String, serde_json::Value> = serde_json::from_str(&config)  // Convert config string into HashMap
-    .expect("config.json is not proper JSON");
-
-    let reddit_secret = config.get("reddit_secret").unwrap().as_str().unwrap();
-    let reddit_client = config.get("reddit_client").unwrap().as_str().unwrap();
+    let reddit_secret = env::var("REDDIT_TOKEN").expect("REDDIT_TOKEN not set");
+    let reddit_client = env::var("REDDIT_CLIENT_ID").expect("REDDIT_CLIENT_ID not set");
 
     let contents:HashMap<String, ConfigValue> = HashMap::from_iter([
-        ("coordinator_write".to_string(), write),
-        ("coordinator_read".to_string(), ConfigValue::websocket_read(read)),
-        ("last_heartbeat".to_string(), ConfigValue::U64(0)),
         ("reddit_secret".to_string(), ConfigValue::String(reddit_secret.to_string())),
         ("reddit_client".to_string(), ConfigValue::String(reddit_client.to_string())),
     ]);
@@ -509,9 +495,6 @@ async fn main() {
 
     let mut data = Arc::new(Mutex::new(contents));
 
-    let initial_heartbeat = send_heartbeat(&mut data).await;
-
-    debug!("Starting loops");
-    tokio::spawn(download_loop(data.clone()));
-    block_on(heartbeat_loop(data, initial_heartbeat));
+    info!("Starting loops");
+    download_loop(data.clone()).await;
 }
