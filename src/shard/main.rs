@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 use serenity::model::prelude::{CurrentUser, RoleId, Sticker, User, VoiceState};
 use serenity::builder::{CreateApplicationCommandPermissionsData, CreateApplicationCommandPermissionData, CreateEmbed};
 use serenity::model::interactions::application_command::ApplicationCommandPermissionType;
-use serenity::model::id::{ApplicationId, ChannelId, EmojiId, GuildId, IntegrationId, MessageId, StickerId};
+use serenity::model::id::{ApplicationId, ChannelId, EmojiId, GuildId, IntegrationId, MessageId, StickerId, UserId};
 use serenity::model::gateway::{GatewayIntents, Presence};
 use serenity::{
     async_trait,
@@ -42,6 +42,10 @@ use futures::executor::block_on;
 use std::fs::File;
 use std::panic::catch_unwind;
 use serenity::http::Http;
+use chrono::{DateTime, Utc};
+use chrono::prelude::*;
+use futures_util::TryStreamExt;
+
 
 use kube;
 use kube::ResourceExt;
@@ -50,13 +54,19 @@ use kube::api::ListParams;
 
 use redis;
 use redis::{Commands, from_redis_value, RedisResult};
+use mongodb::{Client, options::ClientOptions};
+use mongodb::bson::{doc, Document};
+use mongodb::options::FindOptions;
+
 use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
+use serenity::client::Cache;
 use serenity::json::Value;
-use serenity::model::application::command::CommandPermission;
+use serenity::model::application::command::{CommandOptionType, CommandPermission};
 use serenity::model::channel::{Channel, ChannelCategory, GuildChannel, PartialGuildChannel, Reaction, StageInstance};
 use serenity::model::event::{ChannelPinsUpdateEvent, GuildMembersChunkEvent, GuildMemberUpdateEvent, GuildScheduledEventUserAddEvent, GuildScheduledEventUserRemoveEvent, InviteCreateEvent, InviteDeleteEvent, MessageUpdateEvent, ThreadListSyncEvent, ThreadMembersUpdateEvent, TypingStartEvent, VoiceServerUpdateEvent};
 use serenity::model::guild::automod::{ActionExecution, Rule};
 use serenity::model::guild::{Emoji, Guild, Integration, Member, PartialGuild, Role, ScheduledEvent, ThreadMember, UnavailableGuild};
+use serenity::model::Timestamp;
 use serenity::utils::Colour;
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
@@ -64,7 +74,9 @@ pub enum ConfigValue {
     U64(u64),
     RoleId(RoleId),
     Bool(bool),
-    DB(redis::Connection)
+    REDIS(redis::Connection),
+    MONGODB(mongodb::Client),
+    SUBREDDIT_LIST(Vec<String>),
 }
 
 /// Stores config values required for operation of the downloader
@@ -93,15 +105,18 @@ pub struct Post {
     id: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FakeEmbed {
-    title: String,
-    description: String,
-    url: String,
-    color: Colour,
-    footer: String,
-    image: String,
-    thumbnail: String,
+    title: Option<String>,
+    description: Option<String>,
+    url: Option<String>,
+    color: Option<Colour>,
+    footer: Option<String>,
+    image: Option<String>,
+    thumbnail: Option<String>,
+    author: Option<String>,
+    timestamp: Option<u64>,
+    fields: Option<Vec<(String, String, bool)>>,
 }
 
 
@@ -138,47 +153,421 @@ async fn check_admin(user: serenity::model::user::User) -> bool { // Check if a 
     return admin == *user.id.as_u64();
 }
 
-async fn get_subreddit(command: &ApplicationCommandInteraction, ctx: &Context) -> FakeEmbed {
-    let mut con = get_redis_con();
+async fn get_subreddit(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
+    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+    let mut nsfw_subreddits = match data_mut.get_mut("nsfw_subreddits").unwrap() {
+        ConfigValue::SUBREDDIT_LIST(list) => list,
+        _ => panic!("nsfw_subreddits is not a list"),
+    };
+
+    let nsfw_subreddits = nsfw_subreddits.clone();
+
+    let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+        ConfigValue::REDIS(db) => Ok(db),
+        _ => Err(0),
+    }.unwrap();
+
 
     let options = &command.data.options;
     let subreddit = options[0].value.clone();
     let subreddit = subreddit.unwrap();
     let subreddit = subreddit.as_str().unwrap().to_string();
 
-    let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 1).unwrap();
+    if nsfw_subreddits.contains(&subreddit) {
+        let channel = command.channel_id.to_channel_cached(&ctx.cache).unwrap();
+        if !channel.is_nsfw() {
+            return FakeEmbed {
+                title: Some("NSFW subreddits can only be used in NSFW channels".to_string()),
+                author: None,
+                timestamp: None,
+                description: Some("Discord requires NSFW content to only be sent in NSFW channels, find out how to fix this [here](https://support.discord.com/hc/en-us/articles/115000084051-NSFW-Channels-and-Content)".to_string()),
+                url: None,
+                color: Some(Colour::from_rgb(255, 0, 0)),
+                footer: None,
+                image: None,
+                thumbnail: None,
+                fields: None,
+            }
+        }
+    }
+
+    let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 1i16).unwrap();
     index -= 1;
     let length: u16 = con.llen(format!("subreddit:{}:posts", &subreddit)).unwrap();
     index = length - index - 1;
 
     if index >= length {
-        let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 0).unwrap();
+        let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 0i16).unwrap();
         index = 0;
     }
 
     let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 5*60).unwrap();
 
-    let post: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(index).arg(index).query(&mut con).unwrap();
+    let post: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(index).arg(index).query(con).unwrap();
     let post: HashMap<String, redis::Value> = con.hgetall(&post[0]).unwrap();
 
     let embed = FakeEmbed {
-        title: from_redis_value(&post.get("title").unwrap().clone()).unwrap(),
-        description: from_redis_value(&post.get("author").unwrap().clone()).unwrap(),
-        url: from_redis_value(&post.get("url").unwrap().clone()).unwrap(),
-        color: Colour::from_rgb(0, 255, 0),
-        footer: "".to_string(),
-        image: from_redis_value(&post.get("embed_url").unwrap().clone()).unwrap(),
-        thumbnail: "".to_string(),
+        title: Some(from_redis_value(&post.get("title").unwrap().clone()).unwrap()),
+        description: None,
+        author: Some(from_redis_value(&post.get("author").unwrap().clone()).unwrap()),
+        url: Some(from_redis_value(&post.get("url").unwrap().clone()).unwrap()),
+        color: Some(Colour::from_rgb(0, 255, 0)),
+        footer: None,
+        image: Some(from_redis_value(&post.get("embed_url").unwrap().clone()).unwrap()),
+        thumbnail: None,
+        timestamp: Some(from_redis_value(post.get("timestamp").unwrap()).unwrap()),
+        fields: None,
     };
 
     return embed;
 }
+
+fn error_embed(code: &str) -> FakeEmbed {
+    return FakeEmbed {
+        title: Some("An Error Occurred".to_string()),
+        description: Some(format!("Please report this in the support server.\n Error: {}", code)),
+        author: None,
+        url: None,
+        color: Some(Colour::from_rgb(255, 0,0)),
+        footer: None,
+        image: None,
+        thumbnail: None,
+        timestamp: None,
+        fields: None,
+    };
+}
+
+
+async fn update_guild_commands(guild_id: GuildId, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) {
+    let mut mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
+        ConfigValue::MONGODB(db) => Ok(db),
+        _ => Err(0),
+    }.unwrap();
+
+    let db = mongodb_client.database("config");
+    let coll = db.collection::<Document>("settings");
+
+    let filter = doc! {"id": "subreddit_list".to_string()};
+    let find_options = FindOptions::builder().build();
+    let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
+
+    let doc = cursor.try_next().await.unwrap().unwrap();
+    let sfw_subreddits: Vec<&str> = doc.get_array("sfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
+    let nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
+
+
+    let guild_config = fetch_guild_config(guild_id, data, ctx.cache.clone()).await;
+    let nsfw = guild_config.get_str("nsfw").unwrap();
+
+    let _ = guild_id.create_application_command(&ctx.http, |command| {
+    command
+        .name("get")
+        .description("Get a post from a specified subreddit");
+
+    command.create_option(|option| {
+        option.name("subreddit")
+            .description("The subreddit to get a post from")
+            .required(true)
+            .kind(CommandOptionType::String);
+
+        if nsfw == "nsfw" || nsfw == "both" {
+            for subreddit in &nsfw_subreddits {
+                option.add_string_choice(subreddit, subreddit);
+            }
+        }
+        if nsfw == "non-nsfw" || nsfw == "both" {
+            for subreddit in &sfw_subreddits {
+                option.add_string_choice(subreddit, subreddit);
+            }
+        }
+
+        return option;
+    });
+
+    return command;
+    }).await.expect("Failed to register slash commands");
+
+}
+
+
+/// Fetches a guild's configuration, creating it if it doesn't exist.
+async fn fetch_guild_config(guild_id: GuildId, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, cache: Arc<Cache>) -> Document {
+    let mut mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
+        ConfigValue::MONGODB(db) => Ok(db),
+        _ => Err(0),
+    }.unwrap();
+
+    let db = mongodb_client.database("config");
+    let coll = db.collection::<Document>("servers");
+
+    let filter = doc! {"id": guild_id.0.to_string()};
+    let find_options = FindOptions::builder().build();
+    let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
+
+    return match cursor.try_next().await.unwrap() {
+        Some(doc) => doc, // If guild configuration does exist
+        None => { // If guild configuration doesn't exist
+            let mut nsfw = "";
+
+            // If the bot joined the guild before October 1st 2022, it joined as Booty Bot, not R Slash
+            if guild_id.to_guild_cached(cache).unwrap().joined_at < Timestamp::from_unix_timestamp(1664578800).unwrap() {
+                nsfw = "nsfw";
+            } else {
+                nsfw = "non-nsfw";
+            }
+
+            let server = doc! {
+                "id": guild_id.0.to_string(),
+                "nsfw": nsfw,
+            };
+
+            coll.insert_one(server, None).await.unwrap();
+            let mut cursor = coll.find(filter, find_options).await.unwrap();
+            cursor.try_next().await.unwrap().unwrap()
+        }
+    };
+}
+
+async fn set_guild_config(old_config: Document, config: Document, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>) {
+    let mut mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
+        ConfigValue::MONGODB(db) => Ok(db),
+        _ => Err(0),
+    }.unwrap();
+
+    let db = mongodb_client.database("config");
+    let coll = db.collection::<Document>("servers");
+    coll.replace_one(old_config, config, None).await.unwrap();
+}
+
+#[derive(Debug)]
+pub struct MembershipTier {
+    name: String,
+    since: i64,
+    until: i64,
+    active: bool,
+}
+
+#[derive(Debug)]
+pub struct MembershipTiers {
+    bronze: MembershipTier,
+}
+
+
+async fn get_user_tiers(user: UserId, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>) -> MembershipTiers {
+    let mut mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
+        ConfigValue::MONGODB(db) => Ok(db),
+        _ => Err(0),
+    }.unwrap();
+
+    let db = mongodb_client.database("payments");
+    let coll = db.collection::<Document>("users");
+
+    let filter = doc! {"discord_id": user.0.to_string()};
+    let find_options = FindOptions::builder().build();
+    let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
+
+    let doc = match cursor.try_next().await.unwrap() {
+        Some(doc) => doc, // If user information exists, return it
+        None => { // If user information doesn't exist, create and return it
+            let server = doc! {
+                "discord_id": user.0.to_string(),
+                "tiers": {
+                    "bronze": {
+                        "since": 0i64,
+                        "until": 0i64,
+                    }
+                },
+            };
+
+            coll.insert_one(server, None).await.unwrap();
+            let mut cursor = coll.find(filter, find_options).await.unwrap();
+            cursor.try_next().await.unwrap().unwrap()
+        }
+    };
+
+    let mut bronze = false;
+    if doc.get_document("tiers").unwrap().get_document("bronze").unwrap().get_i64("until").unwrap() > Timestamp::now().unix_timestamp() {
+        bronze = true;
+    }
+
+    return MembershipTiers {
+        bronze: MembershipTier {
+            name: "bronze".to_string(),
+            since: doc.get_document("tiers").unwrap().get_document("bronze").unwrap().get_i64("since").unwrap(),
+            until: doc.get_document("tiers").unwrap().get_document("bronze").unwrap().get_i64("until").unwrap(),
+            active: bronze,
+        },
+    };
+}
+
+
+async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
+    let tiers = get_user_tiers(command.user.id, data).await;
+    debug!("Tiers: {:?}", tiers);
+
+    let mut bronze = String::new();
+    if tiers.bronze.since == 0 {
+        bronze = "You have never had this tier.".to_string()
+    } else {
+        let since = NaiveDateTime::from_timestamp(tiers.bronze.since, 0).format("%Y-%m-%d %H:%M:%S");
+        let until = NaiveDateTime::from_timestamp(tiers.bronze.until, 0).format("%Y-%m-%d %H:%M:%S");
+        if tiers.bronze.active {
+            bronze = format!("First activated: {}\n Expires: {}", since, until);
+        } else {
+            bronze = format!("First activated: {}\n Expired: {}", since, until);
+        }
+    }
+
+    return FakeEmbed {
+        title: Some("Your membership tiers".to_string()),
+        description: None,
+        url: None,
+        fields: Some(vec![
+            ("Premium".to_string(), bronze, false),
+        ]),
+        author: None,
+        timestamp: None,
+        footer: None,
+        image: None,
+        color: None,
+        thumbnail: None
+    };
+}
+
+
+async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
+    let membership = get_user_tiers(command.user.id, data).await;
+    if !membership.bronze.active {
+        return FakeEmbed {
+            title: Some("Premium Feature".to_string()),
+            description: Some("You must have premium in order to use this command.".to_string()),
+            url: None,
+            color: Some(Colour::from_rgb(255, 0, 0)),
+            footer: None,
+            image: None,
+            thumbnail: None,
+            author: None,
+            timestamp: None,
+            fields: None,
+        }
+    }
+
+    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+    let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+        ConfigValue::REDIS(db) => Ok(db),
+        _ => Err(0),
+    }.unwrap();
+
+
+    let options = &command.data.options;
+    let subreddit = options[0].value.clone();
+    let subreddit = subreddit.unwrap();
+    let subreddit = subreddit.as_str().unwrap().to_string();
+
+    let last_cached: i64 = con.get(&format!("{}", subreddit)).unwrap_or(0);
+
+    let mut post: HashMap<String, redis::Value> = HashMap::new();
+    if last_cached +  3600000 < get_epoch_ms() as i64 {
+        debug!("Subreddit last cached more than an hour ago, updating...");
+        command.defer(&ctx.http).await;
+        let _:() = con.lpush("custom_subreddits_queue", subreddit.clone()).unwrap();
+        loop {
+            sleep(Duration::from_millis(100)).await;
+            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query(con) {
+                Ok(posts) => {
+                    posts
+                },
+                Err(e) => {
+                    continue;
+                }
+            };
+            if posts.len() > 0 {
+                post = con.hgetall(&posts[0]).unwrap();
+                break;
+            }
+        }
+    } else {
+        return get_subreddit(command, data, ctx).await;
+    }
+
+    return FakeEmbed {
+        title: Some(from_redis_value(&post.get("title").unwrap().clone()).unwrap()),
+        description: None,
+        author: Some(from_redis_value(&post.get("author").unwrap().clone()).unwrap()),
+        url: Some(from_redis_value(&post.get("url").unwrap().clone()).unwrap()),
+        color: Some(Colour::from_rgb(0, 255, 0)),
+        footer: None,
+        image: Some(from_redis_value(&post.get("embed_url").unwrap().clone()).unwrap()),
+        thumbnail: None,
+        timestamp: Some(from_redis_value(post.get("timestamp").unwrap()).unwrap()),
+        fields: None,
+    };
+}
+
+async fn configure_server(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
+    debug!("{:?}", command.data.options);
+
+    let mut embed = FakeEmbed {
+        title: None,
+        description: None,
+        author: None,
+        url: None,
+        color: None,
+        footer: None,
+        image: None,
+        thumbnail: None,
+        timestamp: None,
+        fields: None,
+    };
+
+    match command.data.options[0].name.as_str() {
+        "commands" => {
+            match command.data.options[0].options[0].name.as_str() {
+                "nsfw" => {
+                    let mut guild = fetch_guild_config(command.guild_id.unwrap(), data, ctx.cache.clone()).await;
+                    let old_config = guild.clone();
+                    let nsfw = command.data.options[0].options[0].options[0].value.clone().unwrap().to_string().replace('"', "");
+                    guild.insert("nsfw", &nsfw);
+
+                    set_guild_config(old_config, guild, data).await;
+
+
+                    embed.title = Some("Server Configuration Changed".to_string());
+                    embed.description = Some(format!("The server's nsfw configuration has been changed to {}", &nsfw));
+                    embed.color = Some(Colour::from_rgb(0, 255, 0));
+
+                    update_guild_commands(command.guild_id.unwrap(), data, ctx).await;
+                },
+                _ => {
+                    embed = error_embed("11615");
+                }
+
+            };
+        },
+        _ => {
+            embed = error_embed("171651");
+        }
+    }
+
+
+    return embed;
+}
+
 
 /// Discord event handler
 struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
+    /// Fires when the client receives new data about a guild
+    async fn guild_create(&self, ctx: Context, guild: Guild, is_new: bool) {
+        if is_new { // First time client has seen the guild
+            update_guild_commands(guild.id, &mut ctx.data.write().await, &ctx).await;
+        }
+    }
+
     /// Fires when the client is connected to the gateway
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("Shard {} connected as {}, on {} servers!", ready.shard.unwrap()[0], ready.user.name, ready.guilds.len());
@@ -222,52 +611,173 @@ impl EventHandler for Handler {
             let fake_embed = match command.data.name.as_str() {
                 "ping" => {
                     FakeEmbed {
-                        title: "Pong!".to_string(),
-                        description: "".to_string(), // TODO - Add latency
-                        url: "".to_string(),
-                        color: Colour::from_rgb(0, 255, 0),
-                        footer: "".to_string(),
-                        image: "".to_string(),
-                        thumbnail: "".to_string(),
+                        title: Some("Pong!".to_string()),
+                        author: None,
+                        description: None, // TODO - Add latency
+                        url: None,
+                        color: Some(Colour::from_rgb(0, 255, 0)),
+                        footer: None,
+                        image: None,
+                        thumbnail: None,
+                        timestamp: None,
+                        fields: None,
                     }
                 },
 
                 "get" => {
-                    get_subreddit(&command, &ctx).await
+                    let mut data = ctx.data.write().await;
+                    get_subreddit(&command, &mut data, &ctx).await
+                },
+
+                "membership" => {
+                    let mut data = ctx.data.write().await;
+                    cmd_get_user_tiers(&command, &mut data, &ctx).await
+                },
+
+                "configure-server" => {
+                    let mut data = ctx.data.write().await;
+                    configure_server(&command, &mut data, &ctx).await
+                },
+
+                "custom" => {
+                    let mut data = ctx.data.write().await;
+                    get_custom_subreddit(&command, &mut data, &ctx).await
                 },
 
                 _ => {
                     FakeEmbed {
-                        title: "Unknown command".to_string(),
-                        description: "".to_string(),
-                        url: "".to_string(),
-                        color: Colour::from_rgb(255, 0, 0),
-                        footer: "".to_string(),
-                        image: "".to_string(),
-                        thumbnail: "".to_string(),
+                        title: Some("Unknown command".to_string()),
+                        author: None,
+                        description: None,
+                        url: None,
+                        color: Some(Colour::from_rgb(255, 0, 0)),
+                        footer: None,
+                        image: None,
+                        thumbnail: None,
+                        timestamp: None,
+                        fields: None,
                     }
                 }
             };
 
             debug!("{:?}", fake_embed);
 
+            let fake_embed_2 = fake_embed.clone();
             if let Err(why) = command
                 .create_interaction_response(&ctx.http, |response| {
                     response
                         .kind(InteractionResponseType::ChannelMessageWithSource)
                         .interaction_response_data(|message| message.embed(|e: &mut CreateEmbed| {
-                            e.title(fake_embed.title.clone())
-                                .description(fake_embed.description.clone())
-                                .url(fake_embed.url.clone())
-                                .color(fake_embed.color.clone())
-                                .image(fake_embed.image.clone())
-                                .thumbnail(fake_embed.thumbnail.clone())
+                            if (fake_embed.timestamp.is_some()) {
+                                e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(fake_embed.timestamp.unwrap() as i64).unwrap());
+                            }
+
+                            if (fake_embed.footer.is_some()) {
+                                let text = fake_embed.footer.unwrap();
+                                e.footer(|footer| {
+                                    footer.text(text)
+                                });
+                            }
+
+                            if (fake_embed.fields.is_some()) {
+                                e.fields(fake_embed.fields.unwrap());
+                            }
+
+                            if (fake_embed.color.is_some()) {
+                                e.colour(fake_embed.color.unwrap());
+                            }
+
+                            if (fake_embed.description.is_some()) {
+                                e.description(fake_embed.description.unwrap());
+                            }
+
+                            if (fake_embed.title.is_some()) {
+                                e.title(fake_embed.title.unwrap());
+                            }
+
+                            if (fake_embed.url.is_some()) {
+                                e.url(fake_embed.url.unwrap().clone());
+                            }
+
+                            if (fake_embed.author.is_some()) {
+                                let name = fake_embed.author.unwrap();
+                                e.author(|author| {
+                                    author.name(&name)
+                                        .url(format!("https://reddit.com/u/{}", name))
+                                });
+                            }
+
+                            if (fake_embed.thumbnail.is_some()) {
+                                e.thumbnail(fake_embed.thumbnail.unwrap());
+                            }
+
+                            if (fake_embed.image.is_some()) {
+                                e.image(fake_embed.image.unwrap());
+                            }
+
+                            return e;
 
             }))
                 })
                 .await
             {
-                warn!("Cannot respond to slash command: {}", why);
+                let fake_embed = fake_embed_2;
+                if format!("{}", why) == "Interaction has already been acknowledged." {
+                    command.create_followup_message(&ctx.http, |message| {
+                        message.embed(|e| {
+                                                        if (fake_embed.timestamp.is_some()) {
+                                e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(fake_embed.timestamp.unwrap() as i64).unwrap());
+                            }
+
+                            if (fake_embed.footer.is_some()) {
+                                let text = fake_embed.footer.unwrap();
+                                e.footer(|footer| {
+                                    footer.text(text)
+                                });
+                            }
+
+                            if (fake_embed.fields.is_some()) {
+                                e.fields(fake_embed.fields.unwrap());
+                            }
+
+                            if (fake_embed.color.is_some()) {
+                                e.colour(fake_embed.color.unwrap());
+                            }
+
+                            if (fake_embed.description.is_some()) {
+                                e.description(fake_embed.description.unwrap());
+                            }
+
+                            if (fake_embed.title.is_some()) {
+                                e.title(fake_embed.title.unwrap());
+                            }
+
+                            if (fake_embed.url.is_some()) {
+                                e.url(fake_embed.url.unwrap().clone());
+                            }
+
+                            if (fake_embed.author.is_some()) {
+                                let name = fake_embed.author.unwrap();
+                                e.author(|author| {
+                                    author.name(&name)
+                                        .url(format!("https://reddit.com/u/{}", name))
+                                });
+                            }
+
+                            if (fake_embed.thumbnail.is_some()) {
+                                e.thumbnail(fake_embed.thumbnail.unwrap());
+                            }
+
+                            if (fake_embed.image.is_some()) {
+                                e.image(fake_embed.image.unwrap());
+                            }
+
+                            return e;
+                        })
+                    } ).await;
+                } else {
+                    warn!("Cannot respond to slash command: {}", why);
+                }
             }
         }
     }
@@ -279,7 +789,7 @@ async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge:
     let mut con = db_client.get_connection().expect("Can't connect to redis");
 
     loop {
-        let _ = sleep(Duration::from_secs(60));
+        let _ = sleep(Duration::from_secs(60)).await;
 
         let db_total_shards: redis::RedisResult<u64> = con.get("total_shards");
         let db_total_shards: u64 = db_total_shards.expect("Failed to get or convert total_shards");
@@ -307,8 +817,23 @@ async fn main() {
     let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
     let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
 
-    let db_client = redis::Client::open("redis://redis/").unwrap();
-    let mut con = db_client.get_connection().expect("Can't connect to redis");
+    let redis_client = redis::Client::open("redis://redis/").unwrap();
+    let mut con = redis_client.get_connection().expect("Can't connect to redis");
+
+    let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+    client_options.app_name = Some(format!("Shard {}", shard_id));
+
+    let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
+    let db = mongodb_client.database("config");
+    let coll = db.collection::<Document>("settings");
+
+    let filter = doc! {"id": "subreddit_list".to_string()};
+    let find_options = FindOptions::builder().build();
+    let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
+
+    let doc = cursor.try_next().await.unwrap().unwrap();
+
+    let nsfw_subreddits: Vec<String> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap().to_string()).collect();
 
     let total_shards: redis::RedisResult<u64> = con.get("total_shards");
     let total_shards: u64 = total_shards.expect("Failed to get or convert total_shards");
@@ -328,7 +853,7 @@ async fn main() {
     warn!("Printing warn");
     error!("Printing error");
 
-    let mut client = Client::builder(token,  GatewayIntents::non_privileged() | GatewayIntents::GUILD_MEMBERS)
+    let mut client = serenity::Client::builder(token,  GatewayIntents::non_privileged() | GatewayIntents::GUILD_MEMBERS)
         .event_handler(Handler)
         .application_id(application_id)
         .await
@@ -336,7 +861,9 @@ async fn main() {
 
     let contents:HashMap<String, ConfigValue> = HashMap::from_iter([
         ("shard_id".to_string(), ConfigValue::U64(shard_id as u64)),
-        ("db_connection".to_string(), ConfigValue::DB(con)),
+        ("redis_connection".to_string(), ConfigValue::REDIS(con)),
+        ("mongodb_connection".to_string(), ConfigValue::MONGODB(mongodb_client)),
+        ("nsfw_subreddits".to_string(), ConfigValue::SUBREDDIT_LIST(nsfw_subreddits))
     ]);
 
     {

@@ -42,11 +42,16 @@ spec:
                 secretKeyRef:
                     name: gfycat-credentials
                     key: GFYCAT_SECRET
-            - name: SUBREDDIT_LIST
+            - name: IMGUR_CLIENT
               valueFrom:
                 secretKeyRef:
-                  name: configuration
-                  key: SUBREDDIT_LIST
+                    name: imgur-credentials
+                    key: IMGUR_CLIENT
+            - name: IMGUR_SECRET
+              valueFrom:
+                secretKeyRef:
+                    name: imgur-credentials
+                    key: IMGUR_SECRET
             - name: RUST_LOG
               value: "downloader=debug"
       imagePullSecrets:

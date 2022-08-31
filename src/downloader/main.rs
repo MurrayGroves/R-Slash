@@ -28,7 +28,12 @@ use rand::prelude::Distribution;
 use reqwest::header::{USER_AGENT, HeaderMap};
 use serenity::prelude::TypeMapKey;
 use std::env;
+use futures_util::TryStreamExt;
+use k8s_openapi::chrono::NaiveDateTime;
+use mongodb::bson::{doc, Document};
+use mongodb::options::{ClientOptions, FindOptions};
 use serde_json::Value::Null;
+
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
 pub enum ConfigValue {
@@ -49,7 +54,7 @@ impl TypeMapKey for ConfigStruct {
 }
 
 /// Represents a Reddit post
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Post {
     /// The score (upvotes-downvotes) of the post
     score: i64,
@@ -62,6 +67,8 @@ pub struct Post {
     author: String,
     /// The post's unique ID
     id: String,
+    /// The timestamp of the post's creation
+    timestamp: u64,
 }
 
 impl From<Post> for Vec<(String, String)> {
@@ -72,7 +79,8 @@ impl From<Post> for Vec<(String, String)> {
             ("title".to_string(), post.title.to_string()),
             ("embed_url".to_string(), post.embed_url.to_string()),
             ("author".to_string(), post.author.to_string()),
-            ("id".to_string(), post.id.to_string())
+            ("id".to_string(), post.id.to_string()),
+            ("timestamp".to_string(), post.timestamp.to_string())
         ]
     }
 }
@@ -182,161 +190,193 @@ async fn get_access_token(con: &mut redis::Connection, reddit_client: String, re
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut oauthToken) { // Get the top 1000 most recent posts and store them in the DB
+async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut oauthToken, imgur_client: String) { // Get the top 1000 most recent posts and store them in the DB
     debug!("Placeholder: {:?}", subreddit);
 
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await;
 
-    let mut posts = Vec::new();
-
-    let url_base = format!("https://api.pushshift.io/reddit/search/submission/?size=100&subreddit={}&domain=imgur.com,i.redd.it,redgifs.com,gfycat.com&user_removed=false&mod_removed=false", subreddit);
+    let mut keys = Vec::new();
+    let url_base = format!("https://reddit.com/r/{}/hot.json?limit=100", subreddit);
     let mut url = String::new();
-    let mut real_scores:HashMap<String, i64> = HashMap::new();
+    let mut after = String::new();
     for x in 0..10 {
-        let mut listing_ids = String::new();
-
-        debug!("Making {}th request to pushshift", x);
+        debug!("Making {}th request to reddit", x);
 
         if url.len() == 0 {
             url = url_base.clone();
         }
 
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, "Discord:RSlash:v1.0.0 (by /u/murrax2)".parse().unwrap());
+        headers.insert("Authorization", format!("bearer {}", access_token.clone()).parse().unwrap());
+
+        debug!("{}", url);
         let res = web_client
             .get(&url)
+            .headers(headers)
             .send()
-            .await.expect("Failed to request from pushshift");
+            .await.expect("Failed to request from reddit");
+
+        let last_requested = get_epoch_ms();
 
         let results: serde_json::Value = res.json().await.unwrap();
-        let results = results.get("data").unwrap().as_array().unwrap();
+        let results = results.get("data").unwrap().get("children").unwrap().as_array().unwrap();
 
-        let before = results[results.len() - 1]["created_utc"].clone();
-        url = format!("{}&before={}", url_base, before);
-        debug!("{}", url);
+        if results.len() == 0 {
+            break;
+        }
 
-        let mut batch_size = 0;
-        for post in results.clone() {
-            let id = post["id"].as_str().expect("Failed to convert ID to str");
-            listing_ids = format!("t3_{},{}", id, listing_ids);
-            batch_size += 1;
-            if batch_size >= 25 {
-                let score_url = format!("https://reddit.com/by_id/{}.json", listing_ids);
-                debug!("{}", score_url);
+        after = results[results.len() -1 ]["data"]["id"].as_str().unwrap().to_string();
+        url = format!("{}&after=t3_{}", url_base, after);
 
-                let mut headers = HeaderMap::new();
-                headers.insert(USER_AGENT, "Discord:RSlash:v1.0.0 (by /u/murrax2)".parse().unwrap());
-                headers.insert("Authorization", format!("bearer {}", access_token.clone()).parse().unwrap());
+        let mut posts = Vec::new();
+        for post in results {
+            // For gfycat get media/oembed/thumbnail_url, replace thumbs with giant, and remove size-restricted, and replace .gif with .mp4
+            // If removed_by_category is present then post is removed
+            // For imgur, get url, and replace extension with .mp4 (might not have any extension), if url has gallery in it, get url from media/oembed/thumbnail_url and replace with .mp4 again
+            // For i.redd.it just take the L and use the url
+            let post = post["data"].clone();
+            debug!("{:?} - {:?}", post["title"], post["url"]);
+            let mut url = post["url"].clone().to_string();
 
-                let res = web_client
-                    .get(&score_url)
-                    .headers(headers)
-                    .send()
-                    .await.expect("Failed to request from reddit api");
+            if post.get("removed_by_category").unwrap_or(&Null) != &Null {
+                debug!("Post removed by moderator");
+                continue;
+            }
 
-                let full_resp = res.text().await.unwrap();
-                let results: serde_json::Value = full_resp.parse().unwrap();
-                //debug!("Results: {:?}", results);
-                let results = results.get("data").unwrap();
-                let results = results.get("children").unwrap().as_array().unwrap();
-                {
-                    for post in results {
-                        let post = &post["data"];
-                        //debug!("{:?}", post["id"]);
-                        //debug!("{:?}", post);
-                        real_scores.insert(post["id"].as_str().unwrap().to_string(), post["score"].as_i64().unwrap_or(0));
-                    }
+            if post["author"].to_string().replace('"', "") == "[deleted]" {
+                debug!("Post removed by author");
+                continue;
+            }
+
+            if url.contains("gfycat") {
+                let id = url.split("/").last().unwrap().split(".").next().unwrap().replace('"', "");
+                debug!("{}", id);
+
+                if gfycat_token.expires_at < get_epoch_ms() - 1000 {
+                    gfycat_token.refresh().await;
                 }
 
-                posts = [posts, results.clone()].concat();
-                batch_size = 0;
-                listing_ids = String::new();
-                sleep(Duration::from_millis(2000)).await; // Reddit rate limit is 30 requests per minute
+                let auth = format!("Bearer {}", gfycat_token.token);
+
+                let res = web_client
+                    .get(format!("https://api.gfycat.com/v1/gfycats/{}", id))
+                    .header("Authorization", auth)
+                    .send()
+                    .await.expect("Failed to request from gfycat");
+
+                let results: serde_json::Value = res.json().await.unwrap();
+                let result = results.get("gfyItem");
+                match result {
+                    Some(x) => {
+                        url = x.get("gifUrl").unwrap().to_string();
+                    },
+                    None => {continue},
+                };
+
+            } else if url.contains("imgur") {
+                let auth = format!("Client-ID {}", imgur_client);
+                let id = url.split("/").last().unwrap().split(".").next().unwrap().split("?").next().unwrap().replace('"', "");
+
+                let res = web_client
+                    .get(format!("https://api.imgur.com/3/albums/{}", id))
+                    .header("Authorization", auth)
+                    .send()
+                    .await.expect("Failed to request from imgur");
+
+                if res.status() != 200 {
+                    debug!("{} while fetching from imgur", res.status());
+                    continue
+                }
+                let results: serde_json::Value = res.json().await.unwrap();
+                url = results.get("data").unwrap().get("images").unwrap()[0].get("link").unwrap().to_string().replace(".gifv", ".gif");
+
+            } else if url.contains("redgifs") {
+                // TODO - This needs to be replaced with the newer API once I have the keys
+                let id = url.split("/").last().unwrap().split(".").next().unwrap().split("?").next().unwrap().replace('"', "");
+                debug!("{}", id);
+
+                if gfycat_token.expires_at < get_epoch_ms() - 1000 {
+                    gfycat_token.refresh().await;
+                }
+
+                let auth = format!("Bearer {}", gfycat_token.token);
+
+                let res = web_client
+                    .get(format!("https://api.redgifs.com/v1/gfycats/{}", id))
+                    .header("Authorization", auth)
+                    .send()
+                    .await.expect("Failed to request from redgifs");
+
+                let results: serde_json::Value = res.json().await.unwrap();
+                let result = results.get("gfyItem");
+                match result {
+                    Some(x) => {
+                        url = x.get("gifUrl").unwrap().to_string();
+                    },
+                    None => {continue},
+                };
+
+            } else if url.contains("i.redd.it") == false  && url.contains(".gif") == false  && url.contains(".jpg") == false  && url.contains(".png") == false {
+                // URL is not embeddable, and we do not have the ability to turn it into one.
+                continue;
             }
-        }
-    }
 
-    let results = posts.clone();
-
-    let mut posts = Vec::new();
-    let mut post_scores = Vec::new();
-
-    for post in results {
-        // For gfycat get media/oembed/thumbnail_url, replace thumbs with giant, and remove size-restricted, and replace .gif with .mp4
-        // If removed_by_category is present then post is removed
-        // For imgur, get url, and replace extension with .mp4 (might not have any extension), if url has gallery in it, get url from media/oembed/thumbnail_url and replace with .mp4 again
-        // For i.redd.it just take the L and use the url
-        let post = post["data"].clone();
-        debug!("{:?} - {:?}", post["title"], post["url"]);
-        let mut url = post["url"].clone().to_string();
-
-        if post.get("removed_by_category").unwrap_or(&Null) == &Null {
-            debug!("Post removed by moderator");
-            continue;
-        }
-
-        if post["author"].to_string().replace('"', "") == "[deleted]" {
-            debug!("Post removed by author");
-            continue;
-        }
-
-        if url.contains("gfycat") {
-            let id = url.split("/").last().unwrap().split(".").next().unwrap().replace('"', "");
-
-            if gfycat_token.expires_at < get_epoch_ms() - 1000 {
-                gfycat_token.refresh().await;
-            }
-
-            let auth = format!("Bearer {}", gfycat_token.token);
-
+            url = url.replace('"', "");
             let res = web_client
-                .get(format!("https://api.gfycat.com/v1/gfycats/{}", id))
-                .header("Authorization", auth)
+                .head(&url)
                 .send()
-                .await.expect("Failed to request from gfycat");
+                .await.expect("Failed to send head request");
 
-            let results: serde_json::Value = res.json().await.unwrap();
-            url = results.get("gfyItem").unwrap().get("gifUrl").unwrap().to_string();
-
-        } else if url.contains("imgur") {
-            if url.contains("gallery") {
-                url = post["media"]["oembed"]["thumbnail_url"].clone().to_string();
-                url = url.replace(".gifv", ".mp4");
-                url = url.replace(".gif", ".mp4");
-            } else {
-                url = url.replace(".gifv", ".mp4");
-                url = url.replace(".gif", ".mp4");
+            let length = res.content_length().unwrap_or(0);
+            if length > 15000000 {
+                debug!("Content bigger than 15MB, skipping."); // Otherwise Discord takes too long to load the content
+                continue;
             }
+
+
+            debug!("Post Score: {:?}", post["score"]);
+            //post_scores.push(post["score"].clone().as_i64().unwrap_or(0));
+            //debug!("Post Scores {:?}", post_scores);
+
+            let timestamp = post["created_utc"].as_f64().unwrap() as u64;
+
+            let post_object = Post {
+                score: post["score"].as_i64().unwrap_or(0),
+                url: format!("https://reddit.com{}", post["permalink"].to_string().replace('"', "")),
+                title: post["title"].to_string().replace('"', ""),
+                embed_url: url.to_string().replace('"', ""),
+                author: post["author"].to_string().replace('"', ""),
+                id: post["id"].to_string().replace('"', ""),
+                timestamp: timestamp,
+            };
+
+            posts.push(post_object);
         }
 
-        let res = web_client
-            .head(&url)
-            .send()
-            .await.expect("Failed to send head request");
-
-        let length = res.content_length().unwrap_or(0);
-        if length > 15000000 {
-            debug!("Content bigger than 15MB, skipping."); // Otherwise Discord takes too long to load the content
-            continue;
+        for post in posts.clone() {
+            let key = format!("subreddit:{}:post:{}", subreddit.clone(), post.id.replace('"', ""));
+            keys.push(key.clone());
+            let value = Vec::from(post);
+            let _:() = con.hset_multiple(key, &value).unwrap();
         }
 
+        let _:() = con.del(format!("subreddit:{}:posts", subreddit)).unwrap();
+        let _:() = con.lpush(format!("subreddit:{}:posts", subreddit), keys.clone()).unwrap();
 
-        debug!("Post Score: {:?}", post["score"]);
-        post_scores.push(post["score"].clone().as_i64().unwrap_or(0));
-        debug!("Post Scores {:?}", post_scores);
-
-        let post_object = Post {
-            score: real_scores[post["id"].as_str().expect("Failed to convert post ID to str")],
-            url: format!("https://reddit.com{}", post["permalink"].to_string().replace('"', "")),
-            title: post["title"].to_string().replace('"', ""),
-            embed_url: url.to_string().replace('"', ""),
-            author: post["author"].to_string().replace('"', ""),
-            id: post["id"].to_string().replace('"', ""),
-        };
-
-        posts.push(post_object);
+        let time_since_request = get_epoch_ms() - last_requested;
+        if time_since_request < 2000 {
+            debug!("Waiting {:?}ms", 2000 - time_since_request);
+            sleep(Duration::from_millis(2000 - time_since_request)).await; // Reddit rate limit is 30 requests per minute, so must wait at least 2 seconds between requests
+        }
     }
 
-    debug!("Length of posts: {}", posts.len());
 
+    //let mut post_scores = Vec::new();
+
+
+
+    /*
     // Normalise post_scores to all be bigger than 0
     let minimum = post_scores.iter().min().unwrap();
 
@@ -361,19 +401,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
     }
 
     debug!("Shuffled Posts: {:?}", shuffled_posts);
-    debug!("Length of shuffled posts: {:?}", shuffled_posts.len());
-
-    let mut keys = Vec::new();
-    for post in shuffled_posts {
-        let key = format!("subreddit:{}:post:{}", subreddit.clone(), post.id.replace('"', ""));
-        keys.push(key.clone());
-        let value = Vec::from(post);
-        let _:() = con.hset_multiple(key, &value).unwrap();
-    }
-
-    let _:() = con.del(format!("subreddit:{}:posts", subreddit)).unwrap();
-    let _:() = con.lpush(format!("subreddit:{}:posts", subreddit), keys).unwrap();
-    
+    debug!("Length of shuffled posts: {:?}", shuffled_posts.len()); */
 }
 
 #[derive(Debug)]
@@ -446,24 +474,60 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
 
     let gfycat_client = env::var("GFYCAT_CLIENT").expect("GFYCAT_CLIENT not set");
     let gfycat_secret = env::var("GFYCAT_SECRET").expect("GFYCAT_SECRET not set");
+    let imgur_client = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
     let mut gfycat_token = oauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await;
+
+    let mut client_options = mongodb::options::ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+    client_options.app_name = Some("Downloader".to_string());
+
+    let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
+
 
     let mut last_run = 0;
     loop {
         if last_run > (get_epoch_ms() - 10000*60) { // Only download every 10 minutes, to avoid rate limiting (and also it's just not necessary)
-            sleep(Duration::from_millis((last_run + 10000*60) - get_epoch_ms())).await;
+            sleep(Duration::from_millis(100)).await;
+            let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(0i64).query(&mut con).unwrap();
+            if custom_subreddits.len() > 0 {
+                let custom = custom_subreddits[0].clone();
+                get_subreddit(custom.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone()).await;
+                let _:() = con.set(&custom, get_epoch_ms()).unwrap();
+                info!("Got custom subreddit: {:?}", custom);
+                let _:() = con.lrem("custom_subreddits_queue", 0, custom).unwrap();
+            }
             continue;
         }
         last_run = get_epoch_ms();
 
-        let subreddits = env::var("SUBREDDIT_LIST").expect("SUBREDDIT_LIST not set");
-        let subreddits: Vec<&str> = subreddits.split(",").collect();
+        let db = mongodb_client.database("config");
+        let coll = db.collection::<Document>("settings");
+
+        let filter = doc! {"id": "subreddit_list".to_string()};
+        let find_options = FindOptions::builder().build();
+        let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
+
+        let doc = cursor.try_next().await.unwrap().unwrap();
+        let mut sfw_subreddits: Vec<&str> = doc.get_array("sfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
+        let mut nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
+
+        let mut subreddits = Vec::new();
+        subreddits.append(&mut sfw_subreddits);
+        subreddits.append(&mut nsfw_subreddits);
 
         for subreddit in subreddits {
             debug!("Getting subreddit: {:?}", subreddit);
             let last_updated = con.get(&subreddit).unwrap_or(0u64);
             debug!("{:?} was last updated at {:?}", &subreddit, last_updated);
-            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token).await;
+
+            let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(0i64).query(&mut con).unwrap();
+            if custom_subreddits.len() > 0 {
+                let custom = custom_subreddits[0].clone();
+                get_subreddit(custom.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone()).await;
+                let _:() = con.set(&custom, get_epoch_ms()).unwrap();
+                info!("Got custom subreddit: {:?}", custom);
+                let _:() = con.lrem("custom_subreddits_queue", 0, custom).unwrap();
+            }
+            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone()).await;
             let _:() = con.set(&subreddit, get_epoch_ms()).unwrap();
             info!("Got subreddit: {:?}", subreddit);
         }

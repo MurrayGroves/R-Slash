@@ -112,3 +112,13 @@ type: Opaque
 stringData:
     GFYCAT_CLIENT: "2_CJUJYg"
     GFYCAT_SECRET: "sOpBYyzZeewcGgYf264SFnHeggtmBq7MfrE8l_1ZvxDFWSn1fAQlLBDfbc0eMuhM"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: imgur-credentials
+type: Opaque
+stringData:
+    IMGUR_CLIENT: "63f81848dd5f5a1"
+    IMGUR_SECRET: "8e4fac15622062409e53d1d4c2ce1d3cecb914a7"

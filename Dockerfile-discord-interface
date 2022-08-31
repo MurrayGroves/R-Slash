@@ -4,5 +4,10 @@ FROM ubuntu:latest
 ADD "http://security.debian.org/debian-security/pool/updates/main/o/openssl/libssl1.1_1.1.0l-1~deb9u6_amd64.deb" .
 RUN dpkg -i libssl1.1*deb
 
+RUN apt-get -qq update
+RUN apt-get -qq install -y curl
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+RUN install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
 ADD target/debug/discord-interface /usr/bin/discord-interface
 ENTRYPOINT ["/usr/bin/discord-interface"]

@@ -9,18 +9,26 @@ use std::collections::HashMap;
 use std::fs::read;
 use std::thread::current;
 use std::convert::TryInto;
+use std::sync::Arc;
 use tokio::time::sleep;
 use std::time::Duration;
 use kube::api::Patch;
 use base64;
-use serenity::Client;
+use futures_util::TryStreamExt;
 use serenity::client::{Context, EventHandler};
-use serenity::prelude::{GatewayIntents, TypeMapKey};
+use serenity::prelude::{GatewayIntents, TypeMap, TypeMapKey};
 use serenity::async_trait;
 use serenity::builder::CreateApplicationCommandOption;
 use serenity::model::application::command::{Command, CommandOptionType};
 use serenity::model::gateway::Ready;
 use serenity::model::interactions::application_command::ApplicationCommand;
+
+use mongodb::{Client, options::ClientOptions};
+use mongodb::bson::{doc, Document};
+use mongodb::options::FindOptions;
+use serenity::cache::Cache;
+use serenity::model::id::GuildId;
+use serenity::model::Timestamp;
 
 /*let client_k8s = kube::Client::try_default().await.expect("Failed to connect to k8s");
 
@@ -200,6 +208,41 @@ async fn start() {
     let _:() = con.set("manual_sharding", "false").expect("Failed to set manual_sharding"); // Tells discord-interface to take control of sharding again
 }
 
+
+/// Fetches a guild's configuration, creating it if it doesn't exist.
+async fn fetch_guild_config(guild_id: GuildId, cache: Arc<Cache>, mongodb_client: &mut mongodb::Client) -> Document {
+    let db = mongodb_client.database("config");
+    let coll = db.collection::<Document>("servers");
+
+    let filter = doc! {"id": guild_id.0.to_string()};
+    let find_options = FindOptions::builder().build();
+    let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
+
+    return match cursor.try_next().await.unwrap() {
+        Some(doc) => doc, // If guild configuration does exist
+        None => { // If guild configuration doesn't exist
+            let mut nsfw = "";
+
+            // If the bot joined the guild before September 1st 2022, it joined as Booty Bot, not R Slash
+            if guild_id.to_guild_cached(cache).unwrap().joined_at < Timestamp::from_unix_timestamp(1661986800).unwrap() {
+                nsfw = "nsfw";
+            } else {
+                nsfw = "non-nsfw";
+            }
+
+            let server = doc! {
+                "id": guild_id.0.to_string(),
+                "nsfw": nsfw,
+            };
+
+            coll.insert_one(server, None).await.unwrap();
+            let mut cursor = coll.find(filter, find_options).await.unwrap();
+            cursor.try_next().await.unwrap().unwrap()
+        }
+    };
+}
+
+
 struct Handler;
 
 #[async_trait]
@@ -210,11 +253,38 @@ impl EventHandler for Handler {
         let command = ctx.data.read().await;
         let command = command.get::<command_to_update>().unwrap();
 
-        if command == "get" || command == "all" {
-            println!("Matched on get");
-            let subreddits = ["gifs", "pics"]; // TODO - Replace this with a call to the new DB
+        if command == "delete" {
+            let command: u64 = env::args_os().nth(4).unwrap().into_string().unwrap().parse().unwrap();
+            let id = serenity::model::id::CommandId::from(command);
+            serenity::model::application::command::Command::delete_global_application_command(&ctx.http, id).await;
+        }
 
-            let _ = Command::create_global_application_command(&ctx.http, |command| {
+        if command == "guilds" {
+            let mut client_options = ClientOptions::parse("mongodb://my-user:rslash@localhost:27018/?tls=false&directConnection=true").await.unwrap();
+            client_options.app_name = Some("rslash-manager".to_string());
+
+            let mut mongodb_client = mongodb::Client::with_options(client_options).unwrap();
+
+            let db = mongodb_client.database("config");
+            let coll = db.collection::<Document>("settings");
+
+            let filter = doc! {"id": "subreddit_list".to_string()};
+            let find_options = FindOptions::builder().build();
+            let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
+
+            let doc = cursor.try_next().await.unwrap().unwrap();
+            let sfw_subreddits: Vec<&str> = doc.get_array("sfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
+            let nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
+
+            let me = ctx.cache.current_user();
+            let guilds = me.guilds(&ctx.http).await.unwrap();
+            for guild in guilds {
+                let id = guild.id;
+
+                let guild_config = fetch_guild_config(id, ctx.cache.clone(), &mut mongodb_client).await;
+                let nsfw = guild_config.get_str("nsfw").unwrap();
+
+                let _ = id.create_application_command(&ctx.http, |command| {
                 command
                     .name("get")
                     .description("Get a post from a specified subreddit");
@@ -225,13 +295,75 @@ impl EventHandler for Handler {
                         .required(true)
                         .kind(CommandOptionType::String);
 
-                    for subreddit in subreddits {
-                        option.add_string_choice(subreddit, subreddit);
+                    if nsfw == "nsfw" || nsfw == "both" {
+                        for subreddit in &nsfw_subreddits {
+                            option.add_string_choice(subreddit, subreddit);
+                        }
+                    }
+                    if nsfw == "non-nsfw" || nsfw == "both" {
+                        for subreddit in &sfw_subreddits {
+                            option.add_string_choice(subreddit, subreddit);
+                        }
                     }
 
                     return option;
                 });
 
+                return command;
+            }).await.expect("Failed to register slash commands");
+            }
+        }
+
+        if command == "membership" || command == "all" {
+            let _ = Command::create_global_application_command(&ctx.http, |command| {
+                command
+                    .name("membership")
+                    .description("Get information about your membership")
+            }).await.expect("Failed to register slash commands");
+        }
+
+        if command == "custom" || command == "all" {
+            let _ = Command::create_global_application_command(&ctx.http, |command| {
+                command
+                    .name("custom")
+                    .description("PREMIUM: Get post from a custom subreddit")
+                    .create_option(|option| {
+                        option.name("subreddit")
+                            .description("The subreddit to get a post from")
+                            .required(true)
+                            .kind(CommandOptionType::String)
+                    })
+            }).await.expect("Failed to register slash commands");
+        }
+
+        if command == "configure" || command == "all" {
+            println!("Matched on configure");
+            let _ = Command::create_global_application_command(&ctx.http, |command| {
+                command
+                    .name("configure-server")
+                    .description("Configure the bot")
+                    .default_member_permissions(serenity::model::permissions::Permissions::MANAGE_GUILD);
+
+                command.create_option(|option| {
+                    option.name("commands")
+                        .description("Configure server-level command behaviour")
+                        .kind(CommandOptionType::SubCommandGroup)
+                        .create_sub_option(|sub_option| {
+                            sub_option.name("nsfw")
+                                .kind(CommandOptionType::SubCommand)
+                                .description("Whether to show NSFW subreddits or not")
+                                .create_sub_option(|sub_option| {
+                                    sub_option.name("value")
+                                        .required(true)
+                                        .description("You can allow members to only use SFW subreddits, NSFW subreddits, or both.")
+                                        .add_string_choice("Only show NSFW subreddits", "nsfw")
+                                        .add_string_choice("Only show non-NSFW subreddits", "non-nsfw")
+                                        .add_string_choice("Show both NSFW and non-NSFW subreddits", "both")
+                                        .kind(CommandOptionType::String)
+                                })
+
+                        })
+                });
                 return command;
             }).await.expect("Failed to register slash commands");
         }
@@ -256,7 +388,7 @@ async fn update_commands(command: Option<&str>) {
     let shard_id: usize = 0;
     let total_shards: usize = env::var("TOTAL_SHARDS").expect("TOTAL_SHARDS not set").parse().expect("Failed to convert total_shards to usize");
 
-    let mut client = Client::builder(token, GatewayIntents::non_privileged() | GatewayIntents::GUILD_MEMBERS)
+    let mut client = serenity::Client::builder(token, GatewayIntents::non_privileged() | GatewayIntents::GUILD_MEMBERS)
         .event_handler(Handler)
         .application_id(application_id)
         .await
@@ -312,6 +444,31 @@ async fn update() {
                     return;
                 }
             }
+        },
+
+        "commands" => {
+            let command = env::args_os().nth(3).unwrap().into_string().unwrap();
+            update_commands(Some(&command)).await;
+        },
+
+        "discord-interface" => {
+            match {env::args_os().nth(3)} { // Check if a tag is provided
+                Some(x) => {
+                    let tag: String = x.into_string().unwrap().parse().unwrap();
+                    let mut rollout = Cmd::new("kubectl");
+                    rollout.arg("set").arg("-n").arg("r-slash").arg("image").arg("deployment/discord-interface").arg(format!("discord-interface=discord-interface:{}", tag));
+                    let output = rollout.output().expect("Failed to run kubectl");
+                    println!("{:?}", String::from_utf8(output.stdout).unwrap());
+                    println!("{:?}", String::from_utf8(output.stderr).unwrap());
+                },
+                None => {
+                    let mut rollout = Cmd::new("kubectl");
+                    rollout.arg("rollout").arg("-n").arg("r-slash").arg("restart").arg("deployment/discord-interface");
+                    let output = rollout.output().expect("Failed to run kubectl");
+                    println!("{:?}", String::from_utf8(output.stdout).unwrap());
+                    println!("{:?}", String::from_utf8(output.stderr).unwrap());
+                }
+            };
         },
 
         "downloader" => {
