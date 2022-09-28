@@ -5,33 +5,26 @@ use std::collections::HashMap;
 use std::iter::FromIterator;
 use crossbeam_utils;
 use std::collections::hash_map::{DefaultHasher, RandomState};
-use std::hash::{Hash, Hasher};
 use tokio_tungstenite;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use futures::prelude::stream::{SplitSink, SplitStream};
 use tungstenite::Message;
-use futures::{TryFutureExt, SinkExt, StreamExt, lock::Mutex};
+use futures::{lock::Mutex};
 use std::fmt::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::{RwLockWriteGuard, Arc};
-use futures::executor::block_on;
-use std::fs::File;
-use serenity::http::Http;
-use serde_json::Value;
-use redis::Client;
+
 use redis::Commands;
-use rand::distributions::WeightedIndex;
-use rand::thread_rng;
-use rand::prelude::Distribution;
+
 use reqwest::header::{USER_AGENT, HeaderMap};
 use serenity::prelude::TypeMapKey;
 use std::env;
 use futures_util::TryStreamExt;
-use k8s_openapi::chrono::NaiveDateTime;
+
 use mongodb::bson::{doc, Document};
-use mongodb::options::{ClientOptions, FindOptions};
+use mongodb::options::{FindOptions};
 use serde_json::Value::Null;
 
 
@@ -199,6 +192,8 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
     let url_base = format!("https://reddit.com/r/{}/hot.json?limit=100", subreddit);
     let mut url = String::new();
     let mut after = String::new();
+    let mut existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query(con).unwrap();
+    debug!("Existing posts: {:?}", existing_posts);
     for x in 0..10 {
         debug!("Making {}th request to reddit", x);
 
@@ -219,7 +214,21 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
 
         let last_requested = get_epoch_ms();
 
-        let results: serde_json::Value = res.json().await.unwrap();
+        let text = match res.text().await {
+            Ok(x) => x,
+            Err(_) => {
+                error!("Failed to get text from reddit");
+                return;
+            }
+        };
+        let results: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(x) => x,
+            Err(_) => {
+                error!("Failed to parse JSON from Reddit");
+                return;
+            }
+        };
+
         let results = results.get("data").unwrap().get("children").unwrap().as_array().unwrap();
 
         if results.len() == 0 {
@@ -249,90 +258,100 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
                 continue;
             }
 
-            if url.contains("gfycat") {
-                let id = url.split("/").last().unwrap().split(".").next().unwrap().replace('"', "");
-                debug!("{}", id);
-
-                if gfycat_token.expires_at < get_epoch_ms() - 1000 {
-                    gfycat_token.refresh().await;
-                }
-
-                let auth = format!("Bearer {}", gfycat_token.token);
-
-                let res = web_client
-                    .get(format!("https://api.gfycat.com/v1/gfycats/{}", id))
-                    .header("Authorization", auth)
-                    .send()
-                    .await.expect("Failed to request from gfycat");
-
-                let results: serde_json::Value = res.json().await.unwrap();
-                let result = results.get("gfyItem");
-                match result {
-                    Some(x) => {
-                        url = x.get("gifUrl").unwrap().to_string();
-                    },
-                    None => {continue},
-                };
-
-            } else if url.contains("imgur") {
-                let auth = format!("Client-ID {}", imgur_client);
-                let id = url.split("/").last().unwrap().split(".").next().unwrap().split("?").next().unwrap().replace('"', "");
-
-                let res = web_client
-                    .get(format!("https://api.imgur.com/3/albums/{}", id))
-                    .header("Authorization", auth)
-                    .send()
-                    .await.expect("Failed to request from imgur");
-
-                if res.status() != 200 {
-                    debug!("{} while fetching from imgur", res.status());
-                    continue
-                }
-                let results: serde_json::Value = res.json().await.unwrap();
-                url = results.get("data").unwrap().get("images").unwrap()[0].get("link").unwrap().to_string().replace(".gifv", ".gif");
-
-            } else if url.contains("redgifs") {
-                // TODO - This needs to be replaced with the newer API once I have the keys
-                let id = url.split("/").last().unwrap().split(".").next().unwrap().split("?").next().unwrap().replace('"', "");
-                debug!("{}", id);
-
-                if gfycat_token.expires_at < get_epoch_ms() - 1000 {
-                    gfycat_token.refresh().await;
-                }
-
-                let auth = format!("Bearer {}", gfycat_token.token);
-
-                let res = web_client
-                    .get(format!("https://api.redgifs.com/v1/gfycats/{}", id))
-                    .header("Authorization", auth)
-                    .send()
-                    .await.expect("Failed to request from redgifs");
-
-                let results: serde_json::Value = res.json().await.unwrap();
-                let result = results.get("gfyItem");
-                match result {
-                    Some(x) => {
-                        url = x.get("gifUrl").unwrap().to_string();
-                    },
-                    None => {continue},
-                };
-
-            } else if url.contains("i.redd.it") == false  && url.contains(".gif") == false  && url.contains(".jpg") == false  && url.contains(".png") == false {
-                // URL is not embeddable, and we do not have the ability to turn it into one.
+            if post["title"].to_string() == "Flipping a pancake" { // For some reason pinned images aren't marked as pinned on the api, and this one post is pinned but doesn't embed.
                 continue;
             }
+
+            if !existing_posts.contains(&format!("subreddit:{}:post:{}", subreddit.clone(), &post["id"].to_string().replace('"', ""))) {
+                debug!("{}", format!("subreddit:{}:post:{}", subreddit.clone(), &post["id"].to_string().replace('"', "")));
+                url = url.replace(".gifv", ".gif");
+
+                if url.contains("gfycat") {
+                    let id = url.split("/").last().unwrap().split(".").next().unwrap().replace('"', "");
+                    debug!("{}", id);
+
+                    if gfycat_token.expires_at < get_epoch_ms() - 1000 {
+                        gfycat_token.refresh().await;
+                    }
+
+                    let auth = format!("Bearer {}", gfycat_token.token);
+
+                    let res = match web_client
+                        .get(format!("https://api.gfycat.com/v1/gfycats/{}", id))
+                        .header("Authorization", auth)
+                        .send()
+                        .await {
+                            Ok(x) => x,
+                            Err(x) => {
+                                error!("Failed to request from gfycat: {:?}", x);
+                                continue;
+                            }
+                    };
+
+                    let results: serde_json::Value = res.json().await.unwrap();
+                    let result = results.get("gfyItem");
+                    match result {
+                        Some(x) => {
+                            url = x.get("gifUrl").unwrap().to_string();
+                        },
+                        None => {continue},
+                    };
+
+                } else if url.contains("imgur") && !url.contains(".gif") && !url.contains(".png") && !url.contains(".jpg") && !url.contains(".jpeg") {
+                    let auth = format!("Client-ID {}", imgur_client);
+                    let id = url.split("/").last().unwrap().split(".").next().unwrap().split("?").next().unwrap().replace('"', "");
+
+                    let res = match web_client
+                        .get(format!("https://api.imgur.com/3/image/{}", id))
+                        .header("Authorization", auth)
+                        .send()
+                        .await {
+                            Ok(x) => x,
+                            Err(y) => {
+                                warn!("Imgur request failed: {}", y);
+                                continue;
+                            }
+                    };
+
+                    if res.status() != 200 {
+                        debug!("{} while fetching from imgur", res.status());
+                        continue
+                    }
+                    let results: serde_json::Value = res.json().await.unwrap();
+                    url = results.get("data").unwrap().get("link").unwrap().to_string().replace(".gifv", ".gif").replace(".mp4", ".gif");
+
+
+                } else if url.contains("i.redd.it") == false  && url.contains(".gif") == false  && url.contains(".jpg") == false  && url.contains(".png") == false  && url.contains("redgif") == false{
+                    // URL is not embeddable, and we do not have the ability to turn it into one.
+                    debug!("{} is not embeddable", url);
+                    continue;
+                }
+
+            } else {
+                debug!("Post is in cache, not fetching URL");
+                continue;
+            }
+
+
 
             url = url.replace('"', "");
-            let res = web_client
+            match web_client
                 .head(&url)
                 .send()
-                .await.expect("Failed to send head request");
-
-            let length = res.content_length().unwrap_or(0);
-            if length > 15000000 {
-                debug!("Content bigger than 15MB, skipping."); // Otherwise Discord takes too long to load the content
-                continue;
+                .await {
+                Ok(x) => {
+                    let length = x.content_length().unwrap_or(0);
+                    if length > 15000000 {
+                        debug!("Content bigger than 15MB, skipping."); // Otherwise Discord takes too long to load the content
+                        continue;
+                    }
+                },
+                Err(y) => {
+                    warn!("{}", y);
+                    continue;
+                }
             }
+
 
 
             debug!("Post Score: {:?}", post["score"]);
@@ -354,15 +373,37 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
             posts.push(post_object);
         }
 
+        let mut new_post_count = 0;
         for post in posts.clone() {
             let key = format!("subreddit:{}:post:{}", subreddit.clone(), post.id.replace('"', ""));
             keys.push(key.clone());
             let value = Vec::from(post);
             let _:() = con.hset_multiple(key, &value).unwrap();
+            new_post_count += 1;
         }
 
-        let _:() = con.del(format!("subreddit:{}:posts", subreddit)).unwrap();
-        let _:() = con.lpush(format!("subreddit:{}:posts", subreddit), keys.clone()).unwrap();
+        let mut old_posts = Vec::new();
+        for post in existing_posts.clone() {
+            if keys.contains(&post) {
+                continue;
+            } else {
+                old_posts.push(post);
+            }
+        }
+
+        debug!("Old Posts Keys Length: {:?}", old_posts.len());
+        debug!("New Posts Keys Length: {:?}", keys.len());
+        debug!("New Posts Found: {:?}", new_post_count);
+        old_posts.append(&mut keys);
+
+        let keys = old_posts;
+        existing_posts = keys.clone();
+
+        debug!("Total Keys Length: {}", keys.len());
+        if keys.len() != 0 {
+            let _:() = con.del(format!("subreddit:{}:posts", subreddit)).unwrap();
+            let _:() = con.lpush(format!("subreddit:{}:posts", subreddit), keys.clone()).unwrap();
+        }
 
         let time_since_request = get_epoch_ms() - last_requested;
         if time_since_request < 2000 {
@@ -370,38 +411,6 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
             sleep(Duration::from_millis(2000 - time_since_request)).await; // Reddit rate limit is 30 requests per minute, so must wait at least 2 seconds between requests
         }
     }
-
-
-    //let mut post_scores = Vec::new();
-
-
-
-    /*
-    // Normalise post_scores to all be bigger than 0
-    let minimum = post_scores.iter().min().unwrap();
-
-    let mut offset = 0;
-    if minimum > &(0 as i64) {
-        offset = 0;
-    } else {
-        offset = 1 - minimum;
-    }
-
-    post_scores.iter_mut().for_each(|x| *x += offset); // Add offset to each post score
-
-    // This does a weighted shuffle on the posts
-    let mut shuffled_posts = Vec::new();
-    let mut rng = thread_rng();
-
-    while posts.len() > 0 {
-        let shuffler = WeightedIndex::new(&post_scores).expect("Failed to created WeightedIndex from post_scores");
-        let post_index = shuffler.sample(&mut rng);
-        shuffled_posts.push(posts.remove(post_index));
-        post_scores.remove(post_index);
-    }
-
-    debug!("Shuffled Posts: {:?}", shuffled_posts);
-    debug!("Length of shuffled posts: {:?}", shuffled_posts.len()); */
 }
 
 #[derive(Debug)]
@@ -414,7 +423,7 @@ struct oauthToken {
 }
 
 impl oauthToken {
-    async fn new(client_id: String, client_secret: String, url: String) -> oauthToken {
+    async fn new(client_id: String, client_secret: String, url: String) -> Result<oauthToken, Box<dyn std::error::Error>> {
         let web_client = reqwest::Client::new();
 
         let mut post_data = HashMap::new();
@@ -426,23 +435,25 @@ impl oauthToken {
         .post(&url)
         .json(&post_data)
         .send()
-        .await.expect(&*format!("Failed to request access token at {}", &url));
+        .await?;
 
         let results: serde_json::Value = res.json().await.unwrap();
 
-        return oauthToken {
+        Ok(oauthToken {
             token: results["access_token"].to_string(),
             expires_at: results["expires_in"].as_u64().unwrap() + get_epoch_ms(),
             client_id,
             client_secret,
             url,
-        };
+        })
     }
 
-    async fn refresh(&mut self) {
-        let new = oauthToken::new(self.client_id.clone(), self.client_secret.clone(), self.url.clone()).await;
+    async fn refresh(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let new = oauthToken::new(self.client_id.clone(), self.client_secret.clone(), self.url.clone()).await?;
         self.token = new.token;
         self.expires_at = new.expires_at;
+
+        Ok(())
     }
 }
 
@@ -475,7 +486,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
     let gfycat_client = env::var("GFYCAT_CLIENT").expect("GFYCAT_CLIENT not set");
     let gfycat_secret = env::var("GFYCAT_SECRET").expect("GFYCAT_SECRET not set");
     let imgur_client = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
-    let mut gfycat_token = oauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await;
+    let mut gfycat_token = oauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await.expect("Failed to get gfycat token");
 
     let mut client_options = mongodb::options::ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
     client_options.app_name = Some("Downloader".to_string());

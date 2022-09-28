@@ -41,16 +41,15 @@ use std::sync::{RwLockWriteGuard, Arc};
 use futures::executor::block_on;
 use std::fs::File;
 use std::panic::catch_unwind;
+use std::path::Path;
 use serenity::http::Http;
 use chrono::{DateTime, Utc};
 use chrono::prelude::*;
 use futures_util::TryStreamExt;
 
+use futures::prelude::*;
+use redis::AsyncCommands;
 
-use kube;
-use kube::ResourceExt;
-use k8s_openapi;
-use kube::api::ListParams;
 
 use redis;
 use redis::{Commands, from_redis_value, RedisResult};
@@ -62,6 +61,7 @@ use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
 use serenity::client::Cache;
 use serenity::json::Value;
 use serenity::model::application::command::{CommandOptionType, CommandPermission};
+use serenity::model::application::component::ButtonStyle;
 use serenity::model::channel::{Channel, ChannelCategory, GuildChannel, PartialGuildChannel, Reaction, StageInstance};
 use serenity::model::event::{ChannelPinsUpdateEvent, GuildMembersChunkEvent, GuildMemberUpdateEvent, GuildScheduledEventUserAddEvent, GuildScheduledEventUserRemoveEvent, InviteCreateEvent, InviteDeleteEvent, MessageUpdateEvent, ThreadListSyncEvent, ThreadMembersUpdateEvent, TypingStartEvent, VoiceServerUpdateEvent};
 use serenity::model::guild::automod::{ActionExecution, Rule};
@@ -117,8 +117,17 @@ pub struct FakeEmbed {
     author: Option<String>,
     timestamp: Option<u64>,
     fields: Option<Vec<(String, String, bool)>>,
+    buttons: Option<Vec<FakeButton>>
 }
 
+#[derive(Debug, Clone)]
+pub struct FakeButton {
+    label: String,
+    style: ButtonStyle,
+    url: Option<String>,
+    custom_id: Option<String>,
+    disabled: bool,
+}
 
 fn get_redis_con() -> redis::Connection {
     let db_client = redis::Client::open("redis://redis/").unwrap();
@@ -153,7 +162,8 @@ async fn check_admin(user: serenity::model::user::User) -> bool { // Check if a 
     return admin == *user.id.as_u64();
 }
 
-async fn get_subreddit(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
+
+async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
     let mut nsfw_subreddits = match data_mut.get_mut("nsfw_subreddits").unwrap() {
@@ -188,21 +198,26 @@ async fn get_subreddit(command: &ApplicationCommandInteraction, data: &mut tokio
                 image: None,
                 thumbnail: None,
                 fields: None,
+                buttons: None
             }
         }
     }
 
-    let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 1i16).unwrap();
+    return get_subreddit(subreddit, &mut con, command.channel_id).await
+}
+
+async fn get_subreddit(subreddit: String, con: &mut redis::Connection, channel: ChannelId) -> FakeEmbed {
+    let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 1i16).unwrap();
+    let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 60*60).unwrap();
     index -= 1;
     let length: u16 = con.llen(format!("subreddit:{}:posts", &subreddit)).unwrap();
-    index = length - index - 1;
+    index = length - (index + 1);
 
     if index >= length {
-        let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 0i16).unwrap();
+        let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 0i16).unwrap();
         index = 0;
     }
 
-    let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, command.channel_id), 5*60).unwrap();
 
     let post: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(index).arg(index).query(con).unwrap();
     let post: HashMap<String, redis::Value> = con.hgetall(&post[0]).unwrap();
@@ -218,6 +233,13 @@ async fn get_subreddit(command: &ApplicationCommandInteraction, data: &mut tokio
         thumbnail: None,
         timestamp: Some(from_redis_value(post.get("timestamp").unwrap()).unwrap()),
         fields: None,
+        buttons: Some(vec![FakeButton {
+            label: "🔁".to_string(),
+            style: ButtonStyle::Primary,
+            url: None,
+            custom_id: Some(format!("subreddit:{}", subreddit)),
+            disabled: false
+        }])
     };
 
     return embed;
@@ -235,6 +257,7 @@ fn error_embed(code: &str) -> FakeEmbed {
         thumbnail: None,
         timestamp: None,
         fields: None,
+        buttons: None
     };
 }
 
@@ -431,7 +454,8 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
         footer: None,
         image: None,
         color: None,
-        thumbnail: None
+        thumbnail: None,
+        buttons: None
     };
 }
 
@@ -450,6 +474,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mu
             author: None,
             timestamp: None,
             fields: None,
+            buttons: None
         }
     }
 
@@ -465,6 +490,34 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mu
     let subreddit = options[0].value.clone();
     let subreddit = subreddit.unwrap();
     let subreddit = subreddit.as_str().unwrap().to_string();
+
+    let web_client = reqwest::Client::new();
+    let res = match web_client
+        .get(format!("https://reddit.com/r/{}.json", subreddit))
+        .send()
+        .await {
+            Ok(x) => x,
+            Err(y) => {
+                warn!("Reddit request failed: {}", y);
+                return error_embed("AHWUHABA&AWOPL");
+            }
+    };
+
+    if res.status() != 200 {
+        return FakeEmbed {
+            title: Some("Subreddit Inaccessible".to_string()),
+            description: Some(format!("r/{} is private or does not exist.", subreddit).to_string()),
+            url: None,
+            color: Some(Colour::from_rgb(255, 0, 0)),
+            footer: None,
+            image: None,
+            thumbnail: None,
+            author: None,
+            timestamp: None,
+            fields: None,
+            buttons: None
+        }
+    }
 
     let last_cached: i64 = con.get(&format!("{}", subreddit)).unwrap_or(0);
 
@@ -489,7 +542,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mu
             }
         }
     } else {
-        return get_subreddit(command, data, ctx).await;
+        return get_subreddit_cmd(command, data, ctx).await;
     }
 
     return FakeEmbed {
@@ -503,8 +556,45 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mu
         thumbnail: None,
         timestamp: Some(from_redis_value(post.get("timestamp").unwrap()).unwrap()),
         fields: None,
+        buttons: None
     };
 }
+
+
+async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
+    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+    let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+        ConfigValue::REDIS(db) => Ok(db),
+        _ => Err(0),
+    }.unwrap();
+
+
+    let guild_counts: HashMap<String, redis::Value> = con.hgetall("shard_guild_counts").unwrap();
+    let mut guild_count = 0;
+    for (shard, count) in guild_counts {
+        guild_count += from_redis_value::<u64>(&count).unwrap();
+    }
+
+    return FakeEmbed {
+        title: Some("Info".to_string()),
+        description: Some("[Support Server](https://discord.gg/jYtCFQG)\n\n[Add me to a server](https://discord.com/api/oauth2/authorize?client_id=278550142356029441&permissions=515463498752&scope=applications.commands%20bot)".to_string()),
+        url: None,
+        color: Some(Colour::from_rgb(0, 255, 0)),
+        footer: None,
+        image: None,
+        thumbnail: None,
+        author: None,
+        timestamp: None,
+        fields: Some(vec![
+            ("Servers".to_string(), guild_count.to_string(), true),
+            ("Shard ID".to_string(), ctx.shard_id.to_string(), true),
+            ("Shard Count".to_string(), ctx.cache.shard_count().to_string(), true),
+        ]),
+        buttons: None
+    }
+}
+
 
 async fn configure_server(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
     debug!("{:?}", command.data.options);
@@ -520,6 +610,7 @@ async fn configure_server(command: &ApplicationCommandInteraction, data: &mut to
         thumbnail: None,
         timestamp: None,
         fields: None,
+        buttons: None
     };
 
     match command.data.options[0].name.as_str() {
@@ -563,8 +654,47 @@ struct Handler;
 impl EventHandler for Handler {
     /// Fires when the client receives new data about a guild
     async fn guild_create(&self, ctx: Context, guild: Guild, is_new: bool) {
+        let mut data = ctx.data.write().await;
+        let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+        let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+            ConfigValue::REDIS(db) => Ok(db),
+            _ => Err(0),
+        }.unwrap();
+
+        let _:() = con.hset("shard_guild_counts", ctx.shard_id, ctx.cache.guild_count()).unwrap();
+
+        drop (con);
+        drop (data_mut);
+        drop (data);
+
         if is_new { // First time client has seen the guild
             update_guild_commands(guild.id, &mut ctx.data.write().await, &ctx).await;
+        }
+    }
+
+    async fn guild_delete(&self, ctx: Context, incomplete: UnavailableGuild, full: Option<Guild>) {
+        let mut data = ctx.data.write().await;
+        let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+        let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+            ConfigValue::REDIS(db) => Ok(db),
+            _ => Err(0),
+        }.unwrap();
+
+        let _:() = con.hset("shard_guild_counts", ctx.shard_id, ctx.cache.guild_count()).unwrap();
+
+        drop (con);
+        drop (data_mut);
+        drop (data);
+    }
+
+    async fn message(&self, ctx: Context, new_message: serenity::model::channel::Message) {
+        if new_message.content != "" {
+            debug!("{}: {}", new_message.author.name, new_message.content);
+            if new_message.content.contains("<@278550142356029441>") {
+                update_guild_commands(new_message.guild_id.unwrap(), &mut ctx.data.write().await, &ctx).await;
+            }
         }
     }
 
@@ -574,7 +704,9 @@ impl EventHandler for Handler {
         let guilds = ctx.cache.guild_count();
         let users = ctx.cache.user_count();
 
-        fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+        if !Path::new("/etc/probes").is_dir() {
+            fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+        }
         let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
         file.write_all(b"alive").expect("Unable to write to /etc/probes/live");
     }
@@ -599,7 +731,7 @@ impl EventHandler for Handler {
     /// Fires when a slash command or other interaction is received
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         debug!("Interaction received");
-        if let Interaction::ApplicationCommand(command) = interaction {
+        if let Interaction::ApplicationCommand(command) = interaction.clone() {
             match command.guild_id {
                 Some(guild_id) => {
                     info!("{:?} ({:?}) > {:?} ({:?}) : /{} {:?}", guild_id.name(&ctx.cache).unwrap(), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
@@ -621,12 +753,13 @@ impl EventHandler for Handler {
                         thumbnail: None,
                         timestamp: None,
                         fields: None,
+                        buttons: None
                     }
                 },
 
                 "get" => {
                     let mut data = ctx.data.write().await;
-                    get_subreddit(&command, &mut data, &ctx).await
+                    get_subreddit_cmd(&command, &mut data, &ctx).await
                 },
 
                 "membership" => {
@@ -644,6 +777,11 @@ impl EventHandler for Handler {
                     get_custom_subreddit(&command, &mut data, &ctx).await
                 },
 
+                "info" => {
+                    let mut data = ctx.data.write().await;
+                    info(&command, &mut data, &ctx).await
+                },
+
                 _ => {
                     FakeEmbed {
                         title: Some("Unknown command".to_string()),
@@ -656,6 +794,7 @@ impl EventHandler for Handler {
                         thumbnail: None,
                         timestamp: None,
                         fields: None,
+                        buttons: None
                     }
                 }
             };
@@ -667,7 +806,520 @@ impl EventHandler for Handler {
                 .create_interaction_response(&ctx.http, |response| {
                     response
                         .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|message| message.embed(|e: &mut CreateEmbed| {
+                        .interaction_response_data(|message| {
+                            let mut do_buttons = true;
+                            if fake_embed.url.is_some() {
+                                let url = fake_embed.image.clone().unwrap();
+                                if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                                    do_buttons = false;
+                                }
+                            }
+
+                            if (fake_embed.buttons.is_some()) && do_buttons {
+                                message.components(|c| {
+                                    c.create_action_row(|a| {
+                                        for button in fake_embed.buttons.unwrap() {
+                                            a.create_button(|b| {
+                                                b.label(button.label)
+                                                    .style(button.style)
+                                                    .disabled(button.disabled);
+
+                                                if button.url.is_some() {
+                                                    b.url(button.url.unwrap());
+                                                }
+
+                                                if button.custom_id.is_some() {
+                                                    b.custom_id(button.custom_id.unwrap());
+                                                }
+
+                                                return b;
+                                            });
+                                        }
+
+                                        return a;
+                                    })
+                                });
+                            }
+
+                            let fake_embed = fake_embed_2.clone();
+                            message.embed(|e: &mut CreateEmbed| {
+                            if (fake_embed.timestamp.is_some()) {
+                                e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(fake_embed.timestamp.unwrap() as i64).unwrap());
+                            }
+
+                            if (fake_embed.footer.is_some()) {
+                                let text = fake_embed.footer.unwrap();
+                                e.footer(|footer| {
+                                    footer.text(text)
+                                });
+                            }
+
+                            if (fake_embed.fields.is_some()) {
+                                e.fields(fake_embed.fields.unwrap());
+                            }
+
+                            if (fake_embed.color.is_some()) {
+                                e.colour(fake_embed.color.unwrap());
+                            }
+
+                            if (fake_embed.description.is_some()) {
+                                e.description(fake_embed.description.unwrap());
+                            }
+
+                            if (fake_embed.title.is_some()) {
+                                e.title(fake_embed.title.unwrap());
+                            }
+
+                            if (fake_embed.url.is_some()) {
+                                e.url(fake_embed.url.unwrap().clone());
+                            }
+
+                            if (fake_embed.author.is_some()) {
+                                let name = fake_embed.author.unwrap();
+                                e.author(|author| {
+                                    author.name(&name)
+                                        .url(format!("https://reddit.com/u/{}", name))
+                                });
+                            }
+
+                            if (fake_embed.thumbnail.is_some()) {
+                                e.thumbnail(fake_embed.thumbnail.unwrap());
+                            }
+
+                            if (fake_embed.image.is_some()) {
+                                let url = fake_embed.image.clone().unwrap();
+                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs") && url.contains(".gif")) {
+                                    e.image(url);
+                                }
+                            }
+
+                            return e;
+
+            })})
+                })
+                .await
+            {
+                let fake_embed = fake_embed_2.clone();
+                if format!("{}", why) == "Interaction has already been acknowledged." {
+                    command.channel_id.send_message(&ctx.http, |message| {
+                        if (fake_embed.image.is_some()) {
+                            if fake_embed.image.clone().unwrap().contains("redgifs") {
+                                message.content(fake_embed.image.clone().unwrap());
+                                return message;
+                            }
+                        }
+
+                        let mut do_buttons = true;
+                        if fake_embed.url.is_some() {
+                            let url = fake_embed.image.clone().unwrap();
+                            if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                                do_buttons = false;
+                            }
+                        }
+
+                        if (fake_embed.buttons.is_some()) && do_buttons {
+                                message.components(|c| {
+                                    c.create_action_row(|a| {
+                                        for button in fake_embed.buttons.unwrap() {
+                                            a.create_button(|b| {
+                                                b.label(button.label)
+                                                    .style(button.style)
+                                                    .disabled(button.disabled);
+
+                                                if button.url.is_some() {
+                                                    b.url(button.url.unwrap());
+                                                }
+
+                                                if button.custom_id.is_some() {
+                                                    b.custom_id(button.custom_id.unwrap());
+                                                }
+
+                                                return b;
+                                            });
+                                        }
+
+                                        return a;
+                                    })
+                                });
+                            }
+
+                            let fake_embed = fake_embed_2.clone();
+                        message.embed(|e| {
+                                                        if (fake_embed.timestamp.is_some()) {
+                                e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(fake_embed.timestamp.unwrap() as i64).unwrap());
+                            }
+
+                            if (fake_embed.footer.is_some()) {
+                                let text = fake_embed.footer.unwrap();
+                                e.footer(|footer| {
+                                    footer.text(text)
+                                });
+                            }
+
+                            if (fake_embed.fields.is_some()) {
+                                e.fields(fake_embed.fields.unwrap());
+                            }
+
+                            if (fake_embed.color.is_some()) {
+                                e.colour(fake_embed.color.unwrap());
+                            }
+
+                            if (fake_embed.description.is_some()) {
+                                e.description(fake_embed.description.unwrap());
+                            }
+
+                            if (fake_embed.title.is_some()) {
+                                e.title(fake_embed.title.unwrap());
+                            }
+
+                            if (fake_embed.url.is_some()) {
+                                e.url(fake_embed.url.unwrap().clone());
+                            }
+
+                            if (fake_embed.author.is_some()) {
+                                let name = fake_embed.author.unwrap();
+                                e.author(|author| {
+                                    author.name(&name)
+                                        .url(format!("https://reddit.com/u/{}", name))
+                                });
+                            }
+
+                            if (fake_embed.thumbnail.is_some()) {
+                                e.thumbnail(fake_embed.thumbnail.unwrap());
+                            }
+
+                            if (fake_embed.image.is_some()) {
+                                let url = fake_embed.image.clone().unwrap();
+                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs") && url.contains(".gif")) {
+                                    e.image(url);
+                                }
+                            }
+                            return e;
+                        });
+                        return message;
+                    } ).await;
+                } else {
+                    warn!("Cannot respond to slash command: {}", why);
+                }
+            }
+
+            if (fake_embed_2.image.is_some()) {
+                let url = fake_embed_2.image.clone().unwrap();
+                if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                    command.channel_id.send_message(&ctx.http, |message| {
+                        message.content(url);
+
+                        if (fake_embed_2.buttons.is_some()) {
+                                message.components(|c| {
+                                    c.create_action_row(|a| {
+                                        for button in fake_embed_2.buttons.unwrap() {
+                                            a.create_button(|b| {
+                                                b.label(button.label)
+                                                    .style(button.style)
+                                                    .disabled(button.disabled);
+
+                                                if button.url.is_some() {
+                                                    b.url(button.url.unwrap());
+                                                }
+
+                                                if button.custom_id.is_some() {
+                                                    b.custom_id(button.custom_id.unwrap());
+                                                }
+
+                                                return b;
+                                            });
+                                        }
+
+                                        return a;
+                                    })
+                                });
+                            }
+                        message
+                    }).await.unwrap();
+                }
+            }
+        }
+
+        if let Interaction::MessageComponent(command) = interaction {
+            let mut data = ctx.data.write().await;
+            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+            let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+                ConfigValue::REDIS(db) => Ok(db),
+                _ => Err(0),
+            }.unwrap();
+            match command.guild_id {
+                Some(guild_id) => {
+                    info!("{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}", guild_id.name(&ctx.cache).unwrap(), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
+                },
+                None => {
+                    info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
+                }
+            }
+            let fake_embed = get_subreddit(command.data.custom_id.split(":").last().unwrap().to_string(), &mut con, command.channel_id).await;
+            let fake_embed_2 = fake_embed.clone();
+            if let Err(why) = command
+                .create_interaction_response(&ctx.http, |response| {
+                    response
+                        .kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|message| {
+                            let mut do_buttons = true;
+                            if fake_embed.url.is_some() {
+                                let url = fake_embed.image.clone().unwrap();
+                                if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                                    do_buttons = false;
+                                }
+                            }
+
+                            if (fake_embed.buttons.is_some()) && do_buttons {
+                                message.components(|c| {
+                                    c.create_action_row(|a| {
+                                        for button in fake_embed.buttons.unwrap() {
+                                            a.create_button(|b| {
+                                                b.label(button.label)
+                                                    .style(button.style)
+                                                    .disabled(button.disabled);
+
+                                                if button.url.is_some() {
+                                                    b.url(button.url.unwrap());
+                                                }
+
+                                                if button.custom_id.is_some() {
+                                                    b.custom_id(button.custom_id.unwrap());
+                                                }
+
+                                                return b;
+                                            });
+                                        }
+
+                                        return a;
+                                    })
+                                });
+                            }
+
+                            let fake_embed = fake_embed_2.clone();
+                            message.embed(|e: &mut CreateEmbed| {
+                            if (fake_embed.timestamp.is_some()) {
+                                e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(fake_embed.timestamp.unwrap() as i64).unwrap());
+                            }
+
+                            if (fake_embed.footer.is_some()) {
+                                let text = fake_embed.footer.unwrap();
+                                e.footer(|footer| {
+                                    footer.text(text)
+                                });
+                            }
+
+                            if (fake_embed.fields.is_some()) {
+                                e.fields(fake_embed.fields.unwrap());
+                            }
+
+                            if (fake_embed.color.is_some()) {
+                                e.colour(fake_embed.color.unwrap());
+                            }
+
+                            if (fake_embed.description.is_some()) {
+                                e.description(fake_embed.description.unwrap());
+                            }
+
+                            if (fake_embed.title.is_some()) {
+                                e.title(fake_embed.title.unwrap());
+                            }
+
+                            if (fake_embed.url.is_some()) {
+                                e.url(fake_embed.url.unwrap().clone());
+                            }
+
+                            if (fake_embed.author.is_some()) {
+                                let name = fake_embed.author.unwrap();
+                                e.author(|author| {
+                                    author.name(&name)
+                                        .url(format!("https://reddit.com/u/{}", name))
+                                });
+                            }
+
+                            if (fake_embed.thumbnail.is_some()) {
+                                e.thumbnail(fake_embed.thumbnail.unwrap());
+                            }
+
+                            if (fake_embed.image.is_some()) {
+                                let url = fake_embed.image.clone().unwrap();
+                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs") && url.contains(".gif")) {
+                                    e.image(url);
+
+                                }
+                            }
+
+                            return e;
+
+            })})
+                })
+                .await
+            {
+                let fake_embed = fake_embed_2.clone();
+                if format!("{}", why) == "Interaction has already been acknowledged." {
+                    command.channel_id.send_message(&ctx.http, |message| {
+                        let mut do_buttons = true;
+                        if fake_embed.url.is_some() {
+                            let url = fake_embed.image.clone().unwrap();
+                            if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                                do_buttons = false;
+                            }
+                        }
+
+                        if (fake_embed.buttons.is_some()) && do_buttons {
+                                message.components(|c| {
+                                    c.create_action_row(|a| {
+                                        for button in fake_embed.buttons.unwrap() {
+                                            a.create_button(|b| {
+                                                b.label(button.label)
+                                                    .style(button.style)
+                                                    .disabled(button.disabled);
+
+                                                if button.url.is_some() {
+                                                    b.url(button.url.unwrap());
+                                                }
+
+                                                if button.custom_id.is_some() {
+                                                    b.custom_id(button.custom_id.unwrap());
+                                                }
+
+                                                return b;
+                                            });
+                                        }
+
+                                        return a;
+                                    })
+                                });
+                            }
+
+                            let fake_embed = fake_embed_2.clone();
+                            message.embed(|e| {
+                                                        if (fake_embed.timestamp.is_some()) {
+                                e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(fake_embed.timestamp.unwrap() as i64).unwrap());
+                            }
+
+                            if (fake_embed.footer.is_some()) {
+                                let text = fake_embed.footer.unwrap();
+                                e.footer(|footer| {
+                                    footer.text(text)
+                                });
+                            }
+
+                            if (fake_embed.fields.is_some()) {
+                                e.fields(fake_embed.fields.unwrap());
+                            }
+
+                            if (fake_embed.color.is_some()) {
+                                e.colour(fake_embed.color.unwrap());
+                            }
+
+                            if (fake_embed.description.is_some()) {
+                                e.description(fake_embed.description.unwrap());
+                            }
+
+                            if (fake_embed.title.is_some()) {
+                                e.title(fake_embed.title.unwrap());
+                            }
+
+                            if (fake_embed.url.is_some()) {
+                                e.url(fake_embed.url.unwrap().clone());
+                            }
+
+                            if (fake_embed.author.is_some()) {
+                                let name = fake_embed.author.unwrap();
+                                e.author(|author| {
+                                    author.name(&name)
+                                        .url(format!("https://reddit.com/u/{}", name))
+                                });
+                            }
+
+                            if (fake_embed.thumbnail.is_some()) {
+                                e.thumbnail(fake_embed.thumbnail.unwrap());
+                            }
+
+                            if (fake_embed.image.is_some()) {
+                                let url = fake_embed.image.clone().unwrap();
+                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs") && url.contains(".gif")) {
+                                    e.image(url);
+                                }
+                            }
+                            return e;
+                        });
+                        return message;
+                    } ).await;
+                } else {
+                    warn!("Cannot respond to slash command: {}", why);
+                }
+            }
+
+            if (fake_embed_2.image.is_some()) {
+                let url = fake_embed_2.image.clone().unwrap();
+                if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                    command.channel_id.send_message(&ctx.http, |message| {
+                        message.content(url);
+
+                        if (fake_embed_2.buttons.is_some()) {
+                                message.components(|c| {
+                                    c.create_action_row(|a| {
+                                        for button in fake_embed_2.buttons.unwrap() {
+                                            a.create_button(|b| {
+                                                b.label(button.label)
+                                                    .style(button.style)
+                                                    .disabled(button.disabled);
+
+                                                if button.url.is_some() {
+                                                    b.url(button.url.unwrap());
+                                                }
+
+                                                if button.custom_id.is_some() {
+                                                    b.custom_id(button.custom_id.unwrap());
+                                                }
+
+                                                return b;
+                                            });
+                                        }
+
+                                        return a;
+                                    })
+                                });
+                            }
+                        message
+                    }).await.unwrap();
+                }
+            }
+            /*if let Err(why) = command
+                .create_interaction_response(&ctx.http, |response| {
+                    response
+                        .kind(InteractionResponseType::ChannelMessageWithSource)
+                        .interaction_response_data(|message| {
+                            if (fake_embed.buttons.is_some()) {
+                                message.components(|c| {
+                                    c.create_action_row(|a| {
+                                        for button in fake_embed.buttons.unwrap() {
+                                            a.create_button(|b| {
+                                                b.label(button.label)
+                                                    .style(button.style)
+                                                    .disabled(button.disabled);
+
+                                                if button.url.is_some() {
+                                                    b.url(button.url.unwrap());
+                                                }
+
+                                                if button.custom_id.is_some() {
+                                                    b.custom_id(button.custom_id.unwrap());
+                                                }
+
+                                                return b;
+                                            });
+                                        }
+
+                                        return a;
+                                    })
+                                });
+                            }
+
+                            let fake_embed = fake_embed_2.clone();
+                            message.embed(|e: &mut CreateEmbed| {
                             if (fake_embed.timestamp.is_some()) {
                                 e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(fake_embed.timestamp.unwrap() as i64).unwrap());
                             }
@@ -717,68 +1369,9 @@ impl EventHandler for Handler {
 
                             return e;
 
-            }))
+            })})
                 })
-                .await
-            {
-                let fake_embed = fake_embed_2;
-                if format!("{}", why) == "Interaction has already been acknowledged." {
-                    command.create_followup_message(&ctx.http, |message| {
-                        message.embed(|e| {
-                                                        if (fake_embed.timestamp.is_some()) {
-                                e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(fake_embed.timestamp.unwrap() as i64).unwrap());
-                            }
-
-                            if (fake_embed.footer.is_some()) {
-                                let text = fake_embed.footer.unwrap();
-                                e.footer(|footer| {
-                                    footer.text(text)
-                                });
-                            }
-
-                            if (fake_embed.fields.is_some()) {
-                                e.fields(fake_embed.fields.unwrap());
-                            }
-
-                            if (fake_embed.color.is_some()) {
-                                e.colour(fake_embed.color.unwrap());
-                            }
-
-                            if (fake_embed.description.is_some()) {
-                                e.description(fake_embed.description.unwrap());
-                            }
-
-                            if (fake_embed.title.is_some()) {
-                                e.title(fake_embed.title.unwrap());
-                            }
-
-                            if (fake_embed.url.is_some()) {
-                                e.url(fake_embed.url.unwrap().clone());
-                            }
-
-                            if (fake_embed.author.is_some()) {
-                                let name = fake_embed.author.unwrap();
-                                e.author(|author| {
-                                    author.name(&name)
-                                        .url(format!("https://reddit.com/u/{}", name))
-                                });
-                            }
-
-                            if (fake_embed.thumbnail.is_some()) {
-                                e.thumbnail(fake_embed.thumbnail.unwrap());
-                            }
-
-                            if (fake_embed.image.is_some()) {
-                                e.image(fake_embed.image.unwrap());
-                            }
-
-                            return e;
-                        })
-                    } ).await;
-                } else {
-                    warn!("Cannot respond to slash command: {}", why);
-                }
-            }
+                .await {}*/
         }
     }
 }
@@ -786,12 +1379,12 @@ impl EventHandler for Handler {
 
 async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge::gateway::ShardManager>>, mut total_shards: u64) {
     let db_client = redis::Client::open("redis://redis/").unwrap();
-    let mut con = db_client.get_connection().expect("Can't connect to redis");
+    let mut con = db_client.get_tokio_connection().await.expect("Can't connect to redis");
 
     loop {
         let _ = sleep(Duration::from_secs(60)).await;
 
-        let db_total_shards: redis::RedisResult<u64> = con.get("total_shards");
+        let db_total_shards: redis::RedisResult<u64> = con.get("total_shards").await;
         let db_total_shards: u64 = db_total_shards.expect("Failed to get or convert total_shards");
 
         if db_total_shards != total_shards {
