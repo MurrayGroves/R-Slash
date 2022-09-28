@@ -810,7 +810,7 @@ impl EventHandler for Handler {
                             let mut do_buttons = true;
                             if fake_embed.url.is_some() {
                                 let url = fake_embed.image.clone().unwrap();
-                                if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                                if (url.contains("imgur") && url.contains(".gif") )|| url.contains("redgifs") {
                                     do_buttons = false;
                                 }
                             }
@@ -888,7 +888,7 @@ impl EventHandler for Handler {
 
                             if (fake_embed.image.is_some()) {
                                 let url = fake_embed.image.clone().unwrap();
-                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs") && url.contains(".gif")) {
+                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs")) {
                                     e.image(url);
                                 }
                             }
@@ -912,7 +912,7 @@ impl EventHandler for Handler {
                         let mut do_buttons = true;
                         if fake_embed.url.is_some() {
                             let url = fake_embed.image.clone().unwrap();
-                            if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                            if (url.contains("imgur") && url.contains(".gif") )|| url.contains("redgifs") {
                                 do_buttons = false;
                             }
                         }
@@ -990,7 +990,7 @@ impl EventHandler for Handler {
 
                             if (fake_embed.image.is_some()) {
                                 let url = fake_embed.image.clone().unwrap();
-                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs") && url.contains(".gif")) {
+                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs")) {
                                     e.image(url);
                                 }
                             }
@@ -1005,7 +1005,7 @@ impl EventHandler for Handler {
 
             if (fake_embed_2.image.is_some()) {
                 let url = fake_embed_2.image.clone().unwrap();
-                if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                if (url.contains("imgur")  && url.contains(".gif")) || url.contains("redgifs") {
                     command.channel_id.send_message(&ctx.http, |message| {
                         message.content(url);
 
@@ -1065,7 +1065,7 @@ impl EventHandler for Handler {
                             let mut do_buttons = true;
                             if fake_embed.url.is_some() {
                                 let url = fake_embed.image.clone().unwrap();
-                                if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                                if (url.contains("imgur") && url.contains(".gif"))|| url.contains("redgifs") {
                                     do_buttons = false;
                                 }
                             }
@@ -1143,7 +1143,7 @@ impl EventHandler for Handler {
 
                             if (fake_embed.image.is_some()) {
                                 let url = fake_embed.image.clone().unwrap();
-                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs") && url.contains(".gif")) {
+                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs")) {
                                     e.image(url);
 
                                 }
@@ -1161,7 +1161,7 @@ impl EventHandler for Handler {
                         let mut do_buttons = true;
                         if fake_embed.url.is_some() {
                             let url = fake_embed.image.clone().unwrap();
-                            if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                            if (url.contains("imgur") && url.contains(".gif")) || url.contains("redgifs") {
                                 do_buttons = false;
                             }
                         }
@@ -1239,7 +1239,7 @@ impl EventHandler for Handler {
 
                             if (fake_embed.image.is_some()) {
                                 let url = fake_embed.image.clone().unwrap();
-                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs") && url.contains(".gif")) {
+                                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs")) {
                                     e.image(url);
                                 }
                             }
@@ -1254,7 +1254,7 @@ impl EventHandler for Handler {
 
             if (fake_embed_2.image.is_some()) {
                 let url = fake_embed_2.image.clone().unwrap();
-                if (url.contains("imgur") || url.contains("redgifs")) && url.contains(".gif") {
+                if (url.contains("imgur") && url.contains(".gif")) || url.contains("redgifs") {
                     command.channel_id.send_message(&ctx.http, |message| {
                         message.content(url);
 
