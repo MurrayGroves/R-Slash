@@ -27,6 +27,8 @@ use mongodb::{Client, options::ClientOptions};
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 use serenity::cache::Cache;
+use serenity::http::GuildPagination;
+use serenity::model::guild::GuildInfo;
 use serenity::model::id::GuildId;
 use serenity::model::Timestamp;
 
@@ -223,8 +225,13 @@ async fn fetch_guild_config(guild_id: GuildId, cache: Arc<Cache>, mongodb_client
         None => { // If guild configuration doesn't exist
             let mut nsfw = "";
 
+            let joined_at = if let Some(i) = guild_id.to_guild_cached(&cache) {
+                i.joined_at
+            } else {
+                Timestamp::from_unix_timestamp(0).unwrap()
+            };
             // If the bot joined the guild before September 1st 2022, it joined as Booty Bot, not R Slash
-            if guild_id.to_guild_cached(cache).unwrap().joined_at < Timestamp::from_unix_timestamp(1661986800).unwrap() {
+            if joined_at < Timestamp::from_unix_timestamp(1661986800).unwrap() {
                 nsfw = "nsfw";
             } else {
                 nsfw = "non-nsfw";
@@ -277,8 +284,23 @@ impl EventHandler for Handler {
             let nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
 
             let me = ctx.cache.current_user();
-            let guilds = me.guilds(&ctx.http).await.unwrap();
+            //let guilds = me.guilds(&ctx.http).await.unwrap();
+            let mut guilds = Vec::new();
+            loop {
+                let mut page = ctx.http.as_ref().get_guilds(Some(&GuildPagination::After(guilds.last().map_or(GuildId(1), |g: &GuildInfo| g.id))), Some(200)).await.unwrap();
+                if page.len() == 0 {
+                    break;
+                }
+                println!("Reached guild {}", guilds.len());
+                guilds.append(&mut page);
+            }
+            println!("Number of guilds: {}", guilds.len());
+            let mut count = 0;
             for guild in guilds {
+                count += 1;
+                if count % 100 == 0 {
+                    println!("Created commands on guild {}", count);
+                }
                 let id = guild.id;
 
                 let guild_config = fetch_guild_config(id, ctx.cache.clone(), &mut mongodb_client).await;
@@ -310,7 +332,7 @@ impl EventHandler for Handler {
                 });
 
                 return command;
-            }).await.expect("Failed to register slash commands");
+            }).await;
             }
         }
 
@@ -319,6 +341,14 @@ impl EventHandler for Handler {
                 command
                     .name("membership")
                     .description("Get information about your membership")
+            }).await.expect("Failed to register slash commands");
+        }
+
+        if command == "info" || command == "all" {
+            let _ = Command::create_global_application_command(&ctx.http, |command| {
+                command
+                    .name("info")
+                    .description("Get information about the bot")
             }).await.expect("Failed to register slash commands");
         }
 

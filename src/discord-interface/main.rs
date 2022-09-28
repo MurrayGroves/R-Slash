@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client_k8s = kube::Client::try_default().await?;
         let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
         let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
-        let current_shards = shards_set.status.unwrap().ready_replicas.unwrap() as u64;
+        let current_shards = shards_set.status.unwrap().replicas as u64;
         //let current_shards = current_shards.get("kubectl.kubernetes.io/last-applied-configuration").unwrap();
         //let current_shards: serde_json::Value = serde_json::from_str(current_shards).unwrap();
         //let mut current_shards: u64 = current_shards["spec"]["replicas"].as_u64().unwrap();
@@ -126,6 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let manual_sharding: bool = manual_sharding.parse::<bool>().unwrap();
             if manual_sharding {
                 info!("Manual sharding enabled, doing nothing.");
+                thread::sleep(Duration::from_secs(60*15));
                 continue;
             }
             info!("Booting new shards");
