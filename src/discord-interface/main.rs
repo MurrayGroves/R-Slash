@@ -17,7 +17,17 @@ use std::convert::TryInto;
 
 async fn add_shards(num: u64, max_concurrency: u64) {
     let mut con = get_redis_connection().await;
-    let _:() = redis::cmd("INCRBY").arg("total_shards").arg(num).query(&mut con).unwrap();
+
+    let client_k8s = kube::Client::try_default().await.unwrap();
+
+    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
+    let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
+    let current_shards = shards_set.metadata.annotations.expect("");
+    let current_shards = current_shards.get("kubectl.kubernetes.io/last-applied-configuration").unwrap();
+    let current_shards: serde_json::Value = serde_json::from_str(current_shards).unwrap();
+    let current_shards: u64 = current_shards["spec"]["replicas"].as_u64().unwrap();
+
+    let _:() = con.set("total_shards", current_shards+ num).expect("Failed to set total shards");
 
     let mut desired_shards = num;
     loop {
@@ -35,9 +45,7 @@ async fn add_shards(num: u64, max_concurrency: u64) {
         let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
         let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
         let current_shards = shards_set.metadata.annotations.expect("");
-        let current_shards = current_shards.get("kubectl.kubernetes.io/last-applied-configuration").unwrap();
-        let current_shards: serde_json::Value = serde_json::from_str(current_shards).unwrap();
-        let current_shards: u64 = current_shards["spec"]["replicas"].as_u64().unwrap();
+        let current_shards: u64 = shards_set.status.unwrap().replicas.try_into().unwrap();
 
         let patch = serde_json::json!({
             "apiVersion": "apps/v1",

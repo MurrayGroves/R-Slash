@@ -1388,16 +1388,8 @@ async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge:
         let db_total_shards: u64 = db_total_shards.expect("Failed to get or convert total_shards");
 
         if db_total_shards != total_shards {
-            debug!("Total shards changed from {} to {}, re-identifying with Discord.", total_shards, db_total_shards);
-
-            let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
-            let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
-
-            total_shards = db_total_shards;
-
-            let mut shard_manager = shard_manager.lock().await;
-            shard_manager.set_shards(shard_id, 1, total_shards).await;
-            shard_manager.initialize().expect("Failed to initialise new shard manager");
+            debug!("Total shards changed from {} to {}, marking self as for restart.", total_shards, db_total_shards);
+            fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
         }
     }
 }
