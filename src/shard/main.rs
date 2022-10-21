@@ -76,7 +76,7 @@ pub enum ConfigValue {
     Bool(bool),
     REDIS(redis::Connection),
     MONGODB(mongodb::Client),
-    SUBREDDIT_LIST(Vec<String>),
+    SubredditList(Vec<String>),
 }
 
 /// Stores config values required for operation of the downloader
@@ -167,7 +167,7 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
     let mut nsfw_subreddits = match data_mut.get_mut("nsfw_subreddits").unwrap() {
-        ConfigValue::SUBREDDIT_LIST(list) => list,
+        ConfigValue::SubredditList(list) => list,
         _ => panic!("nsfw_subreddits is not a list"),
     };
 
@@ -271,7 +271,7 @@ async fn update_guild_commands(guild_id: GuildId, data: &mut tokio::sync::RwLock
     let db = mongodb_client.database("config");
     let coll = db.collection::<Document>("settings");
 
-    let filter = doc! {"id": "subreddit_list".to_string()};
+    let filter = doc! {"id": "SubredditList".to_string()};
     let find_options = FindOptions::builder().build();
     let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
 
@@ -673,7 +673,7 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn guild_delete(&self, ctx: Context, incomplete: UnavailableGuild, full: Option<Guild>) {
+    async fn guild_delete(&self, ctx: Context, _incomplete: UnavailableGuild, _full: Option<Guild>) {
         let mut data = ctx.data.write().await;
         let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
@@ -1006,7 +1006,7 @@ impl EventHandler for Handler {
             if (fake_embed_2.image.is_some()) {
                 let url = fake_embed_2.image.clone().unwrap();
                 if (url.contains("imgur")  && url.contains(".gif")) || url.contains("redgifs") {
-                    command.channel_id.send_message(&ctx.http, |message| {
+                    match command.channel_id.send_message(&ctx.http, |message| {
                         message.content(url);
 
                         if (fake_embed_2.buttons.is_some()) {
@@ -1035,7 +1035,12 @@ impl EventHandler for Handler {
                                 });
                             }
                         message
-                    }).await.unwrap();
+                    }).await {
+                        Ok(_) => {}
+                        Err(why) => {
+                            warn!("Cannot send followup to slash command: {}", why);
+                        }
+                    }
                 }
             }
         }
@@ -1255,7 +1260,7 @@ impl EventHandler for Handler {
             if (fake_embed_2.image.is_some()) {
                 let url = fake_embed_2.image.clone().unwrap();
                 if (url.contains("imgur") && url.contains(".gif")) || url.contains("redgifs") {
-                    command.channel_id.send_message(&ctx.http, |message| {
+                    match command.channel_id.send_message(&ctx.http, |message| {
                         message.content(url);
 
                         if (fake_embed_2.buttons.is_some()) {
@@ -1284,94 +1289,14 @@ impl EventHandler for Handler {
                                 });
                             }
                         message
-                    }).await.unwrap();
+                    }).await {
+                        Err(why) => {
+                            warn!("Cannot send followup message, {}", why);
+                        },
+                        _ => {}
+                    }
                 }
             }
-            /*if let Err(why) = command
-                .create_interaction_response(&ctx.http, |response| {
-                    response
-                        .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|message| {
-                            if (fake_embed.buttons.is_some()) {
-                                message.components(|c| {
-                                    c.create_action_row(|a| {
-                                        for button in fake_embed.buttons.unwrap() {
-                                            a.create_button(|b| {
-                                                b.label(button.label)
-                                                    .style(button.style)
-                                                    .disabled(button.disabled);
-
-                                                if button.url.is_some() {
-                                                    b.url(button.url.unwrap());
-                                                }
-
-                                                if button.custom_id.is_some() {
-                                                    b.custom_id(button.custom_id.unwrap());
-                                                }
-
-                                                return b;
-                                            });
-                                        }
-
-                                        return a;
-                                    })
-                                });
-                            }
-
-                            let fake_embed = fake_embed_2.clone();
-                            message.embed(|e: &mut CreateEmbed| {
-                            if (fake_embed.timestamp.is_some()) {
-                                e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(fake_embed.timestamp.unwrap() as i64).unwrap());
-                            }
-
-                            if (fake_embed.footer.is_some()) {
-                                let text = fake_embed.footer.unwrap();
-                                e.footer(|footer| {
-                                    footer.text(text)
-                                });
-                            }
-
-                            if (fake_embed.fields.is_some()) {
-                                e.fields(fake_embed.fields.unwrap());
-                            }
-
-                            if (fake_embed.color.is_some()) {
-                                e.colour(fake_embed.color.unwrap());
-                            }
-
-                            if (fake_embed.description.is_some()) {
-                                e.description(fake_embed.description.unwrap());
-                            }
-
-                            if (fake_embed.title.is_some()) {
-                                e.title(fake_embed.title.unwrap());
-                            }
-
-                            if (fake_embed.url.is_some()) {
-                                e.url(fake_embed.url.unwrap().clone());
-                            }
-
-                            if (fake_embed.author.is_some()) {
-                                let name = fake_embed.author.unwrap();
-                                e.author(|author| {
-                                    author.name(&name)
-                                        .url(format!("https://reddit.com/u/{}", name))
-                                });
-                            }
-
-                            if (fake_embed.thumbnail.is_some()) {
-                                e.thumbnail(fake_embed.thumbnail.unwrap());
-                            }
-
-                            if (fake_embed.image.is_some()) {
-                                e.image(fake_embed.image.unwrap());
-                            }
-
-                            return e;
-
-            })})
-                })
-                .await {}*/
         }
     }
 }
@@ -1381,16 +1306,33 @@ async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge:
     let db_client = redis::Client::open("redis://redis/").unwrap();
     let mut con = db_client.get_tokio_connection().await.expect("Can't connect to redis");
 
+    let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
+    let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
+
     loop {
         let _ = sleep(Duration::from_secs(60)).await;
 
         let db_total_shards: redis::RedisResult<u64> = con.get("total_shards").await;
-        let db_total_shards: u64 = db_total_shards.expect("Failed to get or convert total_shards");
+        let db_total_shards: u64 = db_total_shards.expect("Failed to get or convert total_shards from Redis");
 
+        let mut shard_manager = shard_manager.lock().await;
         if db_total_shards != total_shards {
-            debug!("Total shards changed from {} to {}, marking self as for restart.", total_shards, db_total_shards);
-            fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
+            debug!("Total shards changed from {} to {}, restarting.", total_shards, db_total_shards);
+            shard_manager.set_shards(shard_id, 1, db_total_shards).await;
+            shard_manager.initialize().expect("Failed to initialize shard");
         }
+
+        /*let shard = shard_manager.
+        match shard.heartbeat().await {
+            Ok(_) => {
+                debug!("Heartbeat sent successfully");
+            },
+            Err(why) => {
+                warn!("Heartbeat failed: {}\nMarking self for restart.", why);
+                fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
+            }
+        }*/
+
     }
 }
 
@@ -1412,7 +1354,7 @@ async fn main() {
     let db = mongodb_client.database("config");
     let coll = db.collection::<Document>("settings");
 
-    let filter = doc! {"id": "subreddit_list".to_string()};
+    let filter = doc! {"id": "SubredditList".to_string()};
     let find_options = FindOptions::builder().build();
     let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
 
@@ -1448,7 +1390,7 @@ async fn main() {
         ("shard_id".to_string(), ConfigValue::U64(shard_id as u64)),
         ("redis_connection".to_string(), ConfigValue::REDIS(con)),
         ("mongodb_connection".to_string(), ConfigValue::MONGODB(mongodb_client)),
-        ("nsfw_subreddits".to_string(), ConfigValue::SUBREDDIT_LIST(nsfw_subreddits))
+        ("nsfw_subreddits".to_string(), ConfigValue::SubredditList(nsfw_subreddits))
     ]);
 
     {
