@@ -271,7 +271,7 @@ async fn update_guild_commands(guild_id: GuildId, data: &mut tokio::sync::RwLock
     let db = mongodb_client.database("config");
     let coll = db.collection::<Document>("settings");
 
-    let filter = doc! {"id": "SubredditList".to_string()};
+    let filter = doc! {"id": "subreddit_list".to_string()};
     let find_options = FindOptions::builder().build();
     let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
 
@@ -708,7 +708,7 @@ impl EventHandler for Handler {
             fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
         }
         let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
-        file.write_all(b"alive").expect("Unable to write to /etc/probes/live");
+        file.write_all(b"alive");
     }
 
     /// Fires when the shard's status is updated
@@ -1354,7 +1354,7 @@ async fn main() {
     let db = mongodb_client.database("config");
     let coll = db.collection::<Document>("settings");
 
-    let filter = doc! {"id": "SubredditList".to_string()};
+    let filter = doc! {"id": "subreddit_list".to_string()};
     let find_options = FindOptions::builder().build();
     let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
 
