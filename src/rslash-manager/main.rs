@@ -284,7 +284,6 @@ impl EventHandler for Handler {
             let nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
 
             let me = ctx.cache.current_user();
-            //let guilds = me.guilds(&ctx.http).await.unwrap();
             let mut guilds = Vec::new();
             loop {
                 let mut page = ctx.http.as_ref().get_guilds(Some(&GuildPagination::After(guilds.last().map_or(GuildId(1), |g: &GuildInfo| g.id))), Some(200)).await.unwrap();
@@ -334,6 +333,78 @@ impl EventHandler for Handler {
                 return command;
             }).await;
             }
+        }
+
+        if command == "get_delete" {
+            let mut guilds = Vec::new();
+            loop {
+                let mut page = ctx.http.as_ref().get_guilds(Some(&GuildPagination::After(guilds.last().map_or(GuildId(1), |g: &GuildInfo| g.id))), Some(200)).await.unwrap();
+                if page.len() == 0 {
+                    break;
+                }
+                println!("Reached guild {}", guilds.len());
+                guilds.append(&mut page);
+            }
+            println!("Number of guilds: {}", guilds.len());
+            let mut count = 0;
+            for guild in guilds {
+                count += 1;
+                if count % 100 == 0 {
+                    println!("Created commands on guild {}", count);
+                }
+                let id = guild.id;
+                id.set_application_commands(&ctx.http, |c| {
+                    c.set_application_commands(Vec::new())
+                }).await.expect("Failed to delete guild commands"); // Delete all guild commands
+            }
+        }
+
+        if command == "get" || command == "all" {
+            let mut client_options = ClientOptions::parse("mongodb://my-user:rslash@localhost:27018/?tls=false&directConnection=true").await.unwrap();
+            client_options.app_name = Some("rslash-manager".to_string());
+
+            let mut mongodb_client = mongodb::Client::with_options(client_options).unwrap();
+
+            let db = mongodb_client.database("config");
+            let coll = db.collection::<Document>("settings");
+
+            let filter = doc! {"id": "subreddit_list".to_string()};
+            let find_options = FindOptions::builder().build();
+            let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
+
+            let doc = cursor.try_next().await.unwrap().unwrap();
+            let sfw_subreddits: Vec<&str> = doc.get_array("sfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
+            let nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
+
+            let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
+            let nsfw = application_id == 278550142356029441;
+            let _ = Command::create_global_application_command(&ctx.http,|command| {
+                command
+                    .name("get")
+                    .description("Get a post from a specified subreddit");
+
+                command.create_option(|option| {
+                    option.name("subreddit")
+                        .description("The subreddit to get a post from")
+                        .required(true)
+                        .kind(CommandOptionType::String);
+
+                    if nsfw {
+                        for subreddit in &nsfw_subreddits {
+                            option.add_string_choice(subreddit, subreddit);
+                        }
+                    }
+                    else {
+                        for subreddit in &sfw_subreddits {
+                            option.add_string_choice(subreddit, subreddit);
+                        }
+                    }
+
+                    return option;
+                });
+
+                return command;
+            }).await;
         }
 
         if command == "membership" || command == "all" {
