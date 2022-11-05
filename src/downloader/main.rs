@@ -466,7 +466,9 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
     let db_client = redis::Client::open("redis://redis/").unwrap();
     let mut con = db_client.get_connection().expect("Can't connect to redis");
 
-    let web_client = reqwest::Client::new();
+    let web_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build().expect("Failed to build client");
 
     let mut reddit_secret = String::new();
     let mut reddit_client = String::new();
