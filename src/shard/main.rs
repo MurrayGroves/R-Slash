@@ -460,8 +460,10 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
 }
 
 
-async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
-    let membership = get_user_tiers(command.user.id, data).await;
+async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Context) -> FakeEmbed {
+    let mut data = ctx.data.write().await;
+
+    let membership = get_user_tiers(command.user.id, &mut data).await;
     if !membership.bronze.active {
         return FakeEmbed {
             title: Some("Premium Feature".to_string()),
@@ -478,13 +480,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mu
         }
     }
 
-    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-
-    let mut con = match data_mut.get_mut("redis_connection").unwrap() {
-        ConfigValue::REDIS(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
-
+    drop(data); // Release lock while performing web request
 
     let options = &command.data.options;
     let subreddit = options[0].value.clone();
@@ -519,15 +515,34 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mu
         }
     }
 
+    let mut data = ctx.data.write().await;
+    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+    let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+        ConfigValue::REDIS(db) => Ok(db),
+        _ => Err(0),
+    }.unwrap();
+
+
     let last_cached: i64 = con.get(&format!("{}", subreddit)).unwrap_or(0);
+
 
     let mut post: HashMap<String, redis::Value> = HashMap::new();
     if last_cached +  3600000 < get_epoch_ms() as i64 {
         debug!("Subreddit last cached more than an hour ago, updating...");
         command.defer(&ctx.http).await;
         let _:() = con.lpush("custom_subreddits_queue", subreddit.clone()).unwrap();
+        drop(data); // Release lock while waiting to avoid deadlocks.
         loop {
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(1000)).await;
+            let mut data = ctx.data.write().await;
+            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+            let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+                ConfigValue::REDIS(db) => Ok(db),
+                _ => Err(0),
+            }.unwrap();
+
             let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query(con) {
                 Ok(posts) => {
                     posts
@@ -542,7 +557,8 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mu
             }
         }
     } else {
-        return get_subreddit_cmd(command, data, ctx).await;
+        let mut data = ctx.data.write().await;
+        return get_subreddit_cmd(command, &mut data, ctx).await;
     }
 
     return FakeEmbed {
@@ -707,8 +723,10 @@ impl EventHandler for Handler {
         if !Path::new("/etc/probes").is_dir() {
             fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
         }
-        let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
-        file.write_all(b"alive");
+        if !Path::new("/etc/probes/live").exists() {
+            let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
+            file.write_all(b"alive");
+        }
     }
 
     /// Fires when the shard's status is updated
@@ -720,9 +738,11 @@ impl EventHandler for Handler {
         };
 
         if alive {
-            fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
-            let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
-            file.write_all(b"alive").expect("Unable to write to /etc/probes/live");
+            if !Path::new("/etc/probes/live").exists() {
+                fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+                let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
+                file.write_all(b"alive");
+            }
         } else {
             fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
         }
@@ -773,8 +793,7 @@ impl EventHandler for Handler {
                 },
 
                 "custom" => {
-                    let mut data = ctx.data.write().await;
-                    get_custom_subreddit(&command, &mut data, &ctx).await
+                    get_custom_subreddit(&command, &ctx).await
                 },
 
                 "info" => {
