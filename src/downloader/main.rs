@@ -212,8 +212,9 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
             .send()
             .await.expect("Failed to request from reddit");
 
+        debug!("Finished request");
         let last_requested = get_epoch_ms();
-
+        debug!("Got time");
         let text = match res.text().await {
             Ok(x) => x,
             Err(_) => {
@@ -221,6 +222,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
                 return;
             }
         };
+        debug!("Matched text");
         let results: serde_json::Value = match serde_json::from_str(&text) {
             Ok(x) => x,
             Err(_) => {
@@ -232,6 +234,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
         let results = results.get("data").unwrap().get("children").unwrap().as_array().unwrap();
 
         if results.len() == 0 {
+            debug!("No results");
             break;
         }
 
@@ -463,10 +466,12 @@ impl oauthToken {
 /// ## data
 /// A thread-safe wrapper of the [Config](ConfigStruct)
 async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
-    let db_client = redis::Client::open("redis://redis/").unwrap();
+    let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     let mut con = db_client.get_connection().expect("Can't connect to redis");
 
-    let web_client = reqwest::Client::new();
+    let web_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build().expect("Failed to build client");
 
     let mut reddit_secret = String::new();
     let mut reddit_client = String::new();
