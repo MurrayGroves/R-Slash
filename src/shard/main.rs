@@ -130,7 +130,7 @@ pub struct FakeButton {
 }
 
 fn get_redis_con() -> redis::Connection {
-    let db_client = redis::Client::open("redis://redis/").unwrap();
+    let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     return db_client.get_connection().expect("Can't connect to redis");
 }
 
@@ -333,8 +333,10 @@ async fn fetch_guild_config(guild_id: GuildId, data: &mut tokio::sync::RwLockWri
         None => { // If guild configuration doesn't exist
             let mut nsfw = "";
 
-            // If the bot joined the guild before October 1st 2022, it joined as Booty Bot, not R Slash
-            if guild_id.to_guild_cached(cache).unwrap().joined_at < Timestamp::from_unix_timestamp(1664578800).unwrap() {
+            let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
+
+            // Check if booty bot or r slash
+            if application_id == 278550142356029441 {
                 nsfw = "nsfw";
             } else {
                 nsfw = "non-nsfw";
@@ -460,8 +462,10 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
 }
 
 
-async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
-    let membership = get_user_tiers(command.user.id, data).await;
+async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Context) -> FakeEmbed {
+    let mut data = ctx.data.write().await;
+
+    let membership = get_user_tiers(command.user.id, &mut data).await;
     if !membership.bronze.active {
         return FakeEmbed {
             title: Some("Premium Feature".to_string()),
@@ -478,13 +482,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mu
         }
     }
 
-    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-
-    let mut con = match data_mut.get_mut("redis_connection").unwrap() {
-        ConfigValue::REDIS(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
-
+    drop(data); // Release lock while performing web request
 
     let options = &command.data.options;
     let subreddit = options[0].value.clone();
@@ -519,15 +517,34 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mu
         }
     }
 
+    let mut data = ctx.data.write().await;
+    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+    let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+        ConfigValue::REDIS(db) => Ok(db),
+        _ => Err(0),
+    }.unwrap();
+
+
     let last_cached: i64 = con.get(&format!("{}", subreddit)).unwrap_or(0);
+
 
     let mut post: HashMap<String, redis::Value> = HashMap::new();
     if last_cached +  3600000 < get_epoch_ms() as i64 {
         debug!("Subreddit last cached more than an hour ago, updating...");
         command.defer(&ctx.http).await;
         let _:() = con.lpush("custom_subreddits_queue", subreddit.clone()).unwrap();
+        drop(data); // Release lock while waiting to avoid deadlocks.
         loop {
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(1000)).await;
+            let mut data = ctx.data.write().await;
+            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+            let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+                ConfigValue::REDIS(db) => Ok(db),
+                _ => Err(0),
+            }.unwrap();
+
             let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query(con) {
                 Ok(posts) => {
                     posts
@@ -542,7 +559,8 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, data: &mu
             }
         }
     } else {
-        return get_subreddit_cmd(command, data, ctx).await;
+        let mut data = ctx.data.write().await;
+        return get_subreddit_cmd(command, &mut data, ctx).await;
     }
 
     return FakeEmbed {
@@ -570,7 +588,7 @@ async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::R
     }.unwrap();
 
 
-    let guild_counts: HashMap<String, redis::Value> = con.hgetall("shard_guild_counts").unwrap();
+    let guild_counts: HashMap<String, redis::Value> = con.hgetall(format!("shard_guild_counts_{}", get_namespace().await)).unwrap();
     let mut guild_count = 0;
     for (shard, count) in guild_counts {
         guild_count += from_redis_value::<u64>(&count).unwrap();
@@ -662,7 +680,7 @@ impl EventHandler for Handler {
             _ => Err(0),
         }.unwrap();
 
-        let _:() = con.hset("shard_guild_counts", ctx.shard_id, ctx.cache.guild_count()).unwrap();
+        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).unwrap();
 
         drop (con);
         drop (data_mut);
@@ -682,7 +700,7 @@ impl EventHandler for Handler {
             _ => Err(0),
         }.unwrap();
 
-        let _:() = con.hset("shard_guild_counts", ctx.shard_id, ctx.cache.guild_count()).unwrap();
+        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).unwrap();
 
         drop (con);
         drop (data_mut);
@@ -707,8 +725,10 @@ impl EventHandler for Handler {
         if !Path::new("/etc/probes").is_dir() {
             fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
         }
-        let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
-        file.write_all(b"alive");
+        if !Path::new("/etc/probes/live").exists() {
+            let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
+            file.write_all(b"alive");
+        }
     }
 
     /// Fires when the shard's status is updated
@@ -720,9 +740,11 @@ impl EventHandler for Handler {
         };
 
         if alive {
-            fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
-            let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
-            file.write_all(b"alive").expect("Unable to write to /etc/probes/live");
+            if !Path::new("/etc/probes/live").exists() {
+                fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+                let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
+                file.write_all(b"alive");
+            }
         } else {
             fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
         }
@@ -773,8 +795,7 @@ impl EventHandler for Handler {
                 },
 
                 "custom" => {
-                    let mut data = ctx.data.write().await;
-                    get_custom_subreddit(&command, &mut data, &ctx).await
+                    get_custom_subreddit(&command, &ctx).await
                 },
 
                 "info" => {
@@ -1303,7 +1324,7 @@ impl EventHandler for Handler {
 
 
 async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge::gateway::ShardManager>>, mut total_shards: u64) {
-    let db_client = redis::Client::open("redis://redis/").unwrap();
+    let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     let mut con = db_client.get_tokio_connection().await.expect("Can't connect to redis");
 
     let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
@@ -1312,7 +1333,7 @@ async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge:
     loop {
         let _ = sleep(Duration::from_secs(60)).await;
 
-        let db_total_shards: redis::RedisResult<u64> = con.get("total_shards").await;
+        let db_total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace().await)).await;
         let db_total_shards: u64 = db_total_shards.expect("Failed to get or convert total_shards from Redis");
 
         let mut shard_manager = shard_manager.lock().await;
@@ -1336,6 +1357,11 @@ async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge:
     }
 }
 
+async fn get_namespace() -> String {
+    let namespace= fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+        .expect("Couldn't read /var/run/secrets/kubernetes.io/serviceaccount/namespace");
+    return namespace;
+}
 
 #[tokio::main]
 async fn main() {
@@ -1344,7 +1370,7 @@ async fn main() {
     let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
     let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
 
-    let redis_client = redis::Client::open("redis://redis/").unwrap();
+    let redis_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     let mut con = redis_client.get_connection().expect("Can't connect to redis");
 
     let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
@@ -1362,7 +1388,7 @@ async fn main() {
 
     let nsfw_subreddits: Vec<String> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap().to_string()).collect();
 
-    let total_shards: redis::RedisResult<u64> = con.get("total_shards");
+    let total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace().await));
     let total_shards: u64 = total_shards.expect("Failed to get or convert total_shards");
 
     let shard_id_logger = shard_id.clone();
@@ -1380,7 +1406,7 @@ async fn main() {
     warn!("Printing warn");
     error!("Printing error");
 
-    let mut client = serenity::Client::builder(token,  GatewayIntents::non_privileged() | GatewayIntents::GUILD_MEMBERS)
+    let mut client = serenity::Client::builder(token,  GatewayIntents::non_privileged())
         .event_handler(Handler)
         .application_id(application_id)
         .await
@@ -1398,16 +1424,18 @@ async fn main() {
         data.insert::<ConfigStruct>(contents);
     }
 
-
     let shard_manager = client.shard_manager.clone();
     tokio::spawn(async move {
-       monitor_total_shards(shard_manager, total_shards).await;
+        debug!("Spawning shard monitor thread");
+        monitor_total_shards(shard_manager, total_shards).await;
     });
 
     let thread = tokio::spawn(async move {
-       client.start_shard(shard_id, total_shards as u64).await;
+        debug!("Spawning client thread");
+        client.start_shard(shard_id, total_shards as u64).await.expect("Failed to start shard");
     });
 
+    // If client thread exits, shard has crashed, so mark self as unhealthy.
     match thread.await {
         Ok(_) => {},
         Err(_) => {
