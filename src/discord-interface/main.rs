@@ -14,20 +14,27 @@ use std::cmp;
 use kube::api::Patch;
 use std::convert::TryInto;
 
+async fn get_namespace() -> String {
+    let namespace= fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+        .expect("Couldn't read /var/run/secrets/kubernetes.io/serviceaccount/namespace");
+    return namespace;
+}
 
 async fn add_shards(num: u64, max_concurrency: u64) {
     let mut con = get_redis_connection().await;
 
     let client_k8s = kube::Client::try_default().await.unwrap();
 
-    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
+    let namespace = get_namespace().await;
+
+    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
     let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
     let current_shards = shards_set.metadata.annotations.expect("");
     let current_shards = current_shards.get("kubectl.kubernetes.io/last-applied-configuration").unwrap();
     let current_shards: serde_json::Value = serde_json::from_str(current_shards).unwrap();
     let current_shards: u64 = current_shards["spec"]["replicas"].as_u64().unwrap();
 
-    let _:() = con.set("total_shards", current_shards+ num).expect("Failed to set total shards");
+    let _:() = con.set(format!("total_shards_{}", namespace), current_shards+ num).expect("Failed to set total shards");
 
     let mut desired_shards = num;
     loop {
@@ -42,7 +49,7 @@ async fn add_shards(num: u64, max_concurrency: u64) {
 
         let client_k8s = kube::Client::try_default().await.unwrap();
 
-        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
+        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
         let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
         let current_shards = shards_set.metadata.annotations.expect("");
         let current_shards: u64 = shards_set.status.unwrap().replicas.try_into().unwrap();
@@ -52,7 +59,7 @@ async fn add_shards(num: u64, max_concurrency: u64) {
             "kind": "StatefulSet",
             "metadata": {
                 "name": "discord-shards",
-                "namespace": "r-slash"
+                "namespace": namespace
             },
             "spec": {
                 "replicas": new_shards + current_shards
@@ -68,7 +75,7 @@ async fn add_shards(num: u64, max_concurrency: u64) {
 
         loop {
             let client_k8s = kube::Client::try_default().await.unwrap();
-            let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
+            let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
             let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
             let ready_shards: u64 = shards_set.status.unwrap().available_replicas.unwrap().try_into().unwrap();
             if ready_shards == new_shards + current_shards {
@@ -103,12 +110,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
     let application_id = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set");
 
+    let namespace = get_namespace().await;
+
     let client_web = reqwest::Client::new();
 
     let mut con = get_redis_connection().await;
     loop {
         let client_k8s = kube::Client::try_default().await?;
-        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
+        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
         let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
         let current_shards = shards_set.status.unwrap().replicas as u64;
         //let current_shards = current_shards.get("kubectl.kubernetes.io/last-applied-configuration").unwrap();

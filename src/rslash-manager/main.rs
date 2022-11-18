@@ -55,8 +55,9 @@ async fn get_redis_connection() -> redis::Connection {
 
 async fn get_shard_set() -> k8s_openapi::api::apps::v1::StatefulSet {
     let client_k8s = kube::Client::try_default().await.expect("Failed to connect to k8s");
+    let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
 
-    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
+    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
     let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get discord-credentials");
     return shards_set;
 }
@@ -66,13 +67,15 @@ async fn update_max_unavailable() {
     let (total_shards, max_concurrency) = get_discord_details().await;
     let client_k8s = kube::Client::try_default().await.unwrap();
 
-    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
+    let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
+
+    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
     let patch = serde_json::json!({
         "apiVersion": "apps/v1",
         "kind": "StatefulSet",
         "metadata": {
             "name": "discord-shards",
-            "namespace": "r-slash"
+            "namespace": namespace
         },
         "spec": {
             "updateStrategy": {
@@ -91,8 +94,10 @@ async fn update_max_unavailable() {
 }
 
 async fn get_discord_details() -> (u64, u64) {
+    let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
+
     let client_k8s = kube::Client::try_default().await.unwrap();
-    let credentials: kube::Api<k8s_openapi::api::core::v1::Secret> = kube::Api::namespaced(client_k8s, "r-slash");
+    let credentials: kube::Api<k8s_openapi::api::core::v1::Secret> = kube::Api::namespaced(client_k8s, &namespace);
     let credentials = credentials.get("discord-credentials").await.unwrap();
     let credentials = credentials.data.unwrap();
     let token = credentials["DISCORD_TOKEN"].clone();
@@ -119,7 +124,9 @@ async fn stop() {
 
         let client_k8s = kube::Client::try_default().await.unwrap();
 
-        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
+        let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
+
+        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
         let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
 
         let patch = serde_json::json!({
@@ -127,7 +134,7 @@ async fn stop() {
             "kind": "StatefulSet",
             "metadata": {
                 "name": "discord-shards",
-                "namespace": "r-slash"
+                "namespace": namespace
             },
             "spec": {
                 "replicas": 0
@@ -151,8 +158,10 @@ async fn start() {
         None => gateway_total_shards
     };
 
+    let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
+
     let mut con = get_redis_connection().await;
-    let _:() = con.set("total_shards", total_shards).expect("Failed to set total_shards");
+    let _:() = con.set(format!("total_shards_{}", namespace), total_shards).expect("Failed to set total_shards");
     let _:() = con.set("max_concurrency", max_concurrency).expect("Failed to set max_concurrency");
     let _:() = con.set("manual_sharding", "true").expect("Failed to set manual_sharding"); // Tells discord-interface to release control of sharding
 
@@ -169,7 +178,9 @@ async fn start() {
 
         let client_k8s = kube::Client::try_default().await.unwrap();
 
-        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
+        let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
+
+        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
         let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
         let current_shards = shards_set.metadata.annotations.expect("");
         let current_shards = current_shards.get("kubectl.kubernetes.io/last-applied-configuration").unwrap();
@@ -181,7 +192,7 @@ async fn start() {
             "kind": "StatefulSet",
             "metadata": {
                 "name": "discord-shards",
-                "namespace": "r-slash"
+                "namespace": namespace
             },
             "spec": {
                 "replicas": new_shards + current_shards
@@ -197,7 +208,7 @@ async fn start() {
 
         loop {
             let client_k8s = kube::Client::try_default().await.unwrap();
-            let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
+            let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
             let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
             let ready_shards: u64 = shards_set.status.unwrap().available_replicas.unwrap().try_into().unwrap();
             if ready_shards == new_shards + current_shards {
@@ -359,6 +370,11 @@ impl EventHandler for Handler {
             }
         }
 
+        if command == "configure_delete" {
+            let id = serenity::model::id::CommandId::from(1014850340920758293);
+            Command::delete_global_application_command(&ctx.http, id).await;;
+        }
+
         if command == "get" || command == "all" {
             let mut client_options = ClientOptions::parse("mongodb://my-user:rslash@localhost:27018/?tls=false&directConnection=true").await.unwrap();
             client_options.app_name = Some("rslash-manager".to_string());
@@ -437,7 +453,7 @@ impl EventHandler for Handler {
             }).await.expect("Failed to register slash commands");
         }
 
-        if command == "configure" || command == "all" {
+        if command == "configure" {
             println!("Matched on configure");
             let _ = Command::create_global_application_command(&ctx.http, |command| {
                 command
@@ -489,7 +505,7 @@ async fn update_commands(command: Option<&str>) {
     let shard_id: usize = 0;
     let total_shards: usize = env::var("TOTAL_SHARDS").expect("TOTAL_SHARDS not set").parse().expect("Failed to convert total_shards to usize");
 
-    let mut client = serenity::Client::builder(token, GatewayIntents::non_privileged() | GatewayIntents::GUILD_MEMBERS)
+    let mut client = serenity::Client::builder(token, GatewayIntents::non_privileged())
         .event_handler(Handler)
         .application_id(application_id)
         .await
@@ -507,6 +523,7 @@ async fn update_commands(command: Option<&str>) {
 
 async fn update() {
     let component = env::args_os().nth(2).unwrap().into_string().unwrap();
+    let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
 
     match component.as_str() {
         "shards" => {
@@ -516,14 +533,14 @@ async fn update() {
                 Some(x) => {
                     let tag: String = x.into_string().unwrap().parse().unwrap();
                     let mut rollout = Cmd::new("kubectl");
-                    rollout.arg("set").arg("-n").arg("r-slash").arg("image").arg("statefulset/discord-shards").arg(format!("discord-shard=discord-shard:{}", tag));
+                    rollout.arg("set").arg("-n").arg(namespace).arg("image").arg("statefulset/discord-shards").arg(format!("discord-shard=discord-shard:{}", tag));
                     let output = rollout.output().expect("Failed to run kubectl");
                     println!("{:?}", String::from_utf8(output.stdout).unwrap());
                     println!("{:?}", String::from_utf8(output.stderr).unwrap());
                 },
                 None => {
                     let mut rollout = Cmd::new("kubectl");
-                    rollout.arg("rollout").arg("-n").arg("r-slash").arg("restart").arg("statefulset/discord-shards");
+                    rollout.arg("rollout").arg("-n").arg(namespace).arg("restart").arg("statefulset/discord-shards");
                     let output = rollout.output().expect("Failed to run kubectl");
                     println!("{:?}", String::from_utf8(output.stdout).unwrap());
                     println!("{:?}", String::from_utf8(output.stderr).unwrap());
@@ -557,14 +574,14 @@ async fn update() {
                 Some(x) => {
                     let tag: String = x.into_string().unwrap().parse().unwrap();
                     let mut rollout = Cmd::new("kubectl");
-                    rollout.arg("set").arg("-n").arg("r-slash").arg("image").arg("deployment/discord-interface").arg(format!("discord-interface=discord-interface:{}", tag));
+                    rollout.arg("set").arg("-n").arg(namespace).arg("image").arg("deployment/discord-interface").arg(format!("discord-interface=discord-interface:{}", tag));
                     let output = rollout.output().expect("Failed to run kubectl");
                     println!("{:?}", String::from_utf8(output.stdout).unwrap());
                     println!("{:?}", String::from_utf8(output.stderr).unwrap());
                 },
                 None => {
                     let mut rollout = Cmd::new("kubectl");
-                    rollout.arg("rollout").arg("-n").arg("r-slash").arg("restart").arg("deployment/discord-interface");
+                    rollout.arg("rollout").arg("-n").arg(namespace).arg("restart").arg("deployment/discord-interface");
                     let output = rollout.output().expect("Failed to run kubectl");
                     println!("{:?}", String::from_utf8(output.stdout).unwrap());
                     println!("{:?}", String::from_utf8(output.stderr).unwrap());
@@ -577,14 +594,14 @@ async fn update() {
                 Some(x) => {
                     let tag: String = x.into_string().unwrap().parse().unwrap();
                     let mut rollout = Cmd::new("kubectl");
-                    rollout.arg("set").arg("-n").arg("r-slash").arg("image").arg("deployment/reddit-downloader").arg(format!("reddit-downloader=reddit-downloader:{}", tag));
+                    rollout.arg("set").arg("-n").arg(namespace).arg("image").arg("deployment/reddit-downloader").arg(format!("reddit-downloader=reddit-downloader:{}", tag));
                     let output = rollout.output().expect("Failed to run kubectl");
                     println!("{:?}", String::from_utf8(output.stdout).unwrap());
                     println!("{:?}", String::from_utf8(output.stderr).unwrap());
                 },
                 None => {
                     let mut rollout = Cmd::new("kubectl");
-                    rollout.arg("rollout").arg("-n").arg("r-slash").arg("restart").arg("deployment/reddit-downloader");
+                    rollout.arg("rollout").arg("-n").arg(namespace).arg("restart").arg("deployment/reddit-downloader");
                     let output = rollout.output().expect("Failed to run kubectl");
                     println!("{:?}", String::from_utf8(output.stdout).unwrap());
                     println!("{:?}", String::from_utf8(output.stderr).unwrap());
