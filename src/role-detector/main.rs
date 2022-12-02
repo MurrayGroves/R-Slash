@@ -28,8 +28,8 @@ async fn terminate_membership(user_id: UserId) {
         "$set" : {
             "tiers.bronze.$.end": Timestamp::now().unix_timestamp()
         },
-        "$set" : {
-            "active": []
+        "$pull" : {
+            "active": {"$in" : ["bronze"]} // Remove bronze from active
         }
     };
 
