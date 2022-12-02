@@ -15,8 +15,8 @@ futures = { version = "0.3"}
 log = "0.4"
 env_logger = "*"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time"]}
-reqwest = { version = "*", features = ["json", "rustls-tls"]}
+tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time", "full"]}
+reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"]}
 serenity = { version = "0.11.5", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
 crossbeam = "*"
 crossbeam-utils = "*"
@@ -28,6 +28,12 @@ quit = "*"
 base64 = "*"
 chrono = { version = "*", features = ["alloc"] }
 mongodb = "2.3"
+warp = "0.3"
+serde_derive = "1.0"
+pretty_env_logger = "*"
+bytes = "*"
+html-escape = "0.2.*"
+percent-encoding = "2.2.*"
 
 [[bin]]
 name = "discord-interface"
@@ -49,6 +55,13 @@ path = "src/update-commands/main.rs"
 name = "rslash-manager"
 path = "src/rslash-manager/main.rs"
 
+[[bin]]
+name = "kofi-handler"
+path = "src/kofi-handler/main.rs"
+
+[[bin]]
+name = "role-detector"
+path = "src/role-detector/main.rs"
 
 [profile.release]
 debug = true
