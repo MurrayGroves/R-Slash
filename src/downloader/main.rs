@@ -1,20 +1,11 @@
 use log::*;
-use std::{fs, thread};
 use std::io::Write;
 use std::collections::HashMap;
 use std::iter::FromIterator;
-use crossbeam_utils;
-use std::collections::hash_map::{DefaultHasher, RandomState};
-use tokio_tungstenite;
-use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use futures::prelude::stream::{SplitSink, SplitStream};
-use tungstenite::Message;
 use futures::{lock::Mutex};
-use std::fmt::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::{RwLockWriteGuard, Arc};
+use std::sync::Arc;
 
 use redis::Commands;
 
@@ -33,8 +24,6 @@ pub enum ConfigValue {
     U64(u64),
     Bool(bool),
     String(String),
-    websocket_write(SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>),
-    websocket_read(SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>)
 }
 
 /// Stores config values required for operation of the downloader
@@ -491,6 +480,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
     let gfycat_client = env::var("GFYCAT_CLIENT").expect("GFYCAT_CLIENT not set");
     let gfycat_secret = env::var("GFYCAT_SECRET").expect("GFYCAT_SECRET not set");
     let imgur_client = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
+    let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
     let mut gfycat_token = oauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await.expect("Failed to get gfycat token");
 
     let mut client_options = mongodb::options::ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
@@ -498,10 +488,8 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
 
     let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
 
-
-    let mut last_run = 0;
-    loop {
-        if last_run > (get_epoch_ms() - 10000*60) { // Only download every 10 minutes, to avoid rate limiting (and also it's just not necessary)
+    if do_custom == "true".to_string() {
+        loop {
             sleep(Duration::from_millis(100)).await;
             let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(0i64).query(&mut con).unwrap();
             if custom_subreddits.len() > 0 {
@@ -511,6 +499,13 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
                 info!("Got custom subreddit: {:?}", custom);
                 let _:() = con.lrem("custom_subreddits_queue", 0, custom).unwrap();
             }
+        }
+    }
+
+    let mut last_run = 0;
+    loop {
+        if last_run > (get_epoch_ms() - 10000*60) { // Only download every 10 minutes, to avoid rate limiting (and also it's just not necessary)
+            sleep(Duration::from_millis(100)).await;
             continue;
         }
         last_run = get_epoch_ms();
@@ -553,9 +548,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
     }
 }
 
-/// Run on startup
-///
-/// Reads config file, starts websocket server, gets shard info from Discord, starts loops and starts sub-programs.
+
 #[tokio::main]
 async fn main() {
     env_logger::builder()

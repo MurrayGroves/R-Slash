@@ -393,7 +393,7 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
 
     return FakeEmbed {
         title: Some("Your membership tiers".to_string()),
-        description: None,
+        description: Some("Get Premium here: https://ko-fi.com/rslash".to_string()),
         url: None,
         fields: Some(vec![
             ("Premium".to_string(), bronze, false),
@@ -416,7 +416,8 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
     if !membership.bronze.active {
         return FakeEmbed {
             title: Some("Premium Feature".to_string()),
-            description: Some("You must have premium in order to use this command.".to_string()),
+            description: Some("You must have premium in order to use this command.
+            Get it here: https://ko-fi.com/rslash".to_string()),
             url: None,
             color: Some(Colour::from_rgb(255, 0, 0)),
             footer: None,

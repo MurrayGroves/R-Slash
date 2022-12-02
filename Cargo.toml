@@ -56,10 +56,6 @@ name = "rslash-manager"
 path = "src/rslash-manager/main.rs"
 
 [[bin]]
-name = "kofi-handler"
-path = "src/kofi-handler/main.rs"
-
-[[bin]]
 name = "role-detector"
 path = "src/role-detector/main.rs"
 
