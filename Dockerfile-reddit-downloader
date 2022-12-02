@@ -12,5 +12,5 @@ RUN dpkg -i openssl*deb
 ADD "http://security.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20211016~18.04.1_all.deb" .
 RUN dpkg -i ca-certificates*deb
 
-ADD target/debug/downloader /usr/bin/downloader
+ADD target/release/downloader /usr/bin/downloader
 ENTRYPOINT ["/usr/bin/downloader"]

@@ -1,72 +1,42 @@
 use log::*;
-use std::{fs, thread};
+use std::fs;
 use std::io::Write;
 use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::env;
-use crossbeam_utils;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use serenity::model::prelude::{CurrentUser, RoleId, Sticker, User, VoiceState};
-use serenity::builder::{CreateApplicationCommandPermissionsData, CreateApplicationCommandPermissionData, CreateEmbed};
-use serenity::model::interactions::application_command::ApplicationCommandPermissionType;
-use serenity::model::id::{ApplicationId, ChannelId, EmojiId, GuildId, IntegrationId, MessageId, StickerId, UserId};
-use serenity::model::gateway::{GatewayIntents, Presence};
+
+use serenity::model::prelude::RoleId;
+use serenity::builder::CreateEmbed;
+use serenity::model::id::{ChannelId, GuildId, UserId};
+use serenity::model::gateway::GatewayIntents;
 use serenity::{
     async_trait,
-    model::{
-        gateway::Ready,
-        interactions::{
-            application_command::{
-                ApplicationCommand,
-                ApplicationCommandOptionType,
-                ApplicationCommandInteraction,
-            },
-            Interaction,
-            InteractionResponseType,
-        },
-    },
+    model::gateway::Ready,
     prelude::*,
 };
-use tokio_tungstenite;
-use tokio::net::TcpStream;
-use tokio::time::{sleep, Duration};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use futures::prelude::stream::{SplitSink, SplitStream};
-use tungstenite::Message;
-use futures::{TryFutureExt, SinkExt, StreamExt};
-use std::fmt::Error;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::{RwLockWriteGuard, Arc};
-use futures::executor::block_on;
-use std::fs::File;
-use std::panic::catch_unwind;
-use std::path::Path;
-use serenity::http::Http;
-use chrono::{DateTime, Utc};
-use chrono::prelude::*;
-use futures_util::TryStreamExt;
+use serenity::model::application::interaction::application_command::ApplicationCommandInteraction;
+use serenity::model::application::interaction::InteractionResponseType;
+use serenity::model::application::interaction::Interaction;
 
-use futures::prelude::*;
+use tokio::time::{sleep, Duration};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::fs::File;
+use std::path::Path;
+use futures_util::TryStreamExt;
 use redis::AsyncCommands;
 
-
 use redis;
-use redis::{Commands, from_redis_value, RedisResult};
-use mongodb::{Client, options::ClientOptions};
+use redis::{Commands, from_redis_value};
+use mongodb::options::ClientOptions;
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 
 use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
 use serenity::client::Cache;
-use serenity::json::Value;
-use serenity::model::application::command::{CommandOptionType, CommandPermission};
+use serenity::model::application::command::CommandOptionType;
 use serenity::model::application::component::ButtonStyle;
-use serenity::model::channel::{Channel, ChannelCategory, GuildChannel, PartialGuildChannel, Reaction, StageInstance};
-use serenity::model::event::{ChannelPinsUpdateEvent, GuildMembersChunkEvent, GuildMemberUpdateEvent, GuildScheduledEventUserAddEvent, GuildScheduledEventUserRemoveEvent, InviteCreateEvent, InviteDeleteEvent, MessageUpdateEvent, ThreadListSyncEvent, ThreadMembersUpdateEvent, TypingStartEvent, VoiceServerUpdateEvent};
-use serenity::model::guild::automod::{ActionExecution, Rule};
-use serenity::model::guild::{Emoji, Guild, Integration, Member, PartialGuild, Role, ScheduledEvent, ThreadMember, UnavailableGuild};
-use serenity::model::Timestamp;
+use serenity::model::guild::{Guild, UnavailableGuild};
 use serenity::utils::Colour;
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
@@ -368,8 +338,6 @@ async fn set_guild_config(old_config: Document, config: Document, data: &mut tok
 #[derive(Debug)]
 pub struct MembershipTier {
     name: String,
-    since: i64,
-    until: i64,
     active: bool,
 }
 
@@ -378,14 +346,14 @@ pub struct MembershipTiers {
     bronze: MembershipTier,
 }
 
-
+// Fetch a user's membership tiers from MongoDB. Returns current status, name of tier, when the user first had the membership, and when the membership expires.
 async fn get_user_tiers(user: UserId, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>) -> MembershipTiers {
     let mut mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
         ConfigValue::MONGODB(db) => Ok(db),
         _ => Err(0),
     }.unwrap();
 
-    let db = mongodb_client.database("payments");
+    let db = mongodb_client.database("memberships");
     let coll = db.collection::<Document>("users");
 
     let filter = doc! {"discord_id": user.0.to_string()};
@@ -394,33 +362,20 @@ async fn get_user_tiers(user: UserId, data: &mut tokio::sync::RwLockWriteGuard<'
 
     let doc = match cursor.try_next().await.unwrap() {
         Some(doc) => doc, // If user information exists, return it
-        None => { // If user information doesn't exist, create and return it
-            let server = doc! {
-                "discord_id": user.0.to_string(),
-                "tiers": {
-                    "bronze": {
-                        "since": 0i64,
-                        "until": 0i64,
-                    }
-                },
-            };
-
-            coll.insert_one(server, None).await.unwrap();
-            let mut cursor = coll.find(filter, find_options).await.unwrap();
-            cursor.try_next().await.unwrap().unwrap()
+        None => { // If user information doesn't exist, return a document that indicates no active memberships.
+            doc! {
+                "active": []
+            }
         }
     };
 
-    let mut bronze = false;
-    if doc.get_document("tiers").unwrap().get_document("bronze").unwrap().get_i64("until").unwrap() > Timestamp::now().unix_timestamp() {
-        bronze = true;
-    }
+    debug!("User document: {:?}", doc);
+
+    let bronze = doc.get_array("active").unwrap().contains(&mongodb::bson::Bson::from("bronze"));
 
     return MembershipTiers {
         bronze: MembershipTier {
             name: "bronze".to_string(),
-            since: doc.get_document("tiers").unwrap().get_document("bronze").unwrap().get_i64("since").unwrap(),
-            until: doc.get_document("tiers").unwrap().get_document("bronze").unwrap().get_i64("until").unwrap(),
             active: bronze,
         },
     };
@@ -431,18 +386,10 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
     let tiers = get_user_tiers(command.user.id, data).await;
     debug!("Tiers: {:?}", tiers);
 
-    let mut bronze = String::new();
-    if tiers.bronze.since == 0 {
-        bronze = "You have never had this tier.".to_string()
-    } else {
-        let since = NaiveDateTime::from_timestamp(tiers.bronze.since, 0).format("%Y-%m-%d %H:%M:%S");
-        let until = NaiveDateTime::from_timestamp(tiers.bronze.until, 0).format("%Y-%m-%d %H:%M:%S");
-        if tiers.bronze.active {
-            bronze = format!("First activated: {}\n Expires: {}", since, until);
-        } else {
-            bronze = format!("First activated: {}\n Expired: {}", since, until);
-        }
-    }
+    let bronze = match tiers.bronze.active {
+        true => "Active",
+        false => "Inactive",
+    }.to_string();
 
     return FakeEmbed {
         title: Some("Your membership tiers".to_string()),
@@ -530,7 +477,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
 
 
     let mut post: HashMap<String, redis::Value> = HashMap::new();
-    if last_cached +  3600000 < get_epoch_ms() as i64 {
+    if last_cached == 0 {
         debug!("Subreddit last cached more than an hour ago, updating...");
         command.defer(&ctx.http).await;
         let _:() = con.lpush("custom_subreddits_queue", subreddit.clone()).unwrap();
@@ -558,24 +505,32 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
                 break;
             }
         }
-    } else {
-        let mut data = ctx.data.write().await;
-        return get_subreddit_cmd(command, &mut data, ctx).await;
+
+        return FakeEmbed {
+            title: Some(from_redis_value(&post.get("title").unwrap().clone()).unwrap()),
+            description: None,
+            author: Some(from_redis_value(&post.get("author").unwrap().clone()).unwrap()),
+            url: Some(from_redis_value(&post.get("url").unwrap().clone()).unwrap()),
+            color: Some(Colour::from_rgb(0, 255, 0)),
+            footer: None,
+            image: Some(from_redis_value(&post.get("embed_url").unwrap().clone()).unwrap()),
+            thumbnail: None,
+            timestamp: Some(from_redis_value(post.get("timestamp").unwrap()).unwrap()),
+            fields: None,
+            buttons: Some(vec![FakeButton {
+                label: "🔁".to_string(),
+                style: ButtonStyle::Primary,
+                url: None,
+                custom_id: Some(format!("subreddit:{}", subreddit)),
+                disabled: false
+            }])
+        };
+    } else if last_cached +  3600000 < get_epoch_ms() as i64 {
+        // Tell downloader to update the subreddit, but use outdated posts for now.
+        let _:() = con.lpush("custom_subreddits_queue", subreddit.clone()).unwrap();
     }
 
-    return FakeEmbed {
-        title: Some(from_redis_value(&post.get("title").unwrap().clone()).unwrap()),
-        description: None,
-        author: Some(from_redis_value(&post.get("author").unwrap().clone()).unwrap()),
-        url: Some(from_redis_value(&post.get("url").unwrap().clone()).unwrap()),
-        color: Some(Colour::from_rgb(0, 255, 0)),
-        footer: None,
-        image: Some(from_redis_value(&post.get("embed_url").unwrap().clone()).unwrap()),
-        thumbnail: None,
-        timestamp: Some(from_redis_value(post.get("timestamp").unwrap()).unwrap()),
-        fields: None,
-        buttons: None
-    };
+    return get_subreddit_cmd(command, &mut data, ctx).await;
 }
 
 

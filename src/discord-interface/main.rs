@@ -32,7 +32,6 @@ async fn add_shards(num: u64, max_concurrency: u64) {
     let current_shards = shards_set.metadata.annotations.expect("");
     let current_shards: u64 = shards_set.status.unwrap().replicas.try_into().unwrap();
 
-    let _:() = con.set(format!("total_shards_{}", namespace), current_shards+ num).expect("Failed to set total shards");
 
     let mut desired_shards = num;
     loop {
@@ -65,6 +64,7 @@ async fn add_shards(num: u64, max_concurrency: u64) {
         });
 
         info!("Booting {} new shards, bringing total to {}", new_shards, new_shards + current_shards);
+        let _:() = con.set(format!("total_shards_{}", namespace), new_shards + current_shards).expect("Failed to set total shards");
 
         let mut params = kube::api::PatchParams::apply("rslash-manager");
         params.force = true;
