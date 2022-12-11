@@ -34,6 +34,7 @@ pretty_env_logger = "*"
 bytes = "*"
 html-escape = "0.2.*"
 percent-encoding = "2.2.*"
+posthog = {path = "posthog"}
 
 [[bin]]
 name = "discord-interface"

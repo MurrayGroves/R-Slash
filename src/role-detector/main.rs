@@ -1,5 +1,6 @@
 use futures::TryStreamExt;
 use log::*;
+use std::collections::HashMap;
 use std::io::Write;
 use std::env;
 
@@ -73,7 +74,7 @@ impl EventHandler for Handler {
         ctx.shard.chunk_guild(GuildId(697986402117484574), None, serenity::client::bridge::gateway::ChunkGuildFilter::None, None);
     }
 
-    async fn guild_member_update(&self, _: Context, old: Option<Member>, new: Member) {
+    async fn guild_member_update(&self, ctx: Context, old: Option<Member>, new: Member) {
         debug!("Old: {:?}, New: {:?}", old, new);
         let previously_donator = match old.is_some() {
             true => old.unwrap().roles.contains(&RoleId(777150304155861013)),
@@ -83,16 +84,31 @@ impl EventHandler for Handler {
 
         debug!("Previously donator: {}, now donator: {}", previously_donator, now_donator);
 
+        let mut data = ctx.data.write().await;
+        let data_mut = data.get_mut::<ClientData>().unwrap();
+        let posthog_client: &mut posthog::Client = data_mut.get_mut("posthog").unwrap();
+
         if now_donator && !previously_donator {
             info!("{} ({}) is now a donator", new.user.name, new.user.id);
             add_membership(new.user.id).await;
+            posthog_client.capture("donator_change", Some(HashMap::from([("$set", "{\"donator\": \"true\"}".to_string())])), &format!("user_{}", new.user.id.0.to_string())).await.unwrap();
         } else if !now_donator && previously_donator {
             info!("{} ({}) is no longer a donator", new.user.name, new.user.id);
             terminate_membership(new.user.id).await;
+            posthog_client.capture("donator_change", Some(HashMap::from([("$set", "{\"donator\": \"false\"}".to_string())])), &format!("user_{}", new.user.id.0.to_string())).await.unwrap();
+
         } else {
             debug!("{} ({}) has new state {:?}", new.user.name, new.user.id, new);
         }
     }
+}
+
+pub struct ClientData {
+    _value: HashMap<String, posthog::Client>
+}
+
+impl TypeMapKey for ClientData {
+    type Value = HashMap<String, posthog::Client>;
 }
 
 #[tokio::main]
@@ -110,11 +126,18 @@ async fn main() {
     // Set gateway intents, which decides what events the bot will be notified about
     let intents = GatewayIntents::GUILD_MEMBERS | GatewayIntents::non_privileged();
 
-    // Create a new instance of the Client, logging in as a bot. This will
-    // automatically prepend your bot token with "Bot ", which is a requirement
-    // by Discord for bot users.
+    let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
+    let posthog_client = posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
+
     let mut client =
         serenity::Client::builder(&token, intents).event_handler(Handler).await.expect("Err creating client");
+
+    {
+        let mut data = client.data.write().await;
+        let mut hashmap = HashMap::new();
+        hashmap.insert("posthog".to_string(), posthog_client);
+        data.insert::<ClientData>(hashmap);
+    }
 
     // Finally, start a single shard, and start listening to events.
     //
