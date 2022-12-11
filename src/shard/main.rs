@@ -39,6 +39,7 @@ use serenity::model::application::component::ButtonStyle;
 use serenity::model::guild::{Guild, UnavailableGuild};
 use serenity::utils::Colour;
 
+
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
 pub enum ConfigValue {
     U64(u64),
@@ -47,6 +48,7 @@ pub enum ConfigValue {
     REDIS(redis::Connection),
     MONGODB(mongodb::Client),
     SubredditList(Vec<String>),
+    PosthogClient(posthog::Client),
 }
 
 /// Stores config values required for operation of the downloader
@@ -58,22 +60,6 @@ impl TypeMapKey for ConfigStruct {
     type Value = HashMap<String, ConfigValue>;
 }
 
-
-/// Represents a Reddit post
-#[derive(Debug)]
-pub struct Post {
-    /// The score (upvotes-downvotes) of the post
-    score: i64,
-    /// A URl to the post
-    url: String,
-    title: String,
-    /// Embed URL of the post media
-    embed_url: String,
-    /// Name of the author of the post
-    author: String,
-    /// The post's unique ID
-    id: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct FakeEmbed {
@@ -99,11 +85,6 @@ pub struct FakeButton {
     disabled: bool,
 }
 
-fn get_redis_con() -> redis::Connection {
-    let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
-    return db_client.get_connection().expect("Can't connect to redis");
-}
-
 
 /// Returns current milliseconds since the Epoch
 fn get_epoch_ms() -> u64 {
@@ -113,25 +94,15 @@ fn get_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn unbox<T>(value: Box<T>) -> T {
-    *value
+
+async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, properties: Option<HashMap<&str, String>>, distinct_id: &str) {
+    let posthog_client = match data.get_mut("posthog_client").unwrap() {
+        ConfigValue::PosthogClient(client) => client,
+        _ => panic!("posthog_client is not a PosthogClient"),
+    };
+
+    debug!("{:?}", posthog_client.capture(event, properties, distinct_id).await.unwrap().text().await.unwrap());
 }
-
-/// Checks if a user is a bot administrator
-///
-/// # Arguments
-/// ## user
-/// A [User](serenity::model::user::User) to check
-async fn check_admin(user: serenity::model::user::User) -> bool { // Check if a user ID matches the admin user ID
-    let config = fs::read_to_string("config.json").expect("Couldn't read config.json");  // Read config file in
-    let config: HashMap<String, serde_json::Value> = serde_json::from_str(&config)  // Convert config string into HashMap
-    .expect("config.json is not proper JSON");
-
-    let admin = config.get("admin").unwrap().as_u64().unwrap();
-
-    return admin == *user.id.as_u64();
-}
-
 
 async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
@@ -143,16 +114,19 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
 
     let nsfw_subreddits = nsfw_subreddits.clone();
 
+    let options = &command.data.options;
+    let subreddit = options[0].value.clone();
+    let subreddit = subreddit.unwrap();
+    let subreddit = subreddit.as_str().unwrap().to_string();
+
+    capture_event(data_mut, "subreddit_cmd", Some(HashMap::from([("subreddit", subreddit.clone())])), &format!("user_{}", command.user.id.0.to_string())).await;
+
     let mut con = match data_mut.get_mut("redis_connection").unwrap() {
         ConfigValue::REDIS(db) => Ok(db),
         _ => Err(0),
     }.unwrap();
 
 
-    let options = &command.data.options;
-    let subreddit = options[0].value.clone();
-    let subreddit = subreddit.unwrap();
-    let subreddit = subreddit.as_str().unwrap().to_string();
 
     if nsfw_subreddits.contains(&subreddit) {
         let channel = command.channel_id.to_channel_cached(&ctx.cache).unwrap();
@@ -391,6 +365,10 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
         false => "Inactive",
     }.to_string();
 
+    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+    capture_event(data_mut, "cmd_get_user_tiers", Some(HashMap::from([("bronze_active", bronze.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
+
     return FakeEmbed {
         title: Some("Your membership tiers".to_string()),
         description: Some("Get Premium here: https://ko-fi.com/rslash".to_string()),
@@ -538,11 +516,12 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
 async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
+    capture_event(data_mut, "cmd_info", None, &format!("user_{}", command.user.id.0.to_string())).await;
+
     let mut con = match data_mut.get_mut("redis_connection").unwrap() {
         ConfigValue::REDIS(db) => Ok(db),
         _ => Err(0),
     }.unwrap();
-
 
     let guild_counts: HashMap<String, redis::Value> = con.hgetall(format!("shard_guild_counts_{}", get_namespace().await)).unwrap();
     let mut guild_count = 0;
@@ -631,36 +610,31 @@ impl EventHandler for Handler {
         let mut data = ctx.data.write().await;
         let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
+        if is_new { // First time client has seen the guild
+            capture_event(data_mut, "guild_join", None, &format!("guild_{}", guild.id.0.to_string())).await;
+            update_guild_commands(guild.id, &mut ctx.data.write().await, &ctx).await;
+        }
+
         let mut con = match data_mut.get_mut("redis_connection").unwrap() {
             ConfigValue::REDIS(db) => Ok(db),
             _ => Err(0),
         }.unwrap();
 
         let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).unwrap();
-
-        drop (con);
-        drop (data_mut);
-        drop (data);
-
-        if is_new { // First time client has seen the guild
-            update_guild_commands(guild.id, &mut ctx.data.write().await, &ctx).await;
-        }
     }
 
-    async fn guild_delete(&self, ctx: Context, _incomplete: UnavailableGuild, _full: Option<Guild>) {
+    async fn guild_delete(&self, ctx: Context, incomplete: UnavailableGuild, _full: Option<Guild>) {
         let mut data = ctx.data.write().await;
         let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
+        capture_event(data_mut, "guild_leave", None, &format!("guild_{}", incomplete.id.0.to_string())).await;
+
         let mut con = match data_mut.get_mut("redis_connection").unwrap() {
             ConfigValue::REDIS(db) => Ok(db),
             _ => Err(0),
         }.unwrap();
 
         let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).unwrap();
-
-        drop (con);
-        drop (data_mut);
-        drop (data);
     }
 
     async fn message(&self, ctx: Context, new_message: serenity::model::channel::Message) {
@@ -674,6 +648,10 @@ impl EventHandler for Handler {
 
     /// Fires when the client is connected to the gateway
     async fn ready(&self, ctx: Context, ready: Ready) {
+        let mut data = ctx.data.write().await;
+        let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+        capture_event(data_mut, "on_ready", None, &format!("shard_{}", ready.shard.unwrap()[0].to_string())).await;
+
         info!("Shard {} connected as {}, on {} servers!", ready.shard.unwrap()[0], ready.user.name, ready.guilds.len());
         let guilds = ctx.cache.guild_count();
         let users = ctx.cache.user_count();
@@ -806,7 +784,7 @@ impl EventHandler for Handler {
                                                 }
 
                                                 if button.custom_id.is_some() {
-                                                    b.custom_id(button.custom_id.unwrap());
+                                                 b.custom_id(button.custom_id.unwrap());
                                                 }
 
                                                 return b;
@@ -820,7 +798,7 @@ impl EventHandler for Handler {
 
                             let fake_embed = fake_embed_2.clone();
                             message.embed(|e: &mut CreateEmbed| {
-                            if (fake_embed.timestamp.is_some()) {
+                            if fake_embed.timestamp.is_some() {
                                 e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(fake_embed.timestamp.unwrap() as i64).unwrap());
                             }
 
@@ -1025,10 +1003,7 @@ impl EventHandler for Handler {
         if let Interaction::MessageComponent(command) = interaction {
             let mut data = ctx.data.write().await;
             let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-            let mut con = match data_mut.get_mut("redis_connection").unwrap() {
-                ConfigValue::REDIS(db) => Ok(db),
-                _ => Err(0),
-            }.unwrap();
+
             match command.guild_id {
                 Some(guild_id) => {
                     info!("{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}", guild_id.name(&ctx.cache).unwrap(), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
@@ -1037,7 +1012,15 @@ impl EventHandler for Handler {
                     info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
                 }
             }
-            let fake_embed = get_subreddit(command.data.custom_id.split(":").last().unwrap().to_string(), &mut con, command.channel_id).await;
+            let subreddit = command.data.custom_id.split(":").last().unwrap().to_string();
+            capture_event(data_mut, "subreddit_cmd_button", Some(HashMap::from([("subreddit", subreddit.clone())])), &format!("user_{}", command.user.id.0.to_string())).await;
+            
+            let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+                ConfigValue::REDIS(db) => Ok(db),
+                _ => Err(0),
+            }.unwrap();
+
+            let fake_embed = get_subreddit(subreddit, &mut con, command.channel_id).await;
             let fake_embed_2 = fake_embed.clone();
             if let Err(why) = command
                 .create_interaction_response(&ctx.http, |response| {
@@ -1325,6 +1308,7 @@ async fn main() {
     let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
     let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
     let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
+    let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
 
     let redis_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     let mut con = redis_client.get_connection().expect("Can't connect to redis");
@@ -1368,11 +1352,14 @@ async fn main() {
         .await
         .expect("Error creating client");
 
+    let posthog_client = posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
+
     let contents:HashMap<String, ConfigValue> = HashMap::from_iter([
         ("shard_id".to_string(), ConfigValue::U64(shard_id as u64)),
         ("redis_connection".to_string(), ConfigValue::REDIS(con)),
         ("mongodb_connection".to_string(), ConfigValue::MONGODB(mongodb_client)),
-        ("nsfw_subreddits".to_string(), ConfigValue::SubredditList(nsfw_subreddits))
+        ("nsfw_subreddits".to_string(), ConfigValue::SubredditList(nsfw_subreddits)),
+        ("posthog_client".to_string(), ConfigValue::PosthogClient(posthog_client)),
     ]);
 
     {
