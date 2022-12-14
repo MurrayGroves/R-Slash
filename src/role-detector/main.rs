@@ -1,4 +1,5 @@
 use log::*;
+use serde_json::json;
 use std::collections::HashMap;
 use std::io::Write;
 use std::env;
@@ -83,21 +84,32 @@ impl EventHandler for Handler {
 
         debug!("Previously donator: {}, now donator: {}", previously_donator, now_donator);
 
-        let mut data = ctx.data.write().await;
-        let data_mut = data.get_mut::<ClientData>().unwrap();
-        let posthog_client: &mut posthog::Client = data_mut.get_mut("posthog").unwrap();
-
+        let mut donator: Option<bool> = None;
         if now_donator && !previously_donator {
             info!("{} ({}) is now a donator", new.user.name, new.user.id);
             add_membership(new.user.id).await;
-            posthog_client.capture("donator_change", Some(HashMap::from([("$set", "{\"donator\": \"true\"}".to_string())])), &format!("user_{}", new.user.id.0.to_string())).await.unwrap();
+            donator = Some(true);
         } else if !now_donator && previously_donator {
             info!("{} ({}) is no longer a donator", new.user.name, new.user.id);
             terminate_membership(new.user.id).await;
-            posthog_client.capture("donator_change", Some(HashMap::from([("$set", "{\"donator\": \"false\"}".to_string())])), &format!("user_{}", new.user.id.0.to_string())).await.unwrap();
+            donator = Some(false);
 
         } else {
             debug!("{} ({}) has new state {:?}", new.user.name, new.user.id, new);
+        }
+
+        if donator.is_some() {
+            let props = json!({
+                "$set": {
+                    "donator": donator
+                }
+            });
+
+            let mut data = ctx.data.write().await;
+            let data_mut = data.get_mut::<ClientData>().unwrap();
+            let posthog_client: &mut posthog::Client = data_mut.get_mut("posthog").unwrap();
+            
+            posthog_client.capture("donator_change", props, &format!("user_{}", new.user.id.0.to_string())).await.unwrap();
         }
     }
 }

@@ -100,7 +100,14 @@ async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, pro
         _ => panic!("posthog_client is not a PosthogClient"),
     };
 
-    debug!("{:?}", posthog_client.capture(event, properties, distinct_id).await.unwrap().text().await.unwrap());
+    let mut properties_map = serde_json::Map::new();
+    if properties.is_some() {
+        for (key, value) in properties.unwrap() {
+            properties_map.insert(key.to_string(), serde_json::Value::String(value));
+        }
+    }
+
+    debug!("{:?}", posthog_client.capture(event, properties_map, distinct_id).await.unwrap().text().await.unwrap());
 }
 
 async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
