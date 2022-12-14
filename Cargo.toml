@@ -34,6 +34,7 @@ pretty_env_logger = "*"
 bytes = "*"
 html-escape = "0.2.*"
 percent-encoding = "2.2.*"
+posthog = {path = "posthog"}
 
 [[bin]]
 name = "discord-interface"
@@ -46,10 +47,6 @@ path = "src/shard/main.rs"
 [[bin]]
 name = "downloader"
 path = "src/downloader/main.rs"
-
-[[bin]]
-name = "update-commands"
-path = "src/update-commands/main.rs"
 
 [[bin]]
 name = "rslash-manager"

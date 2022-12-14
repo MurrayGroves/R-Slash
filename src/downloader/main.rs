@@ -172,7 +172,7 @@ async fn get_access_token(con: &mut redis::Connection, reddit_client: String, re
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut oauthToken, imgur_client: String) { // Get the top 1000 most recent posts and store them in the DB
+async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut OauthToken, imgur_client: String) { // Get the top 1000 most recent posts and store them in the DB
     debug!("Placeholder: {:?}", subreddit);
 
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await;
@@ -180,7 +180,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
     let mut keys = Vec::new();
     let url_base = format!("https://reddit.com/r/{}/hot.json?limit=100", subreddit);
     let mut url = String::new();
-    let mut after = String::new();
+    let mut after;
     let mut existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query(con).unwrap();
     debug!("Existing posts: {:?}", existing_posts);
     for x in 0..10 {
@@ -263,7 +263,13 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
                     debug!("{}", id);
 
                     if gfycat_token.expires_at < get_epoch_ms() - 1000 {
-                        gfycat_token.refresh().await;
+                        match gfycat_token.refresh().await {
+                            Ok(_) => {},
+                            Err(_) => {
+                                warn!("Failed to refresh gfycat token");
+                                continue;
+                            }
+                        };
                     }
 
                     let auth = format!("Bearer {}", gfycat_token.token);
@@ -352,7 +358,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
 
             let timestamp = post["created_utc"].as_f64().unwrap() as u64;
 
-            let post_object = Post {
+            let mut post_object = Post {
                 score: post["score"].as_i64().unwrap_or(0),
                 url: format!("https://reddit.com{}", post["permalink"].to_string().replace('"', "")),
                 title: post["title"].to_string().replace('"', ""),
@@ -362,6 +368,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
                 timestamp: timestamp,
             };
 
+            post_object.title.truncate(256);
             posts.push(post_object);
         }
 
@@ -406,7 +413,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
 }
 
 #[derive(Debug)]
-struct oauthToken {
+struct OauthToken {
     token: String,
     expires_at: u64,
     client_id: String,
@@ -414,8 +421,8 @@ struct oauthToken {
     url: String,
 }
 
-impl oauthToken {
-    async fn new(client_id: String, client_secret: String, url: String) -> Result<oauthToken, Box<dyn std::error::Error>> {
+impl OauthToken {
+    async fn new(client_id: String, client_secret: String, url: String) -> Result<OauthToken, Box<dyn std::error::Error>> {
         let web_client = reqwest::Client::new();
 
         let mut post_data = HashMap::new();
@@ -431,7 +438,7 @@ impl oauthToken {
 
         let results: serde_json::Value = res.json().await.unwrap();
 
-        Ok(oauthToken {
+        Ok(OauthToken {
             token: results["access_token"].to_string(),
             expires_at: results["expires_in"].as_u64().unwrap() + get_epoch_ms(),
             client_id,
@@ -441,7 +448,7 @@ impl oauthToken {
     }
 
     async fn refresh(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let new = oauthToken::new(self.client_id.clone(), self.client_secret.clone(), self.url.clone()).await?;
+        let new = OauthToken::new(self.client_id.clone(), self.client_secret.clone(), self.url.clone()).await?;
         self.token = new.token;
         self.expires_at = new.expires_at;
 
@@ -462,26 +469,22 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
         .timeout(Duration::from_secs(10))
         .build().expect("Failed to build client");
 
-    let mut reddit_secret = String::new();
-    let mut reddit_client = String::new();
-    {
-        let mut data_lock = data.lock().await;
-        reddit_secret = match data_lock.get("reddit_secret").unwrap() {
-            ConfigValue::String(x) => x,
-            _ => panic!("Failed to get reddit_secret")
-        }.clone();
+    let data_lock = data.lock().await;
+    let reddit_secret = match data_lock.get("reddit_secret").unwrap() {
+        ConfigValue::String(x) => x,
+        _ => panic!("Failed to get reddit_secret")
+    }.clone();
 
-        reddit_client = match data_lock.get("reddit_client").unwrap() {
-            ConfigValue::String(x) => x,
-            _ => panic!("Failed to get reddit_client")
-        }.clone();
-    }
+    let reddit_client = match data_lock.get("reddit_client").unwrap() {
+        ConfigValue::String(x) => x,
+        _ => panic!("Failed to get reddit_client")
+    }.clone();
 
     let gfycat_client = env::var("GFYCAT_CLIENT").expect("GFYCAT_CLIENT not set");
     let gfycat_secret = env::var("GFYCAT_SECRET").expect("GFYCAT_SECRET not set");
     let imgur_client = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
     let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
-    let mut gfycat_token = oauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await.expect("Failed to get gfycat token");
+    let mut gfycat_token = OauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await.expect("Failed to get gfycat token");
 
     let mut client_options = mongodb::options::ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
     client_options.app_name = Some("Downloader".to_string());
@@ -566,8 +569,8 @@ async fn main() {
     ]);
 
 
-    let mut data = Arc::new(Mutex::new(contents));
+    let data = Arc::new(Mutex::new(contents));
 
     info!("Starting loops");
-    download_loop(data.clone()).await;
+    download_loop(data).await;
 }

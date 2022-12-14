@@ -1,29 +1,22 @@
 use std::env;
 use std::process::Command as Cmd;
-use kube::api::PatchParams;
 use serde_json;
 use redis;
 use redis::Commands;
 use std::cmp;
-use std::collections::HashMap;
-use std::fs::read;
-use std::thread::current;
 use std::convert::TryInto;
 use std::sync::Arc;
 use tokio::time::sleep;
 use std::time::Duration;
 use kube::api::Patch;
-use base64;
 use futures_util::TryStreamExt;
 use serenity::client::{Context, EventHandler};
-use serenity::prelude::{GatewayIntents, TypeMap, TypeMapKey};
+use serenity::prelude::{GatewayIntents, TypeMapKey};
 use serenity::async_trait;
-use serenity::builder::CreateApplicationCommandOption;
 use serenity::model::application::command::{Command, CommandOptionType};
 use serenity::model::gateway::Ready;
-use serenity::model::interactions::application_command::ApplicationCommand;
 
-use mongodb::{Client, options::ClientOptions};
+use mongodb::{options::ClientOptions};
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 use serenity::cache::Cache;
@@ -32,14 +25,6 @@ use serenity::model::guild::GuildInfo;
 use serenity::model::id::GuildId;
 use serenity::model::Timestamp;
 
-/*let client_k8s = kube::Client::try_default().await.expect("Failed to connect to k8s");
-
-let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, "r-slash");
-let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
-let total_shards = shards_set.metadata.annotations.expect("");
-let total_shards = total_shards.get("kubectl.kubernetes.io/last-applied-configuration").unwrap();
-let total_shards: serde_json::Value = serde_json::from_str(total_shards).unwrap();
-let total_shards: u64 = total_shards["spec"]["replicas"].as_u64().unwrap(); */
 
 async fn get_redis_connection() -> redis::Connection {
     let mut get_ip = Cmd::new("kubectl");
@@ -49,22 +34,13 @@ async fn get_redis_connection() -> redis::Connection {
     let ip_json: Result<serde_json::Value, serde_json::Error> = serde_json::from_str(&ip_output);
     let ip = ip_json.expect("Failed to convert string to json")["items"][0]["status"]["addresses"][0]["address"].to_string().replace('"', "");
     let db_client = redis::Client::open(format!("redis://{}:31090/", ip)).unwrap();
-    let mut con = db_client.get_connection().expect("Can't connect to redis");
+    let con = db_client.get_connection().expect("Can't connect to redis");
     return con;
-}
-
-async fn get_shard_set() -> k8s_openapi::api::apps::v1::StatefulSet {
-    let client_k8s = kube::Client::try_default().await.expect("Failed to connect to k8s");
-    let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
-
-    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
-    let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get discord-credentials");
-    return shards_set;
 }
 
 
 async fn update_max_unavailable() {
-    let (total_shards, max_concurrency) = get_discord_details().await;
+    let (_, max_concurrency) = get_discord_details().await;
     let client_k8s = kube::Client::try_default().await.unwrap();
 
     let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
@@ -127,7 +103,6 @@ async fn stop() {
         let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
 
         let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
-        let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
 
         let patch = serde_json::json!({
             "apiVersion": "apps/v1",
@@ -234,19 +209,17 @@ async fn fetch_guild_config(guild_id: GuildId, cache: Arc<Cache>, mongodb_client
     return match cursor.try_next().await.unwrap() {
         Some(doc) => doc, // If guild configuration does exist
         None => { // If guild configuration doesn't exist
-            let mut nsfw = "";
-
             let joined_at = if let Some(i) = guild_id.to_guild_cached(&cache) {
                 i.joined_at
             } else {
                 Timestamp::from_unix_timestamp(0).unwrap()
             };
             // If the bot joined the guild before September 1st 2022, it joined as Booty Bot, not R Slash
-            if joined_at < Timestamp::from_unix_timestamp(1661986800).unwrap() {
-                nsfw = "nsfw";
+            let nsfw = if joined_at < Timestamp::from_unix_timestamp(1661986800).unwrap() {
+                "nsfw"
             } else {
-                nsfw = "non-nsfw";
-            }
+                "non-nsfw"
+            };
 
             let server = doc! {
                 "id": guild_id.0.to_string(),
@@ -266,15 +239,15 @@ struct Handler;
 #[async_trait]
 impl EventHandler for Handler {
     /// Fires when the client is connected to the gateway
-    async fn ready(&self, ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, _ready: Ready) {
         println!("Updating slash commands");
         let command = ctx.data.read().await;
-        let command = command.get::<command_to_update>().unwrap();
+        let command = command.get::<CommandToUpdate>().unwrap();
 
         if command == "delete" {
             let command: u64 = env::args_os().nth(4).unwrap().into_string().unwrap().parse().unwrap();
             let id = serenity::model::id::CommandId::from(command);
-            serenity::model::application::command::Command::delete_global_application_command(&ctx.http, id).await;
+            serenity::model::application::command::Command::delete_global_application_command(&ctx.http, id).await.expect("Failed to delete command");
         }
 
         if command == "guilds" {
@@ -294,7 +267,6 @@ impl EventHandler for Handler {
             let sfw_subreddits: Vec<&str> = doc.get_array("sfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
             let nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
 
-            let me = ctx.cache.current_user();
             let mut guilds = Vec::new();
             loop {
                 let mut page = ctx.http.as_ref().get_guilds(Some(&GuildPagination::After(guilds.last().map_or(GuildId(1), |g: &GuildInfo| g.id))), Some(200)).await.unwrap();
@@ -372,14 +344,14 @@ impl EventHandler for Handler {
 
         if command == "configure_delete" {
             let id = serenity::model::id::CommandId::from(1014850340920758293);
-            Command::delete_global_application_command(&ctx.http, id).await;;
+            Command::delete_global_application_command(&ctx.http, id).await.expect("Failed to delete command");
         }
 
         if command == "get" || command == "all" {
             let mut client_options = ClientOptions::parse("mongodb://my-user:rslash@localhost:27018/?tls=false&directConnection=true").await.unwrap();
             client_options.app_name = Some("rslash-manager".to_string());
 
-            let mut mongodb_client = mongodb::Client::with_options(client_options).unwrap();
+            let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
 
             let db = mongodb_client.database("config");
             let coll = db.collection::<Document>("settings");
@@ -489,8 +461,8 @@ impl EventHandler for Handler {
     }
 }
 
-struct command_to_update;
-impl TypeMapKey for command_to_update {
+struct CommandToUpdate;
+impl TypeMapKey for CommandToUpdate {
     type Value = String;
 }
 
@@ -513,7 +485,7 @@ async fn update_commands(command: Option<&str>) {
 
     {
         let mut data = client.data.write().await;
-        data.insert::<command_to_update>(command.to_string());
+        data.insert::<CommandToUpdate>(command.to_string());
     }
 
     client.start_shard(shard_id as u64, total_shards as u64).await.expect("Error starting shard");
