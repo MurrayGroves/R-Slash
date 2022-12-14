@@ -1,13 +1,7 @@
 use log::*;
-use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, Duration};
-use tokio_tungstenite::{accept_async, tungstenite::Error, WebSocketStream};
 use tungstenite::Result;
-use tungstenite::Message;
-use std::{thread, fs, env, io::Write, collections::HashMap, process::Command, net::SocketAddr};
-use std::sync::{Arc, Mutex};
-use futures::{StreamExt, TryStreamExt};
-use kube::{Client, api::{Api, ResourceExt, ListParams, PostParams}};
+use std::{thread, fs, env, io::Write, process::Command};
 use k8s_openapi;
 use redis::{Commands, from_redis_value, Value};
 use std::cmp;
@@ -23,15 +17,7 @@ async fn get_namespace() -> String {
 async fn add_shards(num: u64, max_concurrency: u64) {
     let mut con = get_redis_connection().await;
 
-    let client_k8s = kube::Client::try_default().await.unwrap();
-
     let namespace = get_namespace().await;
-
-    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
-    let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
-    let current_shards = shards_set.metadata.annotations.expect("");
-    let current_shards: u64 = shards_set.status.unwrap().replicas.try_into().unwrap();
-
 
     let mut desired_shards = num;
     loop {
@@ -48,7 +34,6 @@ async fn add_shards(num: u64, max_concurrency: u64) {
 
         let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
         let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
-        let current_shards = shards_set.metadata.annotations.expect("");
         let current_shards: u64 = shards_set.status.unwrap().replicas.try_into().unwrap();
 
         let patch = serde_json::json!({
@@ -93,7 +78,7 @@ async fn get_redis_connection() -> redis::Connection {
     let ip_json: Result<serde_json::Value, serde_json::Error> = serde_json::from_str(&ip_output);
     let ip = ip_json.expect("Failed to convert string to json")["items"][0]["status"]["addresses"][0]["address"].to_string().replace('"', "");
     let db_client = redis::Client::open(format!("redis://{}:31090/", ip)).unwrap();
-    let mut con = db_client.get_connection().expect("Can't connect to redis");
+    let con = db_client.get_connection().expect("Can't connect to redis");
     return con;
 }
 
@@ -106,7 +91,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .init();
 
     let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
-    let application_id = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set");
 
     let namespace = get_namespace().await;
 
@@ -118,9 +102,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
         let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
         let current_shards = shards_set.status.unwrap().replicas as u64;
-        //let current_shards = current_shards.get("kubectl.kubernetes.io/last-applied-configuration").unwrap();
-        //let current_shards: serde_json::Value = serde_json::from_str(current_shards).unwrap();
-        //let mut current_shards: u64 = current_shards["spec"]["replicas"].as_u64().unwrap();
 
         let res = client_web
             .get("https://discord.com/api/v8/gateway/bot")
