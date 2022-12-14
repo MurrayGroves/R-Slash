@@ -1,4 +1,3 @@
-use futures::TryStreamExt;
 use log::*;
 use std::collections::HashMap;
 use std::io::Write;

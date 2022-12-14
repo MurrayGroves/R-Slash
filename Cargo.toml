@@ -49,10 +49,6 @@ name = "downloader"
 path = "src/downloader/main.rs"
 
 [[bin]]
-name = "update-commands"
-path = "src/update-commands/main.rs"
-
-[[bin]]
 name = "rslash-manager"
 path = "src/rslash-manager/main.rs"
 

@@ -3,7 +3,6 @@
 *target/debug/deps
 *target/debug/incremental
 *target/doc
-*target/debug
 *target/release/build
 *target/release/.fingerprint
 *target/release/incremental
