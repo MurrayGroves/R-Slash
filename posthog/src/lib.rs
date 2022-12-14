@@ -2,11 +2,24 @@ use std::collections::HashMap;
 
 use log::*;
 use serde_json::json;
+use serde_json::Value;
 
 pub struct Client {
     pub api_key: String,
     pub host: String,
     pub client: reqwest::Client,
+}
+    
+fn merge(a: &mut Value, b: Value) {
+    match (a, b) {
+        (a @ &mut Value::Object(_), Value::Object(b)) => {
+            let a = a.as_object_mut().unwrap();
+            for (k, v) in b {
+                merge(a.entry(k).or_insert(Value::Null), v);
+            }
+        }
+        (a, b) => *a = b,
+    }
 }
 
 impl Client {
@@ -18,19 +31,16 @@ impl Client {
         }
     }
 
-    pub async fn capture(&self, event: &str,  properties: Option<HashMap<&str, String>>, distinct_id: &str) -> Result<reqwest::Response, reqwest::Error> {
-        let mut props = HashMap::new();
-        props.insert("distinct_id", distinct_id.to_string());
-        if let Some(properties) = properties {
-            for (key, value) in properties {
-                props.insert(key, value);
-            }
-        }
-
+    pub async fn capture(&self, event: &str,  properties: impl Into<serde_json::Value>, distinct_id: &str) -> Result<reqwest::Response, reqwest::Error> {
+        let mut properties: serde_json::Value = properties.into();
+        let properties_2 = json!({
+            "distinct_id": distinct_id
+        });
+        merge(&mut properties, properties_2);
         let json = json!({
             "api_key": self.api_key,
             "event": event,
-            "properties": props,
+            "properties": properties
         });
         let body = serde_json::to_string(&json).unwrap();
         debug!("{:?}", body);
