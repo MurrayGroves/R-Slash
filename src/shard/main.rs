@@ -717,17 +717,17 @@ impl EventHandler for Handler {
         let mut data = ctx.data.write().await;
         let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
-        if is_new { // First time client has seen the guild
-            capture_event(data_mut, "guild_join", None, &format!("guild_{}", guild.id.0.to_string())).await;
-            update_guild_commands(guild.id, &mut ctx.data.write().await, &ctx).await;
-        }
-
         let con = match data_mut.get_mut("redis_connection").unwrap() {
             ConfigValue::REDIS(db) => Ok(db),
             _ => Err(0),
         }.unwrap();
 
         let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).unwrap();
+
+        if is_new { // First time client has seen the guild
+            capture_event(data_mut, "guild_join", None, &format!("guild_{}", guild.id.0.to_string())).await;
+            update_guild_commands(guild.id, &mut data, &ctx).await;
+        }
     }
 
     async fn guild_delete(&self, ctx: Context, incomplete: UnavailableGuild, _full: Option<Guild>) {
@@ -780,7 +780,7 @@ impl EventHandler for Handler {
 
         if alive {
             if !Path::new("/etc/probes/live").exists() {
-                fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+                fs::create_dir_all("/etc/probes").expect("Couldn't create /etc/probes directory");
                 let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
                 file.write_all(b"alive").expect("Unable to write to /etc/probes/live");
             }
@@ -792,6 +792,16 @@ impl EventHandler for Handler {
     /// Fires when a slash command or other interaction is received
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         debug!("Interaction received");
+        
+        {
+            let try_write = ctx.data.try_write();
+            if try_write.is_err() {
+                warn!("Couldn't get data lock");
+            } else {
+                debug!("Got data lock");
+            }
+        }
+
         if let Interaction::ApplicationCommand(command) = interaction.clone() {
             match command.guild_id {
                 Some(guild_id) => {
@@ -820,16 +830,19 @@ impl EventHandler for Handler {
 
                 "get" => {
                     let mut data = ctx.data.write().await;
+                    debug!("Got lock");
                     get_subreddit_cmd(&command, &mut data, &ctx).await
                 },
 
                 "membership" => {
                     let mut data = ctx.data.write().await;
+                    debug!("Got lock");
                     cmd_get_user_tiers(&command, &mut data, &ctx).await
                 },
 
                 "configure-server" => {
                     let mut data = ctx.data.write().await;
+                    debug!("Got lock");
                     configure_server(&command, &mut data, &ctx).await
                 },
 
@@ -839,6 +852,7 @@ impl EventHandler for Handler {
 
                 "info" => {
                     let mut data = ctx.data.write().await;
+                    debug!("Got lock");
                     info(&command, &mut data, &ctx).await
                 },
 
@@ -858,6 +872,8 @@ impl EventHandler for Handler {
                     }
                 }
             };
+
+            debug!("Sending response: {:?}", fake_embed);
 
             if let Err(why) = command
                 .create_interaction_response(&ctx.http, |response| {

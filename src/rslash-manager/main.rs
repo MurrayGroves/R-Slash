@@ -403,6 +403,14 @@ impl EventHandler for Handler {
             }).await.expect("Failed to register slash commands");
         }
 
+        if command == "ping" || command == "all" {
+            let _ = Command::create_global_application_command(&ctx.http, |command| {
+                command
+                    .name("ping")
+                    .description("Basic command to check if the bot is online")
+            }).await.expect("Failed to register slash command");
+        }
+
         if command == "info" || command == "all" {
             let _ = Command::create_global_application_command(&ctx.http, |command| {
                 command
@@ -505,7 +513,7 @@ async fn update() {
                 Some(x) => {
                     let tag: String = x.into_string().unwrap().parse().unwrap();
                     let mut rollout = Cmd::new("kubectl");
-                    rollout.arg("set").arg("-n").arg(namespace).arg("image").arg("statefulset/discord-shards").arg(format!("discord-shard=discord-shard:{}", tag));
+                    rollout.arg("set").arg("-n").arg(namespace).arg("image").arg("statefulset/discord-shards").arg(format!("discord-shard=registry.murraygrov.es/discord-shard:{}", tag));
                     let output = rollout.output().expect("Failed to run kubectl");
                     println!("{:?}", String::from_utf8(output.stdout).unwrap());
                     println!("{:?}", String::from_utf8(output.stderr).unwrap());
