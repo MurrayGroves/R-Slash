@@ -1,0 +1,15 @@
+[package]
+name = "k8s-interface"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+kube = { version = "0.74.0", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.15.0", features = ["v1_24"] }
+reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"]}
+serde_json = "1.0"
+redis = { version = "*", features = ["aio", "tokio-comp"] }
+env = "*"
+tokio = "*"

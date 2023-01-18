@@ -1,7 +1,7 @@
 [package]
 name = "r-slash"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 default-run = "discord-interface"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -34,7 +34,12 @@ pretty_env_logger = "*"
 bytes = "*"
 html-escape = "0.2.*"
 percent-encoding = "2.2.*"
+truncrate = "*"
+
 posthog = {path = "posthog"}
+k8s-interface = {path = "k8s-interface"}
+memberships = {path = "memberships"}
+rslash_types = {path = "rslash_types"}
 
 [[bin]]
 name = "discord-interface"
