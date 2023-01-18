@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use log::*;
 use serde_json::json;
 use serde_json::Value;

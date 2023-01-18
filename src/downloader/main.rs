@@ -6,6 +6,7 @@ use tokio::time::{sleep, Duration};
 use futures::{lock::Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
+use truncrate::*;
 
 use redis::Commands;
 
@@ -102,9 +103,12 @@ async fn request_access_token(reddit_client: String, reddit_secret: String, web_
         .await.expect("Failed to request access token from Reddit");
 
     let results: serde_json::Value = res.json().await.unwrap();
+    debug!("Reddit access token response: {:?}", results);
     let token = results.get("access_token").expect("Reddit did not return access token").to_string();
     let expires_in:u64 = results.get("expires_in").expect("Reddit did not provide expires_in").as_u64().unwrap();
-    let expires_at = get_epoch_ms() + expires_in;
+    let expires_at = get_epoch_ms() + expires_in*1000;
+
+    debug!("New token expires in {} seconds, or at {}", expires_in, expires_at);
 
     return (token, expires_at);
 }
@@ -131,6 +135,7 @@ async fn get_access_token(con: &mut redis::Connection, reddit_client: String, re
     let token = match token {
         Ok(x) => x,
         Err(_) => {
+            debug!("Requesting new access token, none exists");
             let token_results = request_access_token(reddit_client.clone(), reddit_secret.clone(), web_client, device_id.clone()).await;
             let access_token = token_results.0;
             let expires_at = token_results.1;
@@ -139,13 +144,13 @@ async fn get_access_token(con: &mut redis::Connection, reddit_client: String, re
 
             format!("{},{}", access_token, expires_at)
         }
-
     };
 
     let expires_at:u64 = token.split(",").collect::<Vec<&str>>()[1].parse().unwrap();
-    let mut access_token:String = token.split(",").collect::<Vec<&str>>()[0].parse().unwrap();
+    let mut access_token:String = token.split(",").collect::<Vec<&str>>()[0].parse::<String>().unwrap().replace('"', "");
 
     if expires_at < get_epoch_ms() {
+        debug!("Requesting new access token, current one expired");
         let token_results = request_access_token(reddit_client.clone(), reddit_secret.clone(), web_client, device_id.clone()).await;
         access_token = token_results.0;
         let expires_at = token_results.1;
@@ -178,7 +183,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await;
 
     let mut keys = Vec::new();
-    let url_base = format!("https://reddit.com/r/{}/hot.json?limit=100", subreddit);
+    let url_base = format!("https://oauth.reddit.com/r/{}/hot.json?limit=100", subreddit);
     let mut url = String::new();
     let mut after;
     let mut existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query(con).unwrap();
@@ -191,10 +196,11 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
         }
 
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, "Discord:RSlash:v1.0.0 (by /u/murrax2)".parse().unwrap());
+        headers.insert(USER_AGENT, "Discord:RSlash:v1.0.1 (by /u/murrax2)".parse().unwrap());
         headers.insert("Authorization", format!("bearer {}", access_token.clone()).parse().unwrap());
 
         debug!("{}", url);
+        debug!("{:?}", headers);
         let res = web_client
             .get(&url)
             .headers(headers)
@@ -202,6 +208,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
             .await.expect("Failed to request from reddit");
 
         debug!("Finished request");
+        debug!("Response Headers: {:?}", res.headers());
         let last_requested = get_epoch_ms();
         debug!("Got time");
         let text = match res.text().await {
@@ -353,8 +360,6 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
 
 
             debug!("Post Score: {:?}", post["score"]);
-            //post_scores.push(post["score"].clone().as_i64().unwrap_or(0));
-            //debug!("Post Scores {:?}", post_scores);
 
             let timestamp = post["created_utc"].as_f64().unwrap() as u64;
 
@@ -368,7 +373,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
                 timestamp: timestamp,
             };
 
-            post_object.title.truncate(256);
+            post_object.title = (*post_object.title.as_str()).truncate_to_boundary(256).to_string();
             posts.push(post_object);
         }
 
@@ -410,6 +415,40 @@ async fn get_subreddit(subreddit: String, con: &mut redis::Connection, web_clien
             sleep(Duration::from_millis(2000 - time_since_request)).await; // Reddit rate limit is 30 requests per minute, so must wait at least 2 seconds between requests
         }
     }
+}
+
+
+// Check if RediSearch index exists
+fn index_exists(con: &mut redis::Connection, index: String) -> bool {
+    match redis::cmd("FT.INFO").arg(index).query::<redis::Value>(con) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+
+// Create RediSearch index for subreddit
+fn create_index(con: &mut redis::Connection, index: String, prefix: String) -> Result<(), redis::RedisError>{
+    redis::cmd("FT.CREATE")
+        .arg(index)
+        .arg("PREFIX")
+        .arg("1")
+        .arg(prefix)
+        .arg("SCHEMA")
+        .arg("title")
+        .arg("TEXT")
+        .arg("score")
+        .arg("NUMERIC")
+        .arg("SORTABLE")
+        .arg("author")
+        .arg("TEXT")
+        .arg("SORTABLE")
+        .arg("flair")
+        .arg("TAG")
+        .arg("timestamp")
+        .arg("NUMERIC")
+        .arg("SORTABLE")
+        .query::<()>(con)
 }
 
 #[derive(Debug)]
@@ -461,7 +500,7 @@ impl OauthToken {
 /// # Arguments
 /// ## data
 /// A thread-safe wrapper of the [Config](ConfigStruct)
-async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
+async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result<(), Box<dyn std::error::Error>>{
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     let mut con = db_client.get_connection().expect("Can't connect to redis");
 
@@ -497,7 +536,11 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
             let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(0i64).query(&mut con).unwrap();
             if custom_subreddits.len() > 0 {
                 let custom = custom_subreddits[0].clone();
+                if !index_exists(&mut con, format!("idx:{}", &custom)) {
+                    create_index(&mut con, format!("idx:{}", &custom), format!("subreddit:{}:post:", &custom))?;
+                }
                 get_subreddit(custom.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone()).await;
+
                 let _:() = con.set(&custom, get_epoch_ms()).unwrap();
                 info!("Got custom subreddit: {:?}", custom);
                 let _:() = con.lrem("custom_subreddits_queue", 0, custom).unwrap();
@@ -533,16 +576,11 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) {
             let last_updated = con.get(&subreddit).unwrap_or(0u64);
             debug!("{:?} was last updated at {:?}", &subreddit, last_updated);
 
-            let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(0i64).query(&mut con).unwrap();
-            if custom_subreddits.len() > 0 {
-                let custom = custom_subreddits[0].clone();
-                get_subreddit(custom.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone()).await;
-                let _:() = con.set(&custom, get_epoch_ms()).unwrap();
-                info!("Got custom subreddit: {:?}", custom);
-                let _:() = con.lrem("custom_subreddits_queue", 0, custom).unwrap();
-            }
             get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone()).await;
             let _:() = con.set(&subreddit, get_epoch_ms()).unwrap();
+            if !index_exists(&mut con, format!("idx:{}", subreddit)) {
+                create_index(&mut con, format!("idx:{}", subreddit), format!("subreddit:{}:post:", subreddit))?;
+            }
             info!("Got subreddit: {:?}", subreddit);
         }
 
@@ -568,9 +606,8 @@ async fn main() {
         ("reddit_client".to_string(), ConfigValue::String(reddit_client.to_string())),
     ]);
 
-
     let data = Arc::new(Mutex::new(contents));
 
     info!("Starting loops");
-    download_loop(data).await;
+    download_loop(data).await.unwrap();
 }

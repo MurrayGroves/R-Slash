@@ -3,11 +3,7 @@ use std::process::Command as Cmd;
 use serde_json;
 use redis;
 use redis::Commands;
-use std::cmp;
-use std::convert::TryInto;
 use std::sync::Arc;
-use tokio::time::sleep;
-use std::time::Duration;
 use kube::api::Patch;
 use futures_util::TryStreamExt;
 use serenity::client::{Context, EventHandler};
@@ -94,106 +90,22 @@ async fn get_discord_details() -> (u64, u64) {
 }
 
 
-async fn stop() {
-        let mut con = get_redis_connection().await;
-        let _:() = con.set("manual_sharding", "true").expect("Failed to set manual_sharding"); // Tells discord-interface to release control of sharding
+async fn stop() -> Result<(), Box<dyn std::error::Error>> {
+    let mut con = get_redis_connection().await;
+    let _:() = con.set("manual_sharding", "true")?; // Tells discord-interface to release control of sharding
 
-        let client_k8s = kube::Client::try_default().await.unwrap();
-
-        let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
-
-        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
-
-        let patch = serde_json::json!({
-            "apiVersion": "apps/v1",
-            "kind": "StatefulSet",
-            "metadata": {
-                "name": "discord-shards",
-                "namespace": namespace
-            },
-            "spec": {
-                "replicas": 0
-            }
-        });
-
-        println!("Setting replicas to 0.");
-
-        let mut params = kube::api::PatchParams::apply("rslash-manager");
-        params.force = true;
-        let patch = Patch::Apply(&patch);
-        let _ = stateful_sets.patch("discord-shards", &params, &patch).await.expect("Failed to patch statefulset discord-shards");
+    k8s_interface::scale_to(Some(0)).await?;
+    Ok(())
 }
 
 
-async fn start() {
-    let (gateway_total_shards, max_concurrency) = get_discord_details().await;
-
-    let total_shards = match {env::args_os().nth(2)} { // Check if total_shards provided in command invocation
-        Some(x) => x.into_string().unwrap().parse().unwrap(),
-        None => gateway_total_shards
-    };
-
-    let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
-
+async fn start() -> Result<(), Box<dyn std::error::Error>> {
     let mut con = get_redis_connection().await;
-    let _:() = con.set(format!("total_shards_{}", namespace), total_shards).expect("Failed to set total_shards");
-    let _:() = con.set("max_concurrency", max_concurrency).expect("Failed to set max_concurrency");
-    let _:() = con.set("manual_sharding", "true").expect("Failed to set manual_sharding"); // Tells discord-interface to release control of sharding
+    let _:() = con.set("manual_sharding", "true")?; // Tells discord-interface to release control of sharding
 
-    let mut desired_shards = total_shards;
-    loop {
-        if desired_shards == 0 {
-            println!("All shards started");
-            break;
-        }
-
-        let new_shards = cmp::min(desired_shards, max_concurrency);
-
-        desired_shards -= new_shards;
-
-        let client_k8s = kube::Client::try_default().await.unwrap();
-
-        let namespace = env::var("NAMESPACE").expect("NAMESPACE not set");
-
-        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
-        let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
-        let current_shards = shards_set.metadata.annotations.expect("");
-        let current_shards = current_shards.get("kubectl.kubernetes.io/last-applied-configuration").unwrap();
-        let current_shards: serde_json::Value = serde_json::from_str(current_shards).unwrap();
-        let current_shards: u64 = current_shards["spec"]["replicas"].as_u64().unwrap();
-
-        let patch = serde_json::json!({
-            "apiVersion": "apps/v1",
-            "kind": "StatefulSet",
-            "metadata": {
-                "name": "discord-shards",
-                "namespace": namespace
-            },
-            "spec": {
-                "replicas": new_shards + current_shards
-            }
-        });
-
-        println!("Booting {} new shards, bringing total to {}", new_shards, new_shards + current_shards);
-
-        let mut params = kube::api::PatchParams::apply("rslash-manager");
-        params.force = true;
-        let patch = Patch::Apply(&patch);
-        let _ = stateful_sets.patch("discord-shards", &params, &patch).await.expect("Failed to patch statefulset discord-shards");
-
-        loop {
-            let client_k8s = kube::Client::try_default().await.unwrap();
-            let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
-            let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
-            let ready_shards: u64 = shards_set.status.unwrap().available_replicas.unwrap().try_into().unwrap();
-            if ready_shards == new_shards + current_shards {
-                break;
-            }
-
-            let _ = sleep(Duration::from_secs(1));
-        }
-    }
-    let _:() = con.set("manual_sharding", "false").expect("Failed to set manual_sharding"); // Tells discord-interface to take control of sharding again
+    k8s_interface::scale_to(None).await?;
+    let _:() = con.set("manual_sharding", "false")?; // Tells discord-interface to take control of sharding again
+    Ok(())
 }
 
 
@@ -336,14 +248,17 @@ impl EventHandler for Handler {
                     println!("Created commands on guild {}", count);
                 }
                 let id = guild.id;
-                id.set_application_commands(&ctx.http, |c| {
+                match id.set_application_commands(&ctx.http, |c| {
                     c.set_application_commands(Vec::new())
-                }).await.expect("Failed to delete guild commands"); // Delete all guild commands
+                }).await {
+                    Ok(_) => {},
+                    Err(e) => println!("Error: {}", e)
+                }; // Delete all guild commands
             }
         }
 
-        if command == "configure_delete" {
-            let id = serenity::model::id::CommandId::from(1014850340920758293);
+        if command == "ping_delete" {
+            let id = serenity::model::id::CommandId::from(1053326533651071067);
             Command::delete_global_application_command(&ctx.http, id).await.expect("Failed to delete command");
         }
 
@@ -391,6 +306,13 @@ impl EventHandler for Handler {
                     return option;
                 });
 
+                command.create_option(|option| {
+                    option.name("search")
+                        .description("Search by title")
+                        .required(false)
+                        .kind(CommandOptionType::String)
+                });
+
                 return command;
             }).await;
         }
@@ -411,6 +333,14 @@ impl EventHandler for Handler {
             }).await.expect("Failed to register slash command");
         }
 
+        if command == "support" || command == "all" {
+            let _ = Command::create_global_application_command(&ctx.http, |command| {
+                command
+                    .name("support")
+                    .description("Get help with the bot.")
+            }).await.expect("Failed to register slash command");
+        }
+
         if command == "info" || command == "all" {
             let _ = Command::create_global_application_command(&ctx.http, |command| {
                 command
@@ -428,6 +358,12 @@ impl EventHandler for Handler {
                         option.name("subreddit")
                             .description("The subreddit to get a post from")
                             .required(true)
+                            .kind(CommandOptionType::String)
+                    })
+                    .create_option( |option| {
+                        option.name("search")
+                            .description("Search by title")
+                            .required(false)
                             .kind(CommandOptionType::String)
                     })
             }).await.expect("Failed to register slash commands");
@@ -597,12 +533,14 @@ async fn update() {
 
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>>{
     match env::args_os().nth(1).expect("No command provided").to_str().unwrap() {
-        "start" => start().await,
-        "stop" => stop().await,
+        "start" => start().await?,
+        "stop" => stop().await?,
         "update" => update().await,
         "restart" => update().await, // Calling update without a tag just restarts all shards anyway
         _ => println!("No Command Provided"),
-    }
+    };
+
+    Ok(())
 }

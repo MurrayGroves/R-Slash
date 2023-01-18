@@ -14,6 +14,9 @@ use serenity::model::Timestamp;
 use mongodb::{options::ClientOptions};
 use mongodb::bson::{doc, Document};
 
+use memberships::get_user_tiers;
+use rslash_types::*;
+
 
 // Terminate a user's current membership period
 async fn terminate_membership(user_id: UserId) {
@@ -76,11 +79,9 @@ impl EventHandler for Handler {
 
     async fn guild_member_update(&self, ctx: Context, old: Option<Member>, new: Member) {
         debug!("Old: {:?}, New: {:?}", old, new);
-        let previously_donator = match old.is_some() {
-            true => old.unwrap().roles.contains(&RoleId(777150304155861013)),
-            false => false
-        };
         let now_donator = new.roles.contains(&RoleId(777150304155861013));
+
+        let previously_donator = get_user_tiers(new.user.id.0.to_string(), &mut ctx.data.write().await).await.bronze.active;        
 
         debug!("Previously donator: {}, now donator: {}", previously_donator, now_donator);
 
@@ -94,8 +95,6 @@ impl EventHandler for Handler {
             terminate_membership(new.user.id).await;
             donator = Some(false);
 
-        } else {
-            debug!("{} ({}) has new state {:?}", new.user.name, new.user.id, new);
         }
 
         if donator.is_some() {
@@ -106,21 +105,55 @@ impl EventHandler for Handler {
             });
 
             let mut data = ctx.data.write().await;
-            let data_mut = data.get_mut::<ClientData>().unwrap();
-            let posthog_client: &mut posthog::Client = data_mut.get_mut("posthog").unwrap();
+            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+            let posthog_client: &mut posthog::Client = match data_mut.get_mut("posthog").unwrap() {
+                ConfigValue::PosthogClient(client) => client,
+                _ => panic!("Expected posthog client")
+            };
+            
+            posthog_client.capture("donator_change", props, &format!("user_{}", new.user.id.0.to_string())).await.unwrap();
+        }
+    }
+
+
+    async fn guild_member_addition(&self, ctx: Context, new: Member) {
+        let now_donator = new.roles.contains(&RoleId(777150304155861013));
+
+        let previously_donator = get_user_tiers(new.user.id.0.to_string(), &mut ctx.data.write().await).await.bronze.active;        
+
+        debug!("Previously donator: {}, now donator: {}", previously_donator, now_donator);
+
+        let mut donator: Option<bool> = None;
+        if now_donator && !previously_donator {
+            info!("{} ({}) is now a donator", new.user.name, new.user.id);
+            add_membership(new.user.id).await;
+            donator = Some(true);
+        } else if !now_donator && previously_donator {
+            info!("{} ({}) is no longer a donator", new.user.name, new.user.id);
+            terminate_membership(new.user.id).await;
+            donator = Some(false);
+
+        }
+
+        if donator.is_some() {
+            let props = json!({
+                "$set": {
+                    "donator": donator
+                }
+            });
+
+            let mut data = ctx.data.write().await;
+            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+            let posthog_client: &mut posthog::Client = match data_mut.get_mut("posthog").unwrap() {
+                ConfigValue::PosthogClient(client) => client,
+                _ => panic!("Expected posthog client")
+            };
             
             posthog_client.capture("donator_change", props, &format!("user_{}", new.user.id.0.to_string())).await.unwrap();
         }
     }
 }
 
-pub struct ClientData {
-    _value: HashMap<String, posthog::Client>
-}
-
-impl TypeMapKey for ClientData {
-    type Value = HashMap<String, posthog::Client>;
-}
 
 #[tokio::main]
 async fn main() {
@@ -140,14 +173,20 @@ async fn main() {
     let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
     let posthog_client = posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
 
+    let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+    client_options.app_name = Some("Role Detector".to_string());
+    let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
+
     let mut client =
         serenity::Client::builder(&token, intents).event_handler(Handler).await.expect("Err creating client");
 
     {
         let mut data = client.data.write().await;
         let mut hashmap = HashMap::new();
-        hashmap.insert("posthog".to_string(), posthog_client);
-        data.insert::<ClientData>(hashmap);
+        hashmap.insert("posthog".to_string(), ConfigValue::PosthogClient(posthog_client));
+        hashmap.insert("mongodb_connection".to_string(), ConfigValue::MONGODB(mongodb_client));
+        
+        data.insert::<ConfigStruct>(hashmap);
     }
 
     // Finally, start a single shard, and start listening to events.
