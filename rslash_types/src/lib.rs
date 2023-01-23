@@ -14,7 +14,7 @@ pub enum ConfigValue {
     U64(u64),
     RoleId(serenity::model::prelude::RoleId),
     Bool(bool),
-    REDIS(redis::Connection),
+    REDIS(redis::aio::Connection),
     MONGODB(mongodb::Client),
     SubredditList(Vec<String>),
     PosthogClient(posthog::Client),

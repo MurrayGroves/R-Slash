@@ -50,9 +50,10 @@ async fn get_discord_connection_details(token: String) -> Result<(u64, u64), Box
 }
 
 
-async fn get_ready_shards() -> Result<u64, Box<dyn std::error::Error>> {
+async fn get_ready_shards(namespace: Option<String>) -> Result<u64, Box<dyn std::error::Error>> {
+    let namespace = namespace.unwrap_or(get_namespace()?);
     let client_k8s = kube::Client::try_default().await?;
-    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &get_namespace()?);
+    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
     let shards_set = stateful_sets.get("discord-shards").await?;
     let ready_shards: u64 = shards_set.status.unwrap().available_replicas.unwrap().try_into()?;
 
@@ -60,9 +61,10 @@ async fn get_ready_shards() -> Result<u64, Box<dyn std::error::Error>> {
 }
 
 
-async fn get_desired_shards() -> Result<u64, Box<dyn std::error::Error>> {
+async fn get_desired_shards(namespace: Option<String>) -> Result<u64, Box<dyn std::error::Error>> {
+    let namespace = namespace.unwrap_or(get_namespace()?);
     let client_k8s = kube::Client::try_default().await?;
-    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &get_namespace()?);
+    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
     let shards_set = stateful_sets.get("discord-shards").await?;
     let ready_shards: u64 = shards_set.status.unwrap().replicas.try_into()?;
 
@@ -70,8 +72,8 @@ async fn get_desired_shards() -> Result<u64, Box<dyn std::error::Error>> {
 }
 
 
-async fn set_shards(num: u64, update_redis: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let namespace = get_namespace()?;
+async fn set_shards(num: u64, update_redis: bool, namespace: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let namespace = namespace.unwrap_or(get_namespace()?);
 
     if update_redis {
         let mut con = get_redis_connection().await?;
@@ -102,8 +104,8 @@ async fn set_shards(num: u64, update_redis: bool) -> Result<(), Box<dyn std::err
 }
 
 
-async fn add_shards(num: u64, max_concurrency: u64) -> Result<(), Box<dyn std::error::Error>> {
-    let namespace = get_namespace()?;
+async fn add_shards(num: u64, max_concurrency: u64, namespace: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let namespace = namespace.unwrap_or(get_namespace()?);
     let mut con = get_redis_connection().await?;
 
     let mut current_shards: u64 = con.get(format!("total_shards_{}", namespace))?;
@@ -118,10 +120,10 @@ async fn add_shards(num: u64, max_concurrency: u64) -> Result<(), Box<dyn std::e
         shards_left -= to_add;
         current_shards += to_add;
 
-        set_shards(current_shards, false).await?;
+        set_shards(current_shards, false, Some(namespace.clone())).await?;
 
         // Sleep until current batch is ready
-        while get_ready_shards().await? != current_shards {
+        while get_ready_shards(Some(namespace.clone())).await? != current_shards {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
@@ -131,7 +133,9 @@ async fn add_shards(num: u64, max_concurrency: u64) -> Result<(), Box<dyn std::e
 
 
 // Scale to total_shards, if None: find total_shards from Discord
-pub async fn scale_to(total_shards: Option<u64>) -> Result<(), Box<dyn std::error::Error>>{
+pub async fn scale_to(total_shards: Option<u64>, namespace: Option<String>) -> Result<(), Box<dyn std::error::Error>>{
+    let namespace = namespace.unwrap_or(get_namespace()?);
+
     let token = std::env::var("DISCORD_TOKEN")?;
     let (total_shards_api, max_concurrency) = get_discord_connection_details(token).await?;
 
@@ -140,11 +144,11 @@ pub async fn scale_to(total_shards: Option<u64>) -> Result<(), Box<dyn std::erro
         None => total_shards_api
     };
 
-    let current_shards = get_desired_shards().await?;
+    let current_shards = get_desired_shards(Some(namespace.clone())).await?;
     if total_shards > current_shards {
-        add_shards(total_shards - current_shards, max_concurrency).await?;
+        add_shards(total_shards - current_shards, max_concurrency, Some(namespace.clone())).await?;
     } else {
-        set_shards(total_shards, true).await?;
+        set_shards(total_shards, true, Some(namespace.clone())).await?;
     }
     Ok(())
 }

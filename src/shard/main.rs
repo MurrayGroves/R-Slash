@@ -1,4 +1,5 @@
 use log::*;
+use rand::Rng;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
@@ -24,10 +25,9 @@ use std::sync::Arc;
 use std::fs::File;
 use std::path::Path;
 use futures_util::TryStreamExt;
-use redis::AsyncCommands;
 
 use redis;
-use redis::{Commands, from_redis_value};
+use redis::{AsyncCommands, from_redis_value};
 use mongodb::options::ClientOptions;
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
@@ -37,6 +37,8 @@ use serenity::model::application::command::CommandOptionType;
 use serenity::model::application::component::ButtonStyle;
 use serenity::model::guild::{Guild, UnavailableGuild};
 use serenity::utils::Colour;
+
+use anyhow::anyhow;
 
 use memberships::*;
 use rslash_types::*;
@@ -78,9 +80,9 @@ fn get_epoch_ms() -> u64 {
 
 async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, properties: Option<HashMap<&str, String>>, distinct_id: &str) {
     let posthog_client = match data.get_mut("posthog_client").unwrap() {
-        ConfigValue::PosthogClient(client) => client,
-        _ => panic!("posthog_client is not a PosthogClient"),
-    };
+        ConfigValue::PosthogClient(client) => Ok(client),
+        _ => Err("posthog_client is not a PosthogClient"),
+    }.unwrap();
 
     let mut properties_map = serde_json::Map::new();
     if properties.is_some() {
@@ -92,13 +94,13 @@ async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, pro
     debug!("{:?}", posthog_client.capture(event, properties_map, distinct_id).await.unwrap().text().await.unwrap());
 }
 
-async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
+async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
     let nsfw_subreddits = match data_mut.get_mut("nsfw_subreddits").unwrap() {
-        ConfigValue::SubredditList(list) => list,
-        _ => panic!("nsfw_subreddits is not a list"),
-    };
+        ConfigValue::SubredditList(list) => Ok(list),
+        _ => Err(anyhow!("nsfw_subreddits is not a list")),
+    }?;
 
     let nsfw_subreddits = nsfw_subreddits.clone();
 
@@ -114,13 +116,13 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
 
     let mut con = match data_mut.get_mut("redis_connection").unwrap() {
         ConfigValue::REDIS(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
+        _ => Err(anyhow!("redis_connection is not a redis connection")),
+    }?;
 
     if nsfw_subreddits.contains(&subreddit) {
         let channel = command.channel_id.to_channel_cached(&ctx.cache).unwrap();
         if !channel.is_nsfw() {
-            return FakeEmbed {
+            return Ok(FakeEmbed {
                 title: Some("NSFW subreddits can only be used in NSFW channels".to_string()),
                 author: None,
                 timestamp: None,
@@ -132,7 +134,7 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
                 thumbnail: None,
                 fields: None,
                 buttons: None
-            }
+            })
         }
     }
 
@@ -146,7 +148,7 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
 }
 
 
-async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::Connection) -> Result<u16, Box<dyn std::error::Error>> {
+async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::aio::Connection) -> Result<u16, anyhow::Error> {
     debug!("Getting length of search results for {} in {}", search, search_index);
     let results: Vec<u16> = redis::cmd("FT.SEARCH")
         .arg(search_index)
@@ -154,14 +156,14 @@ async fn get_length_of_search_results(search_index: String, search: String, con:
         .arg("LIMIT")
         .arg(0) // Return no results, just number of results
         .arg(0)
-        .query(con)?;
+        .query_async(con).await?;
 
     Ok(results[0])
 }
 
 
 // Returns the post ID at the given index in the search results
-async fn get_post_at_search_index(search_index: String, search: &str, index: u16, con: &mut redis::Connection) -> Result<String, Box<dyn std::error::Error>> {
+async fn get_post_at_search_index(search_index: String, search: &str, index: u16, con: &mut redis::aio::Connection) -> Result<String, anyhow::Error> {
     let results: Vec<redis::Value> = redis::cmd("FT.SEARCH")
         .arg(search_index)
         .arg(format!("%{}%", search))
@@ -171,26 +173,26 @@ async fn get_post_at_search_index(search_index: String, search: &str, index: u16
         .arg("SORTBY")
         .arg("score")
         .arg("NOCONTENT") // Only show POST IDs not post content
-        .query(con)?;
+        .query_async(con).await?;
 
     Ok(from_redis_value::<String>(&results[1])?)
 }
 
 
 // Returns the post ID at the given index in the list
-async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::Connection) -> Result<String, Box<dyn std::error::Error>> {
+async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::Connection) -> Result<String, anyhow::Error> {
     let results: Vec<String> = redis::cmd("LRANGE")
         .arg(list)
         .arg(index)
         .arg(index)
-        .query(con)?;
+        .query_async(con).await?;
 
     Ok(results[0].clone())
 }
 
 
-async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis::Connection) -> Result<FakeEmbed, Box<dyn std::error::Error>> {
-    let post: HashMap<String, redis::Value> = con.hgetall(&post_id)?;
+async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis::aio::Connection) -> Result<FakeEmbed, anyhow::Error> {
+    let post: HashMap<String, redis::Value> = con.hgetall(&post_id).await?;
 
     let subreddit = post_id.split(":").collect::<Vec<&str>>()[1].to_string();
 
@@ -221,14 +223,14 @@ async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis
 }
 
 
-async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis::Connection, channel: ChannelId) -> FakeEmbed {
-    let mut index: u16 = con.incr(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 1i16).unwrap();
-    let _:() = con.expire(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 60*60).unwrap();
+async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis::aio::Connection, channel: ChannelId) -> Result<FakeEmbed, anyhow::Error> {
+    let mut index: u16 = con.incr(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 1i16).await?;
+    let _:() = con.expire(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 60*60).await?;
     index -= 1;
     let length: u16 = get_length_of_search_results(format!("idx:{}", &subreddit), search.clone(), con).await.unwrap();
 
     if length == 0 {
-        return FakeEmbed {
+        return Ok(FakeEmbed {
             title: Some("No search results found".to_string()),
             description: None,
             url: None,
@@ -240,36 +242,36 @@ async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis
             timestamp: None,
             fields: None,
             buttons: None,
-        };
+        });
     }
 
     index = length - (index + 1);
 
     if index >= length {
-        let _:() = con.set(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 0i16).unwrap();
+        let _:() = con.set(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 0i16).await?;
         index = 0;
     }
 
-    let post_id = get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con).await.unwrap();
-    return get_post_by_id(post_id, Some(search), con).await.unwrap();
+    let post_id = get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con).await?;
+    return Ok(get_post_by_id(post_id, Some(search), con).await?);
 }
 
 
-async fn get_subreddit(subreddit: String, con: &mut redis::Connection, channel: ChannelId) -> FakeEmbed {
-    let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 1i16).unwrap();
-    let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 60*60).unwrap();
+async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, channel: ChannelId) -> Result<FakeEmbed, anyhow::Error> {
+    let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 1i16).await?;
+    let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 60*60).await?;
     index -= 1;
-    let length: u16 = con.llen(format!("subreddit:{}:posts", &subreddit)).unwrap();
+    let length: u16 = con.llen(format!("subreddit:{}:posts", &subreddit)).await?;
     index = length - (index + 1);
 
     if index >= length {
-        let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 0i16).unwrap();
+        let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 0i16).await?;
         index = 0;
     }
 
-    let post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con).await.unwrap();
+    let post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con).await?;
 
-    return get_post_by_id(post_id, None, con).await.unwrap();
+    return Ok(get_post_by_id(post_id, None, con).await?);
 }
 
 
@@ -391,12 +393,12 @@ async fn set_guild_config(old_config: Document, config: Document, data: &mut tok
 }
 
 
-async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, _ctx: &Context) -> FakeEmbed {
+async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, _ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
     let mongodb_client = match data_mut.get_mut("mongodb_connection").unwrap() {
         ConfigValue::MONGODB(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
+        _ => Err(anyhow!("Failed to get mongodb connection")),
+    }?;
 
     let tiers = get_user_tiers(command.user.id.0.to_string(), mongodb_client).await;
     debug!("Tiers: {:?}", tiers);
@@ -409,7 +411,7 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
 
     capture_event(data_mut, "cmd_get_user_tiers", Some(HashMap::from([("bronze_active", bronze.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
 
-    return FakeEmbed {
+    return Ok(FakeEmbed {
         title: Some("Your membership tiers".to_string()),
         description: Some("Get Premium here: https://ko-fi.com/rslash".to_string()),
         url: None,
@@ -423,12 +425,12 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
         color: None,
         thumbnail: None,
         buttons: None
-    };
+    });
 }
 
 
-async fn list_contains(element: &str, list: &str, con: &mut redis::Connection) -> Result<bool, Box<dyn std::error::Error>> {
-    let position: Option<u16> = con.lpos(list, element, redis::LposOptions::default())?;
+async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connection) -> Result<bool, anyhow::Error> {
+    let position: Option<u16> = con.lpos(list, element, redis::LposOptions::default()).await?;
 
     return match position {
         Some(_) => Ok(true),
@@ -437,12 +439,12 @@ async fn list_contains(element: &str, list: &str, con: &mut redis::Connection) -
 }
 
 
-async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Context) -> FakeEmbed {
+async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
     let mut data = ctx.data.write().await;
 
     let membership = get_user_tiers(command.user.id.0.to_string(), &mut data).await;
     if !membership.bronze.active {
-        return FakeEmbed {
+        return Ok(FakeEmbed {
             title: Some("Premium Feature".to_string()),
             description: Some("You must have premium in order to use this command.
             Get it here: https://ko-fi.com/rslash".to_string()),
@@ -455,7 +457,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
             timestamp: None,
             fields: None,
             buttons: None
-        }
+        })
     }
 
     drop(data); // Release lock while performing web request
@@ -467,20 +469,14 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
 
     let web_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .build().unwrap();
-    let res = match web_client
+        .build()?;
+    let res = web_client
         .get(format!("https://www.reddit.com/r/{}.json", subreddit))
         .send()
-        .await {
-            Ok(x) => x,
-            Err(y) => {
-                warn!("Reddit request failed: {}", y);
-                return error_embed("AHWUHABA&AWOPL");
-            }
-    };
+        .await?;
 
     if res.status() != 200 {
-        return FakeEmbed {
+        return Ok(FakeEmbed {
             title: Some("Subreddit Inaccessible".to_string()),
             description: Some(format!("r/{} is private or does not exist.", subreddit).to_string()),
             url: None,
@@ -492,7 +488,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
             timestamp: None,
             fields: None,
             buttons: None
-        }
+        })
     }
 
     let mut data = ctx.data.write().await;
@@ -500,19 +496,19 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
 
     let con = match data_mut.get_mut("redis_connection").unwrap() {
         ConfigValue::REDIS(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
+        _ => Err(anyhow!("redis_connection is not a redis connection")),
+    }?;
 
-    let already_queued = list_contains(&subreddit, "custom_subreddits_queue", con).await.unwrap();
+    let already_queued = list_contains(&subreddit, "custom_subreddits_queue", con).await?;
 
-    let last_cached: i64 = con.get(&format!("{}", subreddit)).unwrap_or(0);
+    let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
     if last_cached == 0 {
         debug!("Subreddit last cached more than an hour ago, updating...");
         command.defer(&ctx.http).await.unwrap_or_else(|e| {
             warn!("Failed to defer response: {}", e);
         });
         if !already_queued {
-            let _:() = con.rpush("custom_subreddits_queue", &subreddit).unwrap();
+            let _:() = con.rpush("custom_subreddits_queue", &subreddit).await?;
         }
         drop(data); // Release lock while waiting to avoid deadlocks.
         loop {
@@ -522,10 +518,10 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
 
             let con = match data_mut.get_mut("redis_connection").unwrap() {
                 ConfigValue::REDIS(db) => Ok(db),
-                _ => Err(0),
-            }.unwrap();
+                _ => Err(anyhow!("redis_connection is not a redis connection")),
+            }?;
 
-            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query(con) {
+            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(con).await {
                 Ok(posts) => {
                     posts
                 },
@@ -540,7 +536,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
     } else if last_cached +  3600000 < get_epoch_ms() as i64 {
         // Tell downloader to update the subreddit, but use outdated posts for now.
         if !already_queued {
-            let _:() = con.rpush("custom_subreddits_queue", &subreddit).unwrap();
+            let _:() = con.rpush("custom_subreddits_queue", &subreddit).await?;
         }
         drop(data);
     }
@@ -551,25 +547,25 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
 }
 
 
-async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
+async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
     capture_event(data_mut, "cmd_info", None, &format!("user_{}", command.user.id.0.to_string())).await;
 
     let con = match data_mut.get_mut("redis_connection").unwrap() {
         ConfigValue::REDIS(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
+        _ => Err(anyhow!("redis_connection is not a redis connection")),
+    }?;
 
-    let guild_counts: HashMap<String, redis::Value> = con.hgetall(format!("shard_guild_counts_{}", get_namespace().await)).unwrap();
+    let guild_counts: HashMap<String, redis::Value> = con.hgetall(format!("shard_guild_counts_{}", get_namespace().await)).await?;
     let mut guild_count = 0;
     for (_, count) in guild_counts {
-        guild_count += from_redis_value::<u64>(&count).unwrap();
+        guild_count += from_redis_value::<u64>(&count)?;
     }
 
     let id = ctx.cache.current_user_id().0;
 
-    return FakeEmbed {
+    return Ok(FakeEmbed {
         title: Some("Info".to_string()),
         description: Some(format!("[Support Server](https://discord.gg/jYtCFQG)
         
@@ -590,11 +586,11 @@ async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::R
             ("Shard Count".to_string(), ctx.cache.shard_count().to_string(), true),
         ]),
         buttons: None
-    }
+    })
 }
 
 
-async fn configure_server(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> FakeEmbed {
+async fn configure_server(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
     debug!("{:?}", command.data.options);
 
     let mut embed = FakeEmbed {
@@ -641,7 +637,7 @@ async fn configure_server(command: &ApplicationCommandInteraction, data: &mut to
     }
 
 
-    return embed;
+    return Ok(embed);
 }
 
 macro_rules! fake_embed_to_embed {
@@ -751,6 +747,76 @@ macro_rules! fake_embed_to_message {
 }
 
 
+async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
+    match command.data.name.as_str() {
+        "ping" => {
+            Ok(FakeEmbed {
+                title: Some("Pong!".to_string()),
+                author: None,
+                description: None, // TODO - Add latency
+                url: None,
+                color: Some(Colour::from_rgb(0, 255, 0)),
+                footer: None,
+                image: None,
+                thumbnail: None,
+                timestamp: None,
+                fields: None,
+                buttons: None
+            })
+        },
+
+        "support" => {
+            Ok(FakeEmbed {
+                title: Some("Get Support".to_string()),
+                author: None,
+                description: Some("[Discord Server](https://discord.gg/jYtCFQG)
+                Email: rslashdiscord@gmail.com".to_string()),
+                url: None,
+                color: Some(Colour::from_rgb(0, 255, 0)),
+                footer: None,
+                image: None,
+                thumbnail: None,
+                timestamp: None,
+                fields: None,
+                buttons: None
+            })
+        },
+
+        "get" => {
+            let mut data = ctx.data.write().await;
+            debug!("Got lock");
+            get_subreddit_cmd(&command, &mut data, &ctx).await
+        },
+
+        "membership" => {
+            let mut data = ctx.data.write().await;
+            debug!("Got lock");
+            cmd_get_user_tiers(&command, &mut data, &ctx).await
+        },
+
+        "configure-server" => {
+            let mut data = ctx.data.write().await;
+            debug!("Got lock");
+            configure_server(&command, &mut data, &ctx).await
+        },
+
+        "custom" => {
+            get_custom_subreddit(&command, &ctx).await
+        },
+
+        "info" => {
+            let mut data = ctx.data.write().await;
+            debug!("Got lock");
+            info(&command, &mut data, &ctx).await
+        },
+
+        _ => {
+            Err(anyhow!("Unknown command"))?
+        }
+    }
+}
+
+
 /// Discord event handler
 struct Handler;
 
@@ -766,7 +832,7 @@ impl EventHandler for Handler {
             _ => Err(0),
         }.unwrap();
 
-        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).unwrap();
+        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).await.unwrap();
 
         if is_new { // First time client has seen the guild
             capture_event(data_mut, "guild_join", None, &format!("guild_{}", guild.id.0.to_string())).await;
@@ -785,7 +851,7 @@ impl EventHandler for Handler {
             _ => Err(0),
         }.unwrap();
 
-        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).unwrap();
+        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).await.unwrap();
     }
 
     /// Fires when the client is connected to the gateway
@@ -846,82 +912,28 @@ impl EventHandler for Handler {
                     info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
                 }
             }
-            let fake_embed = match command.data.name.as_str() {
-                "ping" => {
-                    FakeEmbed {
-                        title: Some("Pong!".to_string()),
-                        author: None,
-                        description: None, // TODO - Add latency
-                        url: None,
-                        color: Some(Colour::from_rgb(0, 255, 0)),
-                        footer: None,
-                        image: None,
-                        thumbnail: None,
-                        timestamp: None,
-                        fields: None,
-                        buttons: None
-                    }
-                },
+            let command_response = get_command_response(&command, &ctx).await;
+            let fake_embed = match command_response {
+                Ok(ref embed) => embed.clone(),
+                Err(ref why) => {
+                    let why =why.to_string();
+                    let code = rand::thread_rng().gen_range(0..10000);
 
-                "support" => {
-                    FakeEmbed {
-                        title: Some("Get Support".to_string()),
-                        author: None,
-                        description: Some("[Discord Server](https://discord.gg/jYtCFQG)
-                        Email: rslashdiscord@gmail.com".to_string()),
-                        url: None,
-                        color: Some(Colour::from_rgb(0, 255, 0)),
-                        footer: None,
-                        image: None,
-                        thumbnail: None,
-                        timestamp: None,
-                        fields: None,
-                        buttons: None
-                    }
-                },
+                    error!("Error code {} getting command response: {:?}", code, why);
 
-                "get" => {
                     let mut data = ctx.data.write().await;
-                    debug!("Got lock");
-                    get_subreddit_cmd(&command, &mut data, &ctx).await
-                },
+                    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
-                "membership" => {
-                    let mut data = ctx.data.write().await;
-                    debug!("Got lock");
-                    cmd_get_user_tiers(&command, &mut data, &ctx).await
-                },
+                    capture_event(data_mut, "command_error", Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
 
-                "configure-server" => {
-                    let mut data = ctx.data.write().await;
-                    debug!("Got lock");
-                    configure_server(&command, &mut data, &ctx).await
-                },
+                    let map = HashMap::from([("content", format!("Error code {} getting command response: {:?}", code, why))]);
+                    let client = reqwest::Client::new();
+                    let _ = client.post("https://discord.com/api/webhooks/1065290872729649293/RmbUroqyxn6RXQythEdDtjIq4ztiYZ4dt1ZPSTxxwYK42GL0TB46E1rkRdG5xeVg7YfF")
+                        .json(&map)
+                        .send()
+                        .await;
 
-                "custom" => {
-                    get_custom_subreddit(&command, &ctx).await
-                },
-
-                "info" => {
-                    let mut data = ctx.data.write().await;
-                    debug!("Got lock");
-                    info(&command, &mut data, &ctx).await
-                },
-
-                _ => {
-                    FakeEmbed {
-                        title: Some("Unknown command".to_string()),
-                        author: None,
-                        description: None,
-                        url: None,
-                        color: Some(Colour::from_rgb(255, 0, 0)),
-                        footer: None,
-                        image: None,
-                        thumbnail: None,
-                        timestamp: None,
-                        fields: None,
-                        buttons: None
-                    }
+                    error_embed(&code.to_string())
                 }
             };
 
@@ -985,7 +997,7 @@ impl EventHandler for Handler {
             let custom_id: HashMap<String, serde_json::Value> = serde_json::from_str(&command.data.custom_id).unwrap();
 
             let subreddit = custom_id["subreddit"].to_string().replace('"', "");
-            let search_enabled = custom_id["search"] != "";
+            let search_enabled = custom_id["search"] != "null";
 
             capture_event(data_mut, "subreddit_cmd", Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
             
@@ -1001,6 +1013,30 @@ impl EventHandler for Handler {
                 },
                 false => {
                     get_subreddit(subreddit, &mut con, command.channel_id).await
+                }
+            };
+
+            drop(data_mut);
+            let fake_embed = match fake_embed {
+                Ok(embed) => embed,
+                Err(error) => {
+                    let why = format!("{:?}", error);
+                    let code = rand::thread_rng().gen_range(0..10000);
+                    error!("Error code {} getting command response: {:?}", code, why);
+
+                    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+
+                    capture_event(data_mut, "command_error", Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
+                    
+                    let map = HashMap::from([("content", format!("Error code {} getting command response: {:?}", code, why))]);
+
+
+                    let client = reqwest::Client::new();
+                    let _ = client.post("https://discord.com/api/webhooks/1065290872729649293/RmbUroqyxn6RXQythEdDtjIq4ztiYZ4dt1ZPSTxxwYK42GL0TB46E1rkRdG5xeVg7YfF")
+                        .json(&map)
+                        .send()
+                        .await;
+                    error_embed(&code.to_string())
                 }
             };
 
@@ -1086,7 +1122,7 @@ async fn main() {
     let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
 
     let redis_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
-    let mut con = redis_client.get_connection().expect("Can't connect to redis");
+    let mut con = redis_client.get_async_connection().await.expect("Can't connect to redis");
 
     let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
     client_options.app_name = Some(format!("Shard {}", shard_id));
@@ -1103,7 +1139,7 @@ async fn main() {
 
     let nsfw_subreddits: Vec<String> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap().to_string()).collect();
 
-    let total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace().await));
+    let total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace().await)).await;
     let total_shards: u64 = total_shards.expect("Failed to get or convert total_shards");
 
     let shard_id_logger = shard_id.clone();
