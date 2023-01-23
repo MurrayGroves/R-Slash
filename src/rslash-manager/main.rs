@@ -94,7 +94,7 @@ async fn stop() -> Result<(), Box<dyn std::error::Error>> {
     let mut con = get_redis_connection().await;
     let _:() = con.set("manual_sharding", "true")?; // Tells discord-interface to release control of sharding
 
-    k8s_interface::scale_to(Some(0)).await?;
+    k8s_interface::scale_to(Some(0), Some(env::var("NAMESPACE")?)).await?;
     Ok(())
 }
 
@@ -103,7 +103,7 @@ async fn start() -> Result<(), Box<dyn std::error::Error>> {
     let mut con = get_redis_connection().await;
     let _:() = con.set("manual_sharding", "true")?; // Tells discord-interface to release control of sharding
 
-    k8s_interface::scale_to(None).await?;
+    k8s_interface::scale_to(None, Some(env::var("NAMESPACE")?)).await?;
     let _:() = con.set("manual_sharding", "false")?; // Tells discord-interface to take control of sharding again
     Ok(())
 }
