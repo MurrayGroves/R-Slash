@@ -36,6 +36,18 @@ impl TypeMapKey for ConfigStruct {
     type Value = HashMap<String, ConfigValue>;
 }
 
+#[derive(Debug, Clone)]
+struct SubredditState {
+    /// Name of the subreddit.
+    name: String,
+    /// Unix timestamp of the last time the subreddit was fetched. None if has never been fetched.
+    last_fetched: Option<u64>,
+    /// The ID of the last post fetched for resumption purposes. None if no posts have been fetched yet.
+    fetched_up_to: Option<String>,
+    /// How many more pages of results to fetch.
+    pages_left: u64,
+}
+
 /// Represents a Reddit post
 #[derive(Debug, Clone)]
 pub struct Post {
@@ -177,7 +189,7 @@ async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: Strin
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut OauthToken, imgur_client: String) { // Get the top 1000 most recent posts and store them in the DB
+async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut OauthToken, imgur_client: String, mut after: Option<String>, pages: Option<u8>) -> String { // Get the top 1000 most recent posts and store them in the DB
     debug!("Placeholder: {:?}", subreddit);
 
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await;
@@ -185,14 +197,19 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
     let mut keys = Vec::new();
     let url_base = format!("https://oauth.reddit.com/r/{}/hot.json?limit=100", subreddit);
     let mut url = String::new();
-    let mut after;
     let mut existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query_async(con).await.unwrap();
     debug!("Existing posts: {:?}", existing_posts);
-    for x in 0..10 {
+    for x in 0..pages.unwrap_or(10) {
         debug!("Making {}th request to reddit", x);
 
         if url.len() == 0 {
             url = url_base.clone();
+            match &after {
+                Some(x) => {
+                    url = format!("{}&after={}", url, x.clone());
+                },
+                None => {},
+            }
         }
 
         let mut headers = HeaderMap::new();
@@ -215,7 +232,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             Ok(x) => x,
             Err(_) => {
                 error!("Failed to get text from reddit");
-                return;
+                return after.unwrap();
             }
         };
         debug!("Matched text");
@@ -223,7 +240,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             Ok(x) => x,
             Err(_) => {
                 error!("Failed to parse JSON from Reddit");
-                return;
+                return after.unwrap();
             }
         };
 
@@ -234,8 +251,13 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             break;
         }
 
-        after = results[results.len() -1 ]["data"]["id"].as_str().unwrap().to_string();
-        url = format!("{}&after=t3_{}", url_base, after);
+        after = Some(results[results.len() -1 ]["data"]["id"].as_str().unwrap().to_string());
+        match &after {
+            Some(x) => {
+                url = format!("{}&after={}", url_base, x.clone());
+            },
+            None => {},
+        }
 
         let mut posts = Vec::new();
         for post in results {
@@ -337,8 +359,6 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                 continue;
             }
 
-
-
             url = url.replace('"', "");
             match web_client
                 .head(&url)
@@ -415,6 +435,8 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             sleep(Duration::from_millis(2000 - time_since_request)).await; // Reddit rate limit is 30 requests per minute, so must wait at least 2 seconds between requests
         }
     }
+
+    return after.unwrap();
 }
 
 
@@ -531,20 +553,96 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
     let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
 
     if do_custom == "true".to_string() {
+        let mut subreddits: HashMap<String, SubredditState> = HashMap::new();
         loop {
-            sleep(Duration::from_millis(100)).await;
-            let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(0i64).query_async(&mut con).await.unwrap();
-            if custom_subreddits.len() > 0 {
-                let custom = custom_subreddits[0].clone();
-                if !index_exists(&mut con, format!("idx:{}", &custom)).await {
-                    create_index(&mut con, format!("idx:{}", &custom), format!("subreddit:{}:post:", &custom)).await?;
+            // Populate subreddits with any new subreddit requests
+            let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(-1i64).query_async(&mut con).await.unwrap();
+            for subreddit in custom_subreddits {
+                if !subreddits.contains_key(&subreddit) {
+                    let last_fetched: Option<u64> = con.get(&subreddit).await?;
+                    subreddits.insert(subreddit.clone(), SubredditState {
+                        name: subreddit.clone(),
+                        fetched_up_to: None,
+                        last_fetched,
+                        pages_left: 10,
+                    });
                 }
-                get_subreddit(custom.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone()).await;
-
-                let _:() = con.set(&custom, get_epoch_ms()).await.unwrap();
-                info!("Got custom subreddit: {:?}", custom);
-                let _:() = con.lrem("custom_subreddits_queue", 0, custom).await.unwrap();
             }
+
+            if subreddits.len() > 0 {
+                debug!("Subreddits: {:?}", subreddits);
+            }
+
+            let mut next_subreddit = None;
+
+            // If there's a subreddit that hasn't been fetched yet, make that the next one
+            for subreddit in subreddits.values() {
+                if subreddit.last_fetched.is_none() {
+                    next_subreddit = Some(subreddit.name.clone());
+                    debug!("Found subreddit that hasn't been fetched yet: {}", subreddit.name);
+                    break;
+                }
+            }
+
+            // If there's no subreddit that hasn't been fetched yet, find the one fetched least recently and make that the next one
+            match next_subreddit {
+                Some(_) => {},
+                None => {
+                    let mut min = None;
+                    // Find the minimum last_fetched
+                    for subreddit in subreddits.values() {
+                        match min {
+                            Some(x) => {
+                                if subreddit.last_fetched.unwrap() < x {
+                                    min = subreddit.last_fetched;
+                                }
+                            },
+                            None => {
+                                min = subreddit.last_fetched;
+                            }
+                        }
+                    }
+
+                    // Find subreddit with the correct last_fetched
+                    for subreddit in subreddits.values() {
+                        if subreddit.last_fetched == min {
+                            next_subreddit = Some(subreddit.name.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if next_subreddit.is_some() {
+                debug!("Next subreddit: {:?}", next_subreddit);
+            }
+
+            if next_subreddit.is_some() {
+                let subreddit = next_subreddit.unwrap();
+                if !index_exists(&mut con, format!("idx:{}", &subreddit)).await {
+                    create_index(&mut con, format!("idx:{}", &subreddit), format!("subreddit:{}:post:", &subreddit)).await?;
+                }
+
+                // Fetch a page and update state
+                let mut subreddit_state = subreddits.get_mut(&subreddit).unwrap();
+                let fetched_up_to = &subreddit_state.fetched_up_to;
+                subreddit_state.fetched_up_to = Some(get_subreddit(
+                    subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(),
+                    None, &mut gfycat_token, imgur_client.clone(), fetched_up_to.clone(), Some(1)).await);
+                subreddit_state.last_fetched = Some(get_epoch_ms());
+                debug!("Subreddit has {} pages left", subreddit_state.pages_left);
+                subreddit_state.pages_left -= 1;
+
+                // If we've fetched all the pages, remove the subreddit from the list
+                if subreddit_state.pages_left == 0 {
+                    subreddits.remove(&subreddit);
+                    let _:() = con.set(&subreddit, get_epoch_ms()).await.unwrap();
+                    info!("Got custom subreddit: {:?}", &subreddit);
+                    let _:() = con.lrem("custom_subreddits_queue", 0, &subreddit).await.unwrap();
+                }
+            }
+
+            sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -576,7 +674,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
             let last_updated = con.get(&subreddit).await.unwrap_or(0u64);
             debug!("{:?} was last updated at {:?}", &subreddit, last_updated);
 
-            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone()).await;
+            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone(), None, None).await;
             let _:() = con.set(&subreddit, get_epoch_ms()).await.unwrap();
             if !index_exists(&mut con, format!("idx:{}", subreddit)).await {
                 create_index(&mut con, format!("idx:{}", subreddit), format!("subreddit:{}:post:", subreddit)).await?;

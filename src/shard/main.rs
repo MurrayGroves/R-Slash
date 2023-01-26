@@ -990,14 +990,18 @@ impl EventHandler for Handler {
                     info!("{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}", guild_id.name(&ctx.cache).unwrap(), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
                 },
                 None => {
-                    info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
+                    info!("{:?} ({:?}) : Button {} {:?}", command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
                 }
             }
 
             let custom_id: HashMap<String, serde_json::Value> = serde_json::from_str(&command.data.custom_id).unwrap();
 
             let subreddit = custom_id["subreddit"].to_string().replace('"', "");
-            let search_enabled = custom_id["search"] != "null";
+            debug!("Search, {:?}", custom_id["search"]);
+            let search_enabled = match custom_id["search"] {
+                serde_json::Value::String(_) => true,
+                _ => false,
+            };
 
             capture_event(data_mut, "subreddit_cmd", Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
             
