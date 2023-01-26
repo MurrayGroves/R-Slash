@@ -120,21 +120,22 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
     }?;
 
     if nsfw_subreddits.contains(&subreddit) {
-        let channel = command.channel_id.to_channel_cached(&ctx.cache).unwrap();
-        if !channel.is_nsfw() {
-            return Ok(FakeEmbed {
-                title: Some("NSFW subreddits can only be used in NSFW channels".to_string()),
-                author: None,
-                timestamp: None,
-                description: Some("Discord requires NSFW content to only be sent in NSFW channels, find out how to fix this [here](https://support.discord.com/hc/en-us/articles/115000084051-NSFW-Channels-and-Content)".to_string()),
-                url: None,
-                color: Some(Colour::from_rgb(255, 0, 0)),
-                footer: None,
-                image: None,
-                thumbnail: None,
-                fields: None,
-                buttons: None
-            })
+        if let Some(channel) = command.channel_id.to_channel_cached(&ctx.cache) {
+            if !channel.is_nsfw() {
+                return Ok(FakeEmbed {
+                    title: Some("NSFW subreddits can only be used in NSFW channels".to_string()),
+                    author: None,
+                    timestamp: None,
+                    description: Some("Discord requires NSFW content to only be sent in NSFW channels, find out how to fix this [here](https://support.discord.com/hc/en-us/articles/115000084051-NSFW-Channels-and-Content)".to_string()),
+                    url: None,
+                    color: Some(Colour::from_rgb(255, 0, 0)),
+                    footer: None,
+                    image: None,
+                    thumbnail: None,
+                    fields: None,
+                    buttons: None
+                })
+            }
         }
     }
 
