@@ -100,7 +100,15 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
     let nsfw_subreddits = match data_mut.get_mut("nsfw_subreddits").unwrap() {
         ConfigValue::SubredditList(list) => Ok(list),
         _ => Err(anyhow!("nsfw_subreddits is not a list")),
-    }?;
+    }?;use crate::FakeEmbed;
+use crate::TypeMap;
+use crate::anyhow;
+
+use serenity::builder;
+use serenity::model::prelude::command::CommandOptionType;
+use serenity::client::Context;
+use serenity::model::prelude::interaction::application_command::ApplicationCommandInteraction;
+
 
     let nsfw_subreddits = nsfw_subreddits.clone();
 
@@ -911,6 +919,7 @@ impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         debug!("Interaction received");
         
+        // Check if there is a deadlock
         {
             let try_write = ctx.data.try_write();
             if try_write.is_err() {
@@ -933,7 +942,7 @@ impl EventHandler for Handler {
             let fake_embed = match command_response {
                 Ok(ref embed) => embed.clone(),
                 Err(ref why) => {
-                    let why =why.to_string();
+                    let why = why.to_string();
                     let code = rand::thread_rng().gen_range(0..10000);
 
                     error!("Error code {} getting command response: {:?}", code, why);

@@ -11,7 +11,6 @@ use truncrate::*;
 use redis::AsyncCommands;
 
 use reqwest::header::{USER_AGENT, HeaderMap};
-use serenity::prelude::TypeMapKey;
 use std::env;
 use futures_util::TryStreamExt;
 
@@ -30,10 +29,6 @@ pub enum ConfigValue {
 /// Stores config values required for operation of the downloader
 pub struct ConfigStruct {
     _value: HashMap<String, ConfigValue>
-}
-
-impl TypeMapKey for ConfigStruct {
-    type Value = HashMap<String, ConfigValue>;
 }
 
 #[derive(Debug, Clone)]
