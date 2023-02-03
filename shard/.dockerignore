@@ -1,0 +1,9 @@
+*target/debug/build
+*target/debug/.fingerprint
+*target/debug/deps
+*target/debug/incremental
+*target/doc
+*target/release/build
+*target/release/.fingerprint
+*target/release/incremental
+*target/release/deps
