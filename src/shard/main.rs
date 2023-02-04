@@ -503,15 +503,24 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
     let already_queued = list_contains(&subreddit, "custom_subreddits_queue", con).await?;
 
     let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
+
+    drop(data);
     if last_cached == 0 {
         debug!("Subreddit last cached more than an hour ago, updating...");
         command.defer(&ctx.http).await.unwrap_or_else(|e| {
             warn!("Failed to defer response: {}", e);
         });
         if !already_queued {
+            let mut data = ctx.data.write().await;
+            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+        
+            let con = match data_mut.get_mut("redis_connection").unwrap() {
+                ConfigValue::REDIS(db) => Ok(db),
+                _ => Err(anyhow!("redis_connection is not a redis connection")),
+            }?;
+        
             let _:() = con.rpush("custom_subreddits_queue", &subreddit).await?;
         }
-        drop(data); // Release lock while waiting to avoid deadlocks.
         loop {
             sleep(Duration::from_millis(1000)).await;
             let mut data = ctx.data.write().await;
@@ -537,9 +546,16 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
     } else if last_cached +  3600000 < get_epoch_ms() as i64 {
         // Tell downloader to update the subreddit, but use outdated posts for now.
         if !already_queued {
+            let mut data = ctx.data.write().await;
+            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+        
+            let con = match data_mut.get_mut("redis_connection").unwrap() {
+                ConfigValue::REDIS(db) => Ok(db),
+                _ => Err(anyhow!("redis_connection is not a redis connection")),
+            }?;
+        
             let _:() = con.rpush("custom_subreddits_queue", &subreddit).await?;
         }
-        drop(data);
     }
 
     let mut data = ctx.data.write().await;
