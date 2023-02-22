@@ -1120,6 +1120,11 @@ async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge:
         let db_total_shards: u64 = db_total_shards.expect("Failed to get or convert total_shards from Redis");
 
         let mut shard_manager = shard_manager.lock().await;
+        if !shard_manager.has(serenity::client::bridge::gateway::ShardId(shard_id)).await {
+            debug!("Shard {} not found, marking self for termination.", shard_id);
+            fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
+        }
+
         if db_total_shards != total_shards {
             debug!("Total shards changed from {} to {}, restarting.", total_shards, db_total_shards);
             shard_manager.set_shards(shard_id, 1, db_total_shards).await;
