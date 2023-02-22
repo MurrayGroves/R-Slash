@@ -189,7 +189,7 @@ async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: Strin
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut OauthToken, imgur_client: String, mut after: Option<String>, pages: Option<u8>) -> String { // Get the top 1000 most recent posts and store them in the DB
+async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut OauthToken, imgur_client: String, mut after: Option<String>, pages: Option<u8>) -> Option<String> { // Get the top 1000 most recent posts and store them in the DB
     debug!("Placeholder: {:?}", subreddit);
 
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await;
@@ -232,7 +232,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             Ok(x) => x,
             Err(_) => {
                 error!("Failed to get text from reddit");
-                return after.unwrap();
+                return after;
             }
         };
         debug!("Matched text");
@@ -240,7 +240,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             Ok(x) => x,
             Err(_) => {
                 error!("Failed to parse JSON from Reddit");
-                return after.unwrap();
+                return after;
             }
         };
 
@@ -436,7 +436,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
         }
     }
 
-    return after.unwrap();
+    return after;
 }
 
 
@@ -626,9 +626,14 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
                 // Fetch a page and update state
                 let mut subreddit_state = subreddits.get_mut(&subreddit).unwrap();
                 let fetched_up_to = &subreddit_state.fetched_up_to;
-                subreddit_state.fetched_up_to = Some(get_subreddit(
+                subreddit_state.fetched_up_to = get_subreddit(
                     subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(),
-                    None, &mut gfycat_token, imgur_client.clone(), fetched_up_to.clone(), Some(1)).await);
+                    None, &mut gfycat_token, imgur_client.clone(), fetched_up_to.clone(), Some(1)).await;
+
+                if subreddit_state.fetched_up_to.is_none() {
+                    error!("Failed to get subreddit, after is None: {}", &subreddit);
+                    subreddit_state.pages_left = 1;
+                }
                 subreddit_state.last_fetched = Some(get_epoch_ms());
                 debug!("Subreddit has {} pages left", subreddit_state.pages_left);
                 subreddit_state.pages_left -= 1;
