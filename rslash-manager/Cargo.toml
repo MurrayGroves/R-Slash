@@ -1,12 +1,8 @@
 [package]
-name = "rslash_types"
+name = "rslash-manager"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-mongodb = "2.3"
-posthog = {path = "../posthog"}
-serenity = "0.11"
-redis = { version = "*", features = ["aio", "tokio-comp"] }
