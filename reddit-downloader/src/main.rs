@@ -80,7 +80,6 @@ impl From<Post> for Vec<(String, String)> {
 
 
 /// Returns current milliseconds since the Epoch
-#[tracing::instrument]
 fn get_epoch_ms() -> Result<u64, anyhow::Error> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)?
@@ -800,13 +799,17 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
 #[tokio::main]
 async fn main() {
     tracing_subscriber::Registry::default()
-    .with(sentry::integrations::tracing::layer())
+    .with(sentry::integrations::tracing::layer().event_filter(|md| match md.level() {
+        &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
+        &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
+        _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
+    }))
     .with(tracing_subscriber::fmt::layer().compact().with_ansi(false))
     .init();
 
     println!("Initialised tracing");
 
-    let _guard = sentry::init(("https://75873f85a862465795299365b603fbb5@o4504774745718784.ingest.sentry.io/4504774760660992", sentry::ClientOptions {
+    let _guard = sentry::init(("http://623a0a9dd73f41d19553fe485514664c@100.67.30.19:9000/2", sentry::ClientOptions {
         release: sentry::release_name!(),
         traces_sample_rate: 1.0,
         ..Default::default()
