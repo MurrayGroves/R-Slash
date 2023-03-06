@@ -175,7 +175,8 @@ async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: Strin
 }
 
 /// Get the top 1000 most recent media posts and store them in the DB
-///
+/// Returns the ID of the last post processed, or None if there were no posts.
+/// 
 /// # Arguments
 /// ## subreddit
 /// A [String](String) representing the subreddit name, without the `r/`
@@ -249,20 +250,43 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             }
         };
 
-        let results = results.get("data").unwrap().get("children").unwrap().as_array().unwrap();
+        let results = match results.get("data") {
+            Some(x) => match x.get("children") {
+                Some(x) => match x.as_array() {
+                    Some(x) => x,
+                    None => {
+                        let txt = format!("Failed to convert field `children` in reddit response to array: {}", text);
+                        warn!("{}", txt);
+                        sentry::capture_message(&txt, sentry::Level::Warning);
+                        return Ok(after);
+                    }
+                },
+                None => {
+                    let txt = format!("Failed to get field `children` in reddit response: {}", text);
+                    warn!("{}", txt);
+                    sentry::capture_message(&txt, sentry::Level::Warning);
+                    return Ok(after);
+                }
+            },
+            None => {
+                let txt = format!("Failed to get field `data` in reddit response: {}", text);
+                warn!("{}", txt);
+                sentry::capture_message(&txt, sentry::Level::Warning);
+                return Ok(after);
+            }
+        };
 
         if results.len() == 0 {
             debug!("No results");
             break;
         }
 
-        after = Some(results[results.len() -1 ]["data"]["id"].as_str().unwrap().to_string());
-        match &after {
-            Some(x) => {
-                url = format!("{}&after={}", url_base, x.clone());
-            },
-            None => {},
-        }
+        after = match results[results.len() -1 ]["data"]["id"].as_str() {
+            Some(x) => Some(x.to_string()),
+            None => {
+                None
+            }
+        };
 
         let mut posts = Vec::new();
         for post in results {
@@ -293,8 +317,24 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                 url = url.replace(".gifv", ".gif");
 
                 if url.contains("gfycat") {
-                    let id = url.split("/").last().unwrap().split(".").next().unwrap().replace('"', "");
-                    debug!("{}", id);
+                    let id = match url.split("/").last() {
+                        Some(x) => match x.split(".").next() {
+                            Some(x) => x.replace('"', ""),
+                            None => {
+                                let txt = format!("Failed to get id from gfycat url: {}", url);
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                                continue;
+                            }
+                        },
+                        None => {
+                            let txt = format!("Failed to get id from gfycat url: {}", url);
+                            warn!("{}", txt);
+                            sentry::capture_message(&txt, sentry::Level::Warning);
+                            continue;
+                        }
+                    };
+                    debug!("Gfycat ID: {}", id);
 
                     if gfycat_token.expires_at < get_epoch_ms()? - 1000 {
                         match gfycat_token.refresh().await {
@@ -328,14 +368,46 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                     let result = results.get("gfyItem");
                     match result {
                         Some(x) => {
-                            url = x.get("gifUrl").unwrap().to_string();
+                            url = match x.get("gifUrl") {
+                                Some(x) => x.to_string(),
+                                None => {
+                                    let txt = format!("Failed to get gifUrl from gfycat response: {}", results);
+                                    warn!("{}", txt);
+                                    sentry::capture_message(&txt, sentry::Level::Warning);
+                                    continue;
+                                }
+                            };
                         },
                         None => {continue},
                     };
 
                 } else if url.contains("imgur") && !url.contains(".gif") && !url.contains(".png") && !url.contains(".jpg") && !url.contains(".jpeg") {
                     let auth = format!("Client-ID {}", imgur_client);
-                    let id = url.split("/").last().unwrap().split(".").next().unwrap().split("?").next().unwrap().replace('"', "");
+                    let id = match url.split("/").last() {
+                        Some(x) => match x.split(".").next() {
+                            Some(x) => match x.split("?").next() {
+                                Some(x) => x.replace('"', ""),
+                                None => {
+                                    let txt = format!("Failed to get id from imgur url: {}", url);
+                                    warn!("{}", txt);
+                                    sentry::capture_message(&txt, sentry::Level::Warning);
+                                    continue;
+                                }
+                            }
+                            None => {
+                                let txt = format!("Failed to get id from imgur url: {}", url);
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                                continue;
+                            }
+                        },
+                        None => {
+                            let txt = format!("Failed to get id from imgur url: {}", url);
+                            warn!("{}", txt);
+                            sentry::capture_message(&txt, sentry::Level::Warning);
+                            continue;
+                        }
+                    };
 
                     let res = match web_client
                         .get(format!("https://api.imgur.com/3/image/{}", id))
@@ -356,9 +428,23 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                         continue
                     }
                     let results: serde_json::Value = res.json().await.unwrap();
-                    url = results.get("data").unwrap().get("link").unwrap().to_string().replace(".gifv", ".gif").replace(".mp4", ".gif");
-
-
+                    url = match results.get("data") {
+                        Some(x) => match x.get("link") {
+                            Some(x) => x.to_string(),
+                            None => {
+                                let txt = format!("Failed to get field `link` from imgur response: {}", results);
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                                continue;
+                            }
+                        },
+                        None => {
+                            let txt = format!("Failed to get field `data` from imgur response: {}", results);
+                            warn!("{}", txt);
+                            sentry::capture_message(&txt, sentry::Level::Warning);
+                            continue;
+                        }
+                    };
                 } else if url.contains("i.redd.it") == false  && url.contains(".gif") == false  && url.contains(".jpg") == false  && url.contains(".png") == false  && url.contains("redgif") == false{
                     // URL is not embeddable, and we do not have the ability to turn it into one.
                     debug!("{} is not embeddable", url);
@@ -634,6 +720,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
 
             if next_subreddit.is_some() {
                 let subreddit = next_subreddit.unwrap();
+                info!("Fetching subreddit {}", &subreddit);
                 if !index_exists(&mut con, format!("idx:{}", &subreddit)).await {
                     create_index(&mut con, format!("idx:{}", &subreddit), format!("subreddit:{}:post:", &subreddit)).await?;
                 }
@@ -645,20 +732,22 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
                     subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(),
                     None, &mut gfycat_token, imgur_client.clone(), fetched_up_to.clone(), Some(1)).await?;
 
-                if subreddit_state.fetched_up_to.is_none() {
-                    error!("Failed to get subreddit, after is None: {}", &subreddit);
-                    subreddit_state.pages_left = 1;
-                }
                 subreddit_state.last_fetched = Some(get_epoch_ms()?);
-                debug!("Subreddit has {} pages left", subreddit_state.pages_left);
                 subreddit_state.pages_left -= 1;
+
+                debug!("Subreddit has {} pages left", subreddit_state.pages_left);
+                
+                if subreddit_state.fetched_up_to.is_none() {
+                    debug!("Subreddit has no more pages left: {}", &subreddit);
+                    subreddit_state.pages_left = 0;
+                }
 
                 // If we've fetched all the pages, remove the subreddit from the list
                 if subreddit_state.pages_left == 0 {
                     subreddits.remove(&subreddit);
-                    let _:() = con.set(&subreddit, get_epoch_ms()?).await.unwrap();
+                    con.set(&subreddit, get_epoch_ms()?).await?;
                     info!("Got custom subreddit: {:?}", &subreddit);
-                    let _:() = con.lrem("custom_subreddits_queue", 0, &subreddit).await.unwrap();
+                    con.lrem("custom_subreddits_queue", 0, &subreddit).await?;
                 }
             }
 
@@ -712,7 +801,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
 async fn main() {
     tracing_subscriber::Registry::default()
     .with(sentry::integrations::tracing::layer())
-    .with(tracing_subscriber::fmt::layer())
+    .with(tracing_subscriber::fmt::layer().compact().with_ansi(false))
     .init();
 
     println!("Initialised tracing");
