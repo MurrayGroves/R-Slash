@@ -100,15 +100,7 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
     let nsfw_subreddits = match data_mut.get_mut("nsfw_subreddits").unwrap() {
         ConfigValue::SubredditList(list) => Ok(list),
         _ => Err(anyhow!("nsfw_subreddits is not a list")),
-    }?;use crate::FakeEmbed;
-use crate::TypeMap;
-use crate::anyhow;
-
-use serenity::builder;
-use serenity::model::prelude::command::CommandOptionType;
-use serenity::client::Context;
-use serenity::model::prelude::interaction::application_command::ApplicationCommandInteraction;
-
+    }?;
 
     let nsfw_subreddits = nsfw_subreddits.clone();
 

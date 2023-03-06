@@ -21,6 +21,7 @@ mongodb = "2.3"
 serde_derive = "1.0"
 pretty_env_logger = "*"
 anyhow = { version = "*", features = ["backtrace"] }
+sentry = "0.30.0"
 
 posthog = {path = "../posthog"}
 memberships = {path = "../memberships"}

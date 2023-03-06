@@ -1,4 +1,6 @@
-use log::*;
+use tracing::{debug, info, warn, error};
+use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use std::io::Write;
 use std::collections::HashMap;
 use std::iter::FromIterator;
@@ -62,6 +64,7 @@ pub struct Post {
 }
 
 impl From<Post> for Vec<(String, String)> {
+    #[tracing::instrument]
     fn from(post: Post) -> Vec<(String, String)> {
         vec![
             ("score".to_string(), post.score.to_string()),
@@ -77,11 +80,11 @@ impl From<Post> for Vec<(String, String)> {
 
 
 /// Returns current milliseconds since the Epoch
-fn get_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+#[tracing::instrument]
+fn get_epoch_ms() -> Result<u64, anyhow::Error> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_millis() as u64)
 }
 
 /// Request an access token from Reddit
@@ -96,7 +99,8 @@ fn get_epoch_ms() -> u64 {
 /// The [web_client](reqwest::Client) to make requests with.
 /// ## device_id
 /// If specified, will request and [installed_client](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token instead of a [client_credentials](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token.
-async fn request_access_token(reddit_client: String, reddit_secret: String, web_client: &reqwest::Client, device_id: Option<String>) -> (String, u64) {
+#[tracing::instrument]
+async fn request_access_token(reddit_client: String, reddit_secret: String, web_client: &reqwest::Client, device_id: Option<String>) -> Result<(String, u64), anyhow::Error> {
     let post_data = match device_id {
         Some(x) => format!("grant_type=https://oauth.reddit.com/grants/installed_client&\\device_id={}", x),
         None => "grant_type=client_credentials".to_string(),
@@ -107,17 +111,17 @@ async fn request_access_token(reddit_client: String, reddit_secret: String, web_
         .body(post_data)
         .basic_auth(reddit_client, Some(reddit_secret))
         .send()
-        .await.expect("Failed to request access token from Reddit");
+        .await?;
 
-    let results: serde_json::Value = res.json().await.unwrap();
+    let results: serde_json::Value = res.json().await?;
     debug!("Reddit access token response: {:?}", results);
     let token = results.get("access_token").expect("Reddit did not return access token").to_string();
     let expires_in:u64 = results.get("expires_in").expect("Reddit did not provide expires_in").as_u64().unwrap();
-    let expires_at = get_epoch_ms() + expires_in*1000;
+    let expires_at = get_epoch_ms()? + expires_in*1000;
 
     debug!("New token expires in {} seconds, or at {}", expires_in, expires_at);
 
-    return (token, expires_at);
+    return Ok((token, expires_at));
 }
 
 /// Returns a String of the Reddit access token to use
@@ -131,7 +135,8 @@ async fn request_access_token(reddit_client: String, reddit_secret: String, web_
 /// The bot's secret
 /// ## device_id
 /// If specified, will request an [installed_client](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token instead of a [client_credentials](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token.
-async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: String, reddit_secret: String, web_client: &reqwest::Client, device_id: Option<String>) -> String { // Return a reddit access token
+#[tracing::instrument(skip(con, web_client))]
+async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: String, reddit_secret: String, web_client: &reqwest::Client, device_id: Option<String>) -> Result<String, anyhow::Error> { // Return a reddit access token
     let token_name = match device_id.clone() { // The key to grab from the DB
         Some(x) => x,
         _ => "default".to_string(),
@@ -143,30 +148,30 @@ async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: Strin
         Ok(x) => x,
         Err(_) => {
             debug!("Requesting new access token, none exists");
-            let token_results = request_access_token(reddit_client.clone(), reddit_secret.clone(), web_client, device_id.clone()).await;
+            let token_results = request_access_token(reddit_client.clone(), reddit_secret.clone(), web_client, device_id.clone()).await?;
             let access_token = token_results.0;
             let expires_at = token_results.1;
 
-            let _:() = con.hset("reddit_tokens", token_name.clone(), format!("{},{}", access_token, expires_at)).await.expect("Failed to execute hset");
+            con.hset("reddit_tokens", token_name.clone(), format!("{},{}", access_token, expires_at)).await?;
 
             format!("{},{}", access_token, expires_at)
         }
     };
 
-    let expires_at:u64 = token.split(",").collect::<Vec<&str>>()[1].parse().unwrap();
-    let mut access_token:String = token.split(",").collect::<Vec<&str>>()[0].parse::<String>().unwrap().replace('"', "");
+    let expires_at:u64 = token.split(",").collect::<Vec<&str>>()[1].parse()?;
+    let mut access_token:String = token.split(",").collect::<Vec<&str>>()[0].parse::<String>()?.replace('"', "");
 
-    if expires_at < get_epoch_ms() {
+    if expires_at < get_epoch_ms()? {
         debug!("Requesting new access token, current one expired");
-        let token_results = request_access_token(reddit_client.clone(), reddit_secret.clone(), web_client, device_id.clone()).await;
+        let token_results = request_access_token(reddit_client.clone(), reddit_secret.clone(), web_client, device_id.clone()).await?;
         access_token = token_results.0;
         let expires_at = token_results.1;
 
-        let _:() = con.hset("reddit_tokens", token_name, format!("{},{}", access_token, expires_at)).await.expect("Failed to executed hset");
+        con.hset("reddit_tokens", token_name, format!("{},{}", access_token, expires_at)).await?;
     }
 
     debug!("Reddit Token: {}", access_token.replace("\"", ""));
-    return access_token;
+    return Ok(access_token);
 }
 
 /// Get the top 1000 most recent media posts and store them in the DB
@@ -184,15 +189,16 @@ async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: Strin
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut OauthToken, imgur_client: String, mut after: Option<String>, pages: Option<u8>) -> Option<String> { // Get the top 1000 most recent posts and store them in the DB
+#[tracing::instrument(skip(con, web_client))]
+async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut OauthToken, imgur_client: String, mut after: Option<String>, pages: Option<u8>) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
     debug!("Placeholder: {:?}", subreddit);
 
-    let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await;
+    let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await?;
 
     let mut keys = Vec::new();
     let url_base = format!("https://oauth.reddit.com/r/{}/hot.json?limit=100", subreddit);
     let mut url = String::new();
-    let mut existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query_async(con).await.unwrap();
+    let mut existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query_async(con).await?;
     debug!("Existing posts: {:?}", existing_posts);
     for x in 0..pages.unwrap_or(10) {
         debug!("Making {}th request to reddit", x);
@@ -208,8 +214,8 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
         }
 
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, "Discord:RSlash:v1.0.1 (by /u/murrax2)".parse().unwrap());
-        headers.insert("Authorization", format!("bearer {}", access_token.clone()).parse().unwrap());
+        headers.insert(USER_AGENT, "Discord:RSlash:v1.0.1 (by /u/murrax2)".parse()?);
+        headers.insert("Authorization", format!("bearer {}", access_token.clone()).parse()?);
 
         debug!("{}", url);
         debug!("{:?}", headers);
@@ -217,25 +223,29 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             .get(&url)
             .headers(headers)
             .send()
-            .await.expect("Failed to request from reddit");
+            .await?;
 
         debug!("Finished request");
         debug!("Response Headers: {:?}", res.headers());
-        let last_requested = get_epoch_ms();
+        let last_requested = get_epoch_ms()?;
         debug!("Got time");
         let text = match res.text().await {
             Ok(x) => x,
-            Err(_) => {
-                error!("Failed to get text from reddit");
-                return after;
+            Err(x) => {
+                let txt = format!("Failed to get text from reddit: {}", x);
+                warn!("{}", txt);
+                sentry::capture_message(&txt, sentry::Level::Warning);
+                return Ok(after);
             }
         };
         debug!("Matched text");
         let results: serde_json::Value = match serde_json::from_str(&text) {
             Ok(x) => x,
             Err(_) => {
-                error!("Failed to parse JSON from Reddit");
-                return after;
+                let txt = format!("Failed to parse JSON from Reddit: {}", text);
+                warn!("{}", txt);
+                sentry::capture_message(&txt, sentry::Level::Warning);
+                return Ok(after);
             }
         };
 
@@ -286,11 +296,13 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                     let id = url.split("/").last().unwrap().split(".").next().unwrap().replace('"', "");
                     debug!("{}", id);
 
-                    if gfycat_token.expires_at < get_epoch_ms() - 1000 {
+                    if gfycat_token.expires_at < get_epoch_ms()? - 1000 {
                         match gfycat_token.refresh().await {
                             Ok(_) => {},
-                            Err(_) => {
-                                warn!("Failed to refresh gfycat token");
+                            Err(x) => {
+                                let txt = format!("Failed to refresh gfycat token: {}", x);
+                                error!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Error);
                                 continue;
                             }
                         };
@@ -305,7 +317,9 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                         .await {
                             Ok(x) => x,
                             Err(x) => {
-                                error!("Failed to request from gfycat: {:?}", x);
+                                let txt = format!("Failed to request from gfycat: {}", x);
+                                error!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Error);
                                 continue;
                             }
                     };
@@ -330,7 +344,9 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                         .await {
                             Ok(x) => x,
                             Err(y) => {
-                                warn!("Imgur request failed: {}", y);
+                                let txt = format!("Failed to request from imgur: {}", y);
+                                error!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Error);
                                 continue;
                             }
                     };
@@ -397,7 +413,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             let key = format!("subreddit:{}:post:{}", subreddit.clone(), post.id.replace('"', ""));
             keys.push(key.clone());
             let value = Vec::from(post);
-            let _:() = con.hset_multiple(key, &value).await.unwrap();
+            con.hset_multiple(key, &value).await?;
             new_post_count += 1;
         }
 
@@ -420,22 +436,23 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
 
         debug!("Total Keys Length: {}", keys.len());
         if keys.len() != 0 {
-            let _:() = con.del(format!("subreddit:{}:posts", subreddit)).await.unwrap();
-            let _:() = con.lpush(format!("subreddit:{}:posts", subreddit), keys.clone()).await.unwrap();
+            con.del(format!("subreddit:{}:posts", subreddit)).await?;
+            con.lpush(format!("subreddit:{}:posts", subreddit), keys.clone()).await?;
         }
 
-        let time_since_request = get_epoch_ms() - last_requested;
+        let time_since_request = get_epoch_ms()? - last_requested;
         if time_since_request < 2000 {
             debug!("Waiting {:?}ms", 2000 - time_since_request);
             sleep(Duration::from_millis(2000 - time_since_request)).await; // Reddit rate limit is 30 requests per minute, so must wait at least 2 seconds between requests
         }
     }
 
-    return after;
+    return Ok(after);
 }
 
 
 // Check if RediSearch index exists
+#[tracing::instrument(skip(con))]
 async fn index_exists(con: &mut redis::aio::Connection, index: String) -> bool {
     match redis::cmd("FT.INFO").arg(index).query_async::<redis::aio::Connection, redis::Value>(con).await {
         Ok(_) => true,
@@ -445,8 +462,9 @@ async fn index_exists(con: &mut redis::aio::Connection, index: String) -> bool {
 
 
 // Create RediSearch index for subreddit
-async fn create_index(con: &mut redis::aio::Connection, index: String, prefix: String) -> Result<(), redis::RedisError>{
-    redis::cmd("FT.CREATE")
+#[tracing::instrument(skip(con))]
+async fn create_index(con: &mut redis::aio::Connection, index: String, prefix: String) -> Result<(), anyhow::Error>{
+    Ok(redis::cmd("FT.CREATE")
         .arg(index)
         .arg("PREFIX")
         .arg("1")
@@ -465,7 +483,7 @@ async fn create_index(con: &mut redis::aio::Connection, index: String, prefix: S
         .arg("timestamp")
         .arg("NUMERIC")
         .arg("SORTABLE")
-        .query_async(con).await
+        .query_async(con).await?)
 }
 
 #[derive(Debug)]
@@ -478,6 +496,7 @@ struct OauthToken {
 }
 
 impl OauthToken {
+    #[tracing::instrument]
     async fn new(client_id: String, client_secret: String, url: String) -> Result<OauthToken, Box<dyn std::error::Error>> {
         let web_client = reqwest::Client::new();
 
@@ -492,17 +511,18 @@ impl OauthToken {
         .send()
         .await?;
 
-        let results: serde_json::Value = res.json().await.unwrap();
+        let results: serde_json::Value = res.json().await?;
 
         Ok(OauthToken {
             token: results["access_token"].to_string(),
-            expires_at: results["expires_in"].as_u64().unwrap() + get_epoch_ms(),
+            expires_at: results["expires_in"].as_u64().unwrap() + get_epoch_ms()?,
             client_id,
             client_secret,
             url,
         })
     }
 
+    #[tracing::instrument]
     async fn refresh(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let new = OauthToken::new(self.client_id.clone(), self.client_secret.clone(), self.url.clone()).await?;
         self.token = new.token;
@@ -517,7 +537,7 @@ impl OauthToken {
 /// # Arguments
 /// ## data
 /// A thread-safe wrapper of the [Config](ConfigStruct)
-async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result<(), Box<dyn std::error::Error>>{
+async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result<(), anyhow::Error>{
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     let mut con = db_client.get_async_connection().await.expect("Can't connect to redis");
 
@@ -542,16 +562,16 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
     let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
     let mut gfycat_token = OauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await.expect("Failed to get gfycat token");
 
-    let mut client_options = mongodb::options::ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+    let mut client_options = mongodb::options::ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.expect("Failed to parse client options");
     client_options.app_name = Some("Downloader".to_string());
 
-    let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
+    let mongodb_client = mongodb::Client::with_options(client_options).expect("failed to connect to mongodb");
 
     if do_custom == "true".to_string() {
         let mut subreddits: HashMap<String, SubredditState> = HashMap::new();
         loop {
             // Populate subreddits with any new subreddit requests
-            let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(-1i64).query_async(&mut con).await.unwrap();
+            let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(-1i64).query_async(&mut con).await.unwrap_or(Vec::new());
             for subreddit in custom_subreddits {
                 if !subreddits.contains_key(&subreddit) {
                     let last_fetched: Option<u64> = con.get(&subreddit).await?;
@@ -623,20 +643,20 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
                 let fetched_up_to = &subreddit_state.fetched_up_to;
                 subreddit_state.fetched_up_to = get_subreddit(
                     subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(),
-                    None, &mut gfycat_token, imgur_client.clone(), fetched_up_to.clone(), Some(1)).await;
+                    None, &mut gfycat_token, imgur_client.clone(), fetched_up_to.clone(), Some(1)).await?;
 
                 if subreddit_state.fetched_up_to.is_none() {
                     error!("Failed to get subreddit, after is None: {}", &subreddit);
                     subreddit_state.pages_left = 1;
                 }
-                subreddit_state.last_fetched = Some(get_epoch_ms());
+                subreddit_state.last_fetched = Some(get_epoch_ms()?);
                 debug!("Subreddit has {} pages left", subreddit_state.pages_left);
                 subreddit_state.pages_left -= 1;
 
                 // If we've fetched all the pages, remove the subreddit from the list
                 if subreddit_state.pages_left == 0 {
                     subreddits.remove(&subreddit);
-                    let _:() = con.set(&subreddit, get_epoch_ms()).await.unwrap();
+                    let _:() = con.set(&subreddit, get_epoch_ms()?).await.unwrap();
                     info!("Got custom subreddit: {:?}", &subreddit);
                     let _:() = con.lrem("custom_subreddits_queue", 0, &subreddit).await.unwrap();
                 }
@@ -648,11 +668,11 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
 
     let mut last_run = 0;
     loop {
-        if last_run > (get_epoch_ms() - 10000*60) { // Only download every 10 minutes, to avoid rate limiting (and also it's just not necessary)
+        if last_run > (get_epoch_ms()? - 10000*60) { // Only download every 10 minutes, to avoid rate limiting (and also it's just not necessary)
             sleep(Duration::from_millis(100)).await;
             continue;
         }
-        last_run = get_epoch_ms();
+        last_run = get_epoch_ms()?;
 
         let db = mongodb_client.database("config");
         let coll = db.collection::<Document>("settings");
@@ -674,8 +694,8 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
             let last_updated = con.get(&subreddit).await.unwrap_or(0u64);
             debug!("{:?} was last updated at {:?}", &subreddit, last_updated);
 
-            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone(), None, None).await;
-            let _:() = con.set(&subreddit, get_epoch_ms()).await.unwrap();
+            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone(), None, None).await?;
+            let _:() = con.set(&subreddit, get_epoch_ms()?).await.unwrap();
             if !index_exists(&mut con, format!("idx:{}", subreddit)).await {
                 create_index(&mut con, format!("idx:{}", subreddit), format!("subreddit:{}:post:", subreddit)).await?;
             }
@@ -690,11 +710,20 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
 
 #[tokio::main]
 async fn main() {
-    env_logger::builder()
-    .format(|buf, record| {
-        writeln!(buf, "{}: Downloader: {}", record.level(), record.args())
-    })
+    tracing_subscriber::Registry::default()
+    .with(sentry::integrations::tracing::layer())
+    .with(tracing_subscriber::fmt::layer())
     .init();
+
+    println!("Initialised tracing");
+
+    let _guard = sentry::init(("https://75873f85a862465795299365b603fbb5@o4504774745718784.ingest.sentry.io/4504774760660992", sentry::ClientOptions {
+        release: sentry::release_name!(),
+        traces_sample_rate: 1.0,
+        ..Default::default()
+    }));
+
+    println!("Initialised sentry");
 
     let reddit_secret = env::var("REDDIT_TOKEN").expect("REDDIT_TOKEN not set");
     let reddit_client = env::var("REDDIT_CLIENT_ID").expect("REDDIT_CLIENT_ID not set");
@@ -707,5 +736,13 @@ async fn main() {
     let data = Arc::new(Mutex::new(contents));
 
     info!("Starting loops");
-    download_loop(data).await.unwrap();
+    match download_loop(data).await {
+        Ok(_) => {
+            info!("Finished");
+        },
+        Err(e) => {
+            sentry::integrations::anyhow::capture_anyhow(&e);
+            error!("Error: {:?}", e);
+        }
+    };
 }
