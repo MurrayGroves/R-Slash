@@ -1,6 +1,10 @@
-use log::*;
+use tracing::{debug, info, warn, error};
 use rand::Rng;
 use serde_json::json;
+use tracing::instrument;
+use tracing_subscriber::Layer;
+use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use std::fs;
 use std::io::Write;
 use std::collections::HashMap;
@@ -77,8 +81,16 @@ fn get_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+#[instrument(skip(data))]
+async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, parent_tx: Option<&sentry::TransactionOrSpan>, properties: Option<HashMap<&str, String>>, distinct_id: &str) {
+    let span: sentry::TransactionOrSpan = match parent_tx {
+        Some(parent) => parent.start_child("analytics", "capture_event").into(),
+        None => {
+            let ctx = sentry::TransactionContext::new("analytics", "capture_event");
+            sentry::start_transaction(ctx).into()
+        }
+    };
 
-async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, properties: Option<HashMap<&str, String>>, distinct_id: &str) {
     let posthog_client = match data.get_mut("posthog_client").unwrap() {
         ConfigValue::PosthogClient(client) => Ok(client),
         _ => Err("posthog_client is not a PosthogClient"),
@@ -92,9 +104,12 @@ async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, pro
     }
 
     debug!("{:?}", posthog_client.capture(event, properties_map, distinct_id).await.unwrap().text().await.unwrap());
+    span.finish();
 }
 
-async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
+
+#[instrument(skip(command, data, ctx))]
+async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context, tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
     let nsfw_subreddits = match data_mut.get_mut("nsfw_subreddits").unwrap() {
@@ -112,7 +127,9 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
     let subreddit = subreddit.as_str().unwrap().to_string();
 
     let search_enabled = options.len() > 1;
-    capture_event(data_mut, "subreddit_cmd", Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "false".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
+    capture_event(data_mut, "subreddit_cmd", Some(tx),
+                    Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "false".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())
+                ).await;
 
     let mut con = match data_mut.get_mut("redis_connection").unwrap() {
         ConfigValue::REDIS(db) => Ok(db),
@@ -141,15 +158,24 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
 
     if options.len() > 1 {
         let search = options[1].value.as_ref().unwrap().as_str().unwrap().to_string();
-        return get_subreddit_search(subreddit, search, &mut con, command.channel_id).await
+        return get_subreddit_search(subreddit, search, &mut con, command.channel_id, Some(tx)).await
     }
     else {
-        return get_subreddit(subreddit, &mut con, command.channel_id).await
+        return get_subreddit(subreddit, &mut con, command.channel_id, Some(tx)).await
     }
 }
 
 
-async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::aio::Connection) -> Result<u16, anyhow::Error> {
+#[instrument(skip(con))]
+async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<u16, anyhow::Error> {
+    let span: sentry::TransactionOrSpan = match &parent_tx {
+        Some(parent) => parent.start_child("db.query", "get_length_of_search_results").into(),
+        None => {
+            let ctx = sentry::TransactionContext::new("db.query", "get_length_of_search_results");
+            sentry::start_transaction(ctx).into()
+        }
+    };
+
     debug!("Getting length of search results for {} in {}", search, search_index);
     let results: Vec<u16> = redis::cmd("FT.SEARCH")
         .arg(search_index)
@@ -159,12 +185,22 @@ async fn get_length_of_search_results(search_index: String, search: String, con:
         .arg(0)
         .query_async(con).await?;
 
+    span.finish();
     Ok(results[0])
 }
 
 
 // Returns the post ID at the given index in the search results
-async fn get_post_at_search_index(search_index: String, search: &str, index: u16, con: &mut redis::aio::Connection) -> Result<String, anyhow::Error> {
+#[instrument(skip(con))]
+async fn get_post_at_search_index(search_index: String, search: &str, index: u16, con: &mut redis::aio::Connection, parent_span: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
+    let span: sentry::TransactionOrSpan = match &parent_span {
+        Some(parent) => parent.start_child("db.query", "get_post_at_search_index").into(),
+        None => {
+            let ctx = sentry::TransactionContext::new("db.query", "get_post_at_search_index");
+            sentry::start_transaction(ctx).into()
+        }
+    };
+
     let results: Vec<redis::Value> = redis::cmd("FT.SEARCH")
         .arg(search_index)
         .arg(format!("%{}%", search))
@@ -176,23 +212,43 @@ async fn get_post_at_search_index(search_index: String, search: &str, index: u16
         .arg("NOCONTENT") // Only show POST IDs not post content
         .query_async(con).await?;
 
-    Ok(from_redis_value::<String>(&results[1])?)
+    let to_return = from_redis_value::<String>(&results[1])?;
+    span.finish();
+    Ok(to_return)
 }
 
 
 // Returns the post ID at the given index in the list
-async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::Connection) -> Result<String, anyhow::Error> {
-    let results: Vec<String> = redis::cmd("LRANGE")
+#[instrument(skip(con))]
+async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
+    let span: sentry::TransactionOrSpan = match &parent_tx {
+        Some(parent) => parent.start_child("db.query", "get_post_at_list_index").into(),
+        None => {
+            let ctx = sentry::TransactionContext::new("db.query", "get_post_at_list_index");
+            sentry::start_transaction(ctx).into()
+        }
+    };
+
+    let mut results: Vec<String> = redis::cmd("LRANGE")
         .arg(list)
         .arg(index)
         .arg(index)
         .query_async(con).await?;
 
-    Ok(results[0].clone())
+    Ok(results.remove(0))
 }
 
 
-async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis::aio::Connection) -> Result<FakeEmbed, anyhow::Error> {
+#[instrument(skip(con))]
+async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<FakeEmbed, anyhow::Error> {
+    let span: sentry::TransactionOrSpan = match &parent_tx {
+        Some(parent) => parent.start_child("db.query", "get_post_by_id").into(),
+        None => {
+            let ctx = sentry::TransactionContext::new("db.query", "get_post_by_id");
+            sentry::start_transaction(ctx).into()
+        }
+    };
+
     let post: HashMap<String, redis::Value> = con.hgetall(&post_id).await?;
 
     let subreddit = post_id.split(":").collect::<Vec<&str>>()[1].to_string();
@@ -202,7 +258,7 @@ async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis
         "search": search,
     }).to_string();
 
-    return Ok(FakeEmbed {
+    let to_return = FakeEmbed {
         title: Some(from_redis_value(&post.get("title").unwrap().clone())?),
         description: Some(format!("r/{}", subreddit)),
         author: Some(format!("u/{}", from_redis_value::<String>(&post.get("author").unwrap().clone())?)),
@@ -220,15 +276,27 @@ async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis
             custom_id: Some(custom_data),
             disabled: false
         }])
-    });
+    };
+
+    span.finish();
+    return Ok(to_return);
 }
 
 
-async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis::aio::Connection, channel: ChannelId) -> Result<FakeEmbed, anyhow::Error> {
+#[instrument(skip(con, parent_tx))]
+async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<FakeEmbed, anyhow::Error> {
+    let span: sentry::TransactionOrSpan = match &parent_tx {
+        Some(parent) => parent.start_child("subreddit.search", "get_subreddit_search").into(),
+        None => {
+            let ctx = sentry::TransactionContext::new("subreddit.search", "get_subreddit_search");
+            sentry::start_transaction(ctx).into()
+        }
+    };
+
     let mut index: u16 = con.incr(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 1i16).await?;
     let _:() = con.expire(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 60*60).await?;
     index -= 1;
-    let length: u16 = get_length_of_search_results(format!("idx:{}", &subreddit), search.clone(), con).await.unwrap();
+    let length: u16 = get_length_of_search_results(format!("idx:{}", &subreddit), search.clone(), con, Some(&span)).await.unwrap();
 
     if length == 0 {
         return Ok(FakeEmbed {
@@ -253,12 +321,23 @@ async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis
         index = 0;
     }
 
-    let post_id = get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con).await?;
-    return Ok(get_post_by_id(post_id, Some(search), con).await?);
+    let post_id = get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con, Some(&span)).await?;
+    let to_return = get_post_by_id(post_id, Some(search), con, Some(&span)).await?;
+    span.finish();
+    return Ok(to_return);
 }
 
 
-async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, channel: ChannelId) -> Result<FakeEmbed, anyhow::Error> {
+#[instrument(skip(con))]
+async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<FakeEmbed, anyhow::Error> {
+    let span: sentry::TransactionOrSpan = match &parent_tx {
+        Some(parent) => parent.start_child("subreddit.get", "get_subreddit").into(),
+        None => {
+            let ctx = sentry::TransactionContext::new("subreddit.get", "get_subreddit");
+            sentry::start_transaction(ctx).into()
+        }
+    };
+
     let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 1i16).await?;
     let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 60*60).await?;
     index -= 1;
@@ -270,9 +349,11 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, chan
         index = 0;
     }
 
-    let post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con).await?;
+    let post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con, Some(&span)).await?;
 
-    return Ok(get_post_by_id(post_id, None, con).await?);
+    let to_return = get_post_by_id(post_id, None, con, Some(&span)).await?;
+    span.finish();
+    return Ok(to_return);
 }
 
 
@@ -393,15 +474,15 @@ async fn set_guild_config(old_config: Document, config: Document, data: &mut tok
     coll.replace_one(old_config, config, None).await.unwrap();
 }
 
-
-async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, _ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
+#[instrument(skip(command, data, _ctx))]
+async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, _ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
     let mongodb_client = match data_mut.get_mut("mongodb_connection").unwrap() {
         ConfigValue::MONGODB(db) => Ok(db),
         _ => Err(anyhow!("Failed to get mongodb connection")),
     }?;
 
-    let tiers = get_user_tiers(command.user.id.0.to_string(), mongodb_client).await;
+    let tiers = get_user_tiers(command.user.id.0.to_string(), mongodb_client, Some(parent_tx)).await;
     debug!("Tiers: {:?}", tiers);
 
     let bronze = match tiers.bronze.active {
@@ -410,7 +491,7 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
     }.to_string();
 
 
-    capture_event(data_mut, "cmd_get_user_tiers", Some(HashMap::from([("bronze_active", bronze.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
+    capture_event(data_mut, "cmd_get_user_tiers", Some(parent_tx), Some(HashMap::from([("bronze_active", bronze.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
 
     return Ok(FakeEmbed {
         title: Some("Your membership tiers".to_string()),
@@ -429,21 +510,32 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
     });
 }
 
+#[instrument(skip(con))]
+async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<bool, anyhow::Error> {
+    let span: sentry::TransactionOrSpan = match &parent_tx {
+        Some(parent) => parent.start_child("db.query", "list_contains").into(),
+        None => {
+            let ctx = sentry::TransactionContext::new("db.query", "list_contains");
+            sentry::start_transaction(ctx).into()
+        }
+    };
 
-async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connection) -> Result<bool, anyhow::Error> {
     let position: Option<u16> = con.lpos(list, element, redis::LposOptions::default()).await?;
 
-    return match position {
+    let to_return = match position {
         Some(_) => Ok(true),
         None => Ok(false),
     };
+
+    span.finish();
+    to_return
 }
 
-
-async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
+#[instrument(skip(command, ctx))]
+async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
     let mut data = ctx.data.write().await;
 
-    let membership = get_user_tiers(command.user.id.0.to_string(), &mut data).await;
+    let membership = get_user_tiers(command.user.id.0.to_string(), &mut data, Some(parent_tx)).await;
     if !membership.bronze.active {
         return Ok(FakeEmbed {
             title: Some("Premium Feature".to_string()),
@@ -500,7 +592,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
         _ => Err(anyhow!("redis_connection is not a redis connection")),
     }?;
 
-    let already_queued = list_contains(&subreddit, "custom_subreddits_queue", con).await?;
+    let already_queued = list_contains(&subreddit, "custom_subreddits_queue", con, Some(parent_tx)).await?;
 
     let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
 
@@ -560,14 +652,14 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
 
     let mut data = ctx.data.write().await;
 
-    return get_subreddit_cmd(command, &mut data, ctx).await;
+    return get_subreddit_cmd(command, &mut data, ctx, parent_tx).await;
 }
 
-
-async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
+#[instrument(skip(command, data, ctx))]
+async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
-    capture_event(data_mut, "cmd_info", None, &format!("user_{}", command.user.id.0.to_string())).await;
+    capture_event(data_mut, "cmd_info", Some(parent_tx), None, &format!("user_{}", command.user.id.0.to_string())).await;
 
     let con = match data_mut.get_mut("redis_connection").unwrap() {
         ConfigValue::REDIS(db) => Ok(db),
@@ -763,8 +855,8 @@ macro_rules! fake_embed_to_message {
     };
 }
 
-
-async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
+#[instrument(skip(command, ctx))]
+async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Context, tx: &sentry::Transaction) -> Result<FakeEmbed, anyhow::Error> {
     match command.data.name.as_str() {
         "ping" => {
             Ok(FakeEmbed {
@@ -800,15 +892,21 @@ async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Con
         },
 
         "get" => {
+            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_get_subreddit_cmd"));
             let mut data = ctx.data.write().await;
             debug!("Got lock");
-            get_subreddit_cmd(&command, &mut data, &ctx).await
+            let resp = get_subreddit_cmd(&command, &mut data, &ctx, &cmd_tx).await;
+            cmd_tx.finish();
+            resp
         },
 
         "membership" => {
+            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_get_user_tiers"));
             let mut data = ctx.data.write().await;
             debug!("Got lock");
-            cmd_get_user_tiers(&command, &mut data, &ctx).await
+            let resp = cmd_get_user_tiers(&command, &mut data, &ctx, &cmd_tx).await;
+            cmd_tx.finish();
+            resp
         },
 
         "configure-server" => {
@@ -818,13 +916,19 @@ async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Con
         },
 
         "custom" => {
-            get_custom_subreddit(&command, &ctx).await
+            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_get_custom_subreddit"));
+            let resp = get_custom_subreddit(&command, &ctx, &cmd_tx).await;
+            cmd_tx.finish();
+            resp
         },
 
         "info" => {
+            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_info"));
             let mut data = ctx.data.write().await;
             debug!("Got lock");
-            info(&command, &mut data, &ctx).await
+            let resp = info(&command, &mut data, &ctx, &cmd_tx).await;
+            cmd_tx.finish();
+            resp
         },
 
         _ => {
@@ -852,7 +956,7 @@ impl EventHandler for Handler {
         let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).await.unwrap();
 
         if is_new { // First time client has seen the guild
-            capture_event(data_mut, "guild_join", None, &format!("guild_{}", guild.id.0.to_string())).await;
+            capture_event(data_mut, "guild_join", None, None, &format!("guild_{}", guild.id.0.to_string())).await;
             //update_guild_commands(guild.id, &mut data, &ctx).await;
         }
     }
@@ -861,7 +965,7 @@ impl EventHandler for Handler {
         let mut data = ctx.data.write().await;
         let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
-        capture_event(data_mut, "guild_leave", None, &format!("guild_{}", incomplete.id.0.to_string())).await;
+        capture_event(data_mut, "guild_leave", None, None, &format!("guild_{}", incomplete.id.0.to_string())).await;
 
         let con = match data_mut.get_mut("redis_connection").unwrap() {
             ConfigValue::REDIS(db) => Ok(db),
@@ -875,7 +979,7 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         let mut data = ctx.data.write().await;
         let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-        capture_event(data_mut, "on_ready", None, &format!("shard_{}", ready.shard.unwrap()[0].to_string())).await;
+        capture_event(data_mut, "on_ready", None, None, &format!("shard_{}", ready.shard.unwrap()[0].to_string())).await;
 
         info!("Shard {} connected as {}, on {} servers!", ready.shard.unwrap()[0], ready.user.name, ready.guilds.len());
 
@@ -910,6 +1014,9 @@ impl EventHandler for Handler {
     /// Fires when a slash command or other interaction is received
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         debug!("Interaction received");
+
+        let tx_ctx = sentry::TransactionContext::new("interaction_create", "interaction");
+        let tx = sentry::start_transaction(tx_ctx);
         
         // Check if there is a deadlock
         {
@@ -922,6 +1029,7 @@ impl EventHandler for Handler {
         }
 
         if let Interaction::ApplicationCommand(command) = interaction.clone() {
+            let slash_command_tx = tx.start_child("interaction.slash_command", "handle slash command");
             match command.guild_id {
                 Some(guild_id) => {
                     info!("{:?} ({:?}) > {:?} ({:?}) : /{} {:?}", guild_id.name(&ctx.cache).unwrap(), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
@@ -930,7 +1038,7 @@ impl EventHandler for Handler {
                     info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
                 }
             }
-            let command_response = get_command_response(&command, &ctx).await;
+            let command_response = get_command_response(&command, &ctx, &tx).await;
             let fake_embed = match command_response {
                 Ok(ref embed) => embed.clone(),
                 Err(ref why) => {
@@ -942,7 +1050,7 @@ impl EventHandler for Handler {
                     let mut data = ctx.data.write().await;
                     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
-                    capture_event(data_mut, "command_error", Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
+                    capture_event(data_mut, "command_error", None, Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
 
                     let map = HashMap::from([("content", format!("Error code {} getting command response: {:?}", code, why))]);
                     let client = reqwest::Client::new();
@@ -957,23 +1065,37 @@ impl EventHandler for Handler {
 
             debug!("Sending response: {:?}", fake_embed);
 
-            if let Err(why) = command
+            if let Err(why) = {
+                let api_span = slash_command_tx.start_child("discord.api", "create slash command response");
+                let to_return = command
                 .create_interaction_response(&ctx.http, |response| {
+                    let span = slash_command_tx.start_child("discord.prepare_response", "create slash command response");
                     let to_pass = fake_embed.clone();
-                    response
+                    let to_return = response
                         .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(fake_embed_to_message!(to_pass))
+                        .interaction_response_data(fake_embed_to_message!(to_pass));
+
+                    span.finish();
+                    to_return
                 })
-                .await
+                .await;
+                api_span.finish();
+                to_return
+            }
             {
                 if format!("{}", why) == "Interaction has already been acknowledged." {
+                    let api_span = slash_command_tx.start_child("discord.api", "edit slash command response");
                     command.edit_original_interaction_response(&ctx.http, |response| {
+                        let span = api_span.start_child("discord.prepare_response", "edit slash command response");
                         debug!("Already sent response, editing instead");
                         let to_pass = fake_embed.clone();
                         response.embed(fake_embed_to_embed!(to_pass));
                         let to_pass = fake_embed.clone();
-                        response.components(fake_embed_to_buttons!(to_pass))
+                        response.components(fake_embed_to_buttons!(to_pass));
+                        span.finish();
+                        return response;
                     }).await.unwrap();
+                    api_span.finish();
                 } else {
                     warn!("Cannot respond to slash command: {}", why);
                 }
@@ -982,6 +1104,7 @@ impl EventHandler for Handler {
             if fake_embed.image.is_some() {
                 let url = fake_embed.image.clone().unwrap();
                 if (url.contains("imgur")  && url.contains(".gif")) || url.contains("redgifs") {
+                    let followup_span = slash_command_tx.start_child("discord.api", "send followup");
                     match command.channel_id.send_message(&ctx.http, |message| {
                         message.content(url);
 
@@ -995,11 +1118,14 @@ impl EventHandler for Handler {
                             warn!("Cannot send followup to slash command: {}", why);
                         }
                     }
+                    followup_span.finish();
                 }
             }
+            slash_command_tx.finish();
         }
 
         if let Interaction::MessageComponent(command) = interaction {
+            let component_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.component", "handle component interaction"));
             let mut data = ctx.data.write().await;
             let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
@@ -1021,7 +1147,7 @@ impl EventHandler for Handler {
                 _ => false,
             };
 
-            capture_event(data_mut, "subreddit_cmd", Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
+            capture_event(data_mut, "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
             
             let mut con = match data_mut.get_mut("redis_connection").unwrap() {
                 ConfigValue::REDIS(db) => Ok(db),
@@ -1031,10 +1157,10 @@ impl EventHandler for Handler {
             let fake_embed = match search_enabled {
                 true => {
                     let search = custom_id["search"].to_string().replace('"', "");
-                    get_subreddit_search(subreddit, search, &mut con, command.channel_id).await
+                    get_subreddit_search(subreddit, search, &mut con, command.channel_id, Some(&component_tx)).await
                 },
                 false => {
-                    get_subreddit(subreddit, &mut con, command.channel_id).await
+                    get_subreddit(subreddit, &mut con, command.channel_id, Some(&component_tx)).await
                 }
             };
 
@@ -1048,8 +1174,8 @@ impl EventHandler for Handler {
 
                     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
-                    capture_event(data_mut, "command_error", Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
-                    
+                    capture_event(data_mut, "command_error", Some(&component_tx), Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
+                    sentry::integrations::anyhow::capture_anyhow(&error);
                     let map = HashMap::from([("content", format!("Error code {} getting command response: {:?}", code, why))]);
 
 
@@ -1062,23 +1188,36 @@ impl EventHandler for Handler {
                 }
             };
 
-            if let Err(why) = command
+            if let Err(why) = {
+                let api_span = component_tx.start_child("discord.api", "send button response");
+                let to_return = command
                 .create_interaction_response(&ctx.http, |response| {
+                    let prepare_span = component_tx.start_child("discord.prepare_response", "send button response");
                     let to_pass = fake_embed.clone();
                     response
                         .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(fake_embed_to_message!(to_pass))
+                        .interaction_response_data(fake_embed_to_message!(to_pass));
+                    prepare_span.finish();
+                    response
                 })
-                .await
+                .await;
+                api_span.finish();
+                to_return
+            }
             {
                 if format!("{}", why) == "Interaction has already been acknowledged." {
+                    let api_span = component_tx.start_child("discord.api", "edit button response");
                     command.edit_original_interaction_response(&ctx.http, |response| {
+                        let prepare_span = component_tx.start_child("discord.prepare_response", "edit button response");
                         debug!("Already sent response, editing instead");
                         let to_pass = fake_embed.clone();
                         response.embed(fake_embed_to_embed!(to_pass));
                         let to_pass = fake_embed.clone();
-                        response.components(fake_embed_to_buttons!(to_pass))
+                        response.components(fake_embed_to_buttons!(to_pass));
+                        prepare_span.finish();
+                        response
                     }).await.unwrap();
+                    api_span.finish();
                 } else {
                     warn!("Cannot respond to slash command: {}", why);
                 }
@@ -1087,6 +1226,7 @@ impl EventHandler for Handler {
             if fake_embed.image.is_some() {
                 let url = fake_embed.image.clone().unwrap();
                 if (url.contains("imgur")  && url.contains(".gif")) || url.contains("redgifs") {
+                    let api_span = component_tx.start_child("discord.api", "send followup");
                     match command.channel_id.send_message(&ctx.http, |message| {
                         message.content(url);
 
@@ -1100,9 +1240,12 @@ impl EventHandler for Handler {
                             warn!("Cannot send followup to slash command: {}", why);
                         }
                     }
+                    api_span.finish();
                 }
             }
+            component_tx.finish();
         }
+        tx.finish();
     }
 }
 
@@ -1141,7 +1284,7 @@ async fn get_namespace() -> String {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() {    
     let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
     let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
     let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
@@ -1169,20 +1312,7 @@ async fn main() {
     let total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace().await)).await;
     let total_shards: u64 = total_shards.expect("Failed to get or convert total_shards");
 
-    let shard_id_logger = shard_id.clone();
-    env_logger::builder()
-    .format(move |buf, record| {
-        writeln!(buf, "{}: Shard {}:{}", record.level(), shard_id_logger,  record.args())
-    })
-    .init();
-
-
     debug!("Booting with {:?} total shards", total_shards);
-
-    debug!("Printing debug");
-    info!("Printing info");
-    warn!("Printing warn");
-    error!("Printing error");
 
     let mut client = serenity::Client::builder(token,  GatewayIntents::non_privileged())
         .event_handler(Handler)
@@ -1212,6 +1342,22 @@ async fn main() {
     });
 
     let thread = tokio::spawn(async move {
+        tracing_subscriber::Registry::default()
+        //.with(sentry::integrations::tracing::layer())
+        .with(tracing_subscriber::fmt::layer().compact().with_ansi(false).with_filter(tracing_subscriber::filter::LevelFilter::DEBUG).with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
+            if !meta.target().contains("discord_shard") {
+                return false;
+            };
+            true
+        })))
+        .init();
+    
+        let _guard = sentry::init(("http://9ebbf7835f99405ebfca243cf5263782@100.67.30.19:9000/3", sentry::ClientOptions {
+            release: sentry::release_name!(),
+            traces_sample_rate: 1.0,
+            ..Default::default()
+        }));
+    
         debug!("Spawning client thread");
         client.start_shard(shard_id, total_shards as u64).await.expect("Failed to start shard");
     });
