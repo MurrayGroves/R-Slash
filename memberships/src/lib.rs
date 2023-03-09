@@ -52,7 +52,15 @@ pub struct MembershipTiers {
 
 
 // Fetch a user's membership tiers from MongoDB. Returns current status, name of tier, when the user first had the membership, and when the membership expires.
-pub async fn get_user_tiers<'a>(user: impl Into<String>, data: impl Into<Client<'a>>) -> MembershipTiers {
+pub async fn get_user_tiers<'a>(user: impl Into<String>, data: impl Into<Client<'a>>, parent_tx: Option<&sentry::TransactionOrSpan>) -> MembershipTiers {
+    let span: sentry::TransactionOrSpan = match &parent_tx {
+        Some(parent) => parent.start_child("db.query", "get_user_tiers").into(),
+        None => {
+            let ctx = sentry::TransactionContext::new("db.query", "get_user_tiers");
+            sentry::start_transaction(ctx).into()
+        }
+    };
+
     let client: Client = data.into();
     let mongodb_client = client.client;
 
@@ -78,6 +86,7 @@ pub async fn get_user_tiers<'a>(user: impl Into<String>, data: impl Into<Client<
 
     let bronze = doc.get_array("active").unwrap().contains(&mongodb::bson::Bson::from("bronze"));
 
+    span.finish();
     return MembershipTiers {
         bronze: MembershipTier {
             _name: "bronze".to_string(),

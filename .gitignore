@@ -22,3 +22,5 @@ config.json
 discord-interface/target/
 
 reddit-downloader/target/
+
+shard/target/
