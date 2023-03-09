@@ -81,7 +81,7 @@ fn get_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
-#[instrument(skip(data))]
+#[instrument(skip(data, parent_tx))]
 async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, parent_tx: Option<&sentry::TransactionOrSpan>, properties: Option<HashMap<&str, String>>, distinct_id: &str) {
     let span: sentry::TransactionOrSpan = match parent_tx {
         Some(parent) => parent.start_child("analytics", "capture_event").into(),
@@ -108,7 +108,7 @@ async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, par
 }
 
 
-#[instrument(skip(command, data, ctx))]
+#[instrument(skip(command, data, ctx, tx))]
 async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context, tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
@@ -166,7 +166,7 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
 }
 
 
-#[instrument(skip(con))]
+#[instrument(skip(con, parent_tx))]
 async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<u16, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "get_length_of_search_results").into(),
@@ -176,10 +176,15 @@ async fn get_length_of_search_results(search_index: String, search: String, con:
         }
     };
 
+    let search = match search.matches("\"").count() % 2 {
+        0 => search,
+        _ => search.replace("\"", "\\\"")
+    };
+
     debug!("Getting length of search results for {} in {}", search, search_index);
     let results: Vec<u16> = redis::cmd("FT.SEARCH")
         .arg(search_index)
-        .arg(format!("%{}%", search))
+        .arg(search)
         .arg("LIMIT")
         .arg(0) // Return no results, just number of results
         .arg(0)
@@ -191,7 +196,7 @@ async fn get_length_of_search_results(search_index: String, search: String, con:
 
 
 // Returns the post ID at the given index in the search results
-#[instrument(skip(con))]
+#[instrument(skip(con, parent_span))]
 async fn get_post_at_search_index(search_index: String, search: &str, index: u16, con: &mut redis::aio::Connection, parent_span: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_span {
         Some(parent) => parent.start_child("db.query", "get_post_at_search_index").into(),
@@ -201,9 +206,14 @@ async fn get_post_at_search_index(search_index: String, search: &str, index: u16
         }
     };
 
+    let search = match search.matches("\"").count() % 2 {
+        0 => search.into(),
+        _ => search.to_string().replace("\"", "\\\"")
+    };
+
     let results: Vec<redis::Value> = redis::cmd("FT.SEARCH")
         .arg(search_index)
-        .arg(format!("%{}%", search))
+        .arg(search)
         .arg("LIMIT")
         .arg(index)
         .arg(1)
@@ -219,7 +229,7 @@ async fn get_post_at_search_index(search_index: String, search: &str, index: u16
 
 
 // Returns the post ID at the given index in the list
-#[instrument(skip(con))]
+#[instrument(skip(con, parent_tx))]
 async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "get_post_at_list_index").into(),
@@ -235,11 +245,12 @@ async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::
         .arg(index)
         .query_async(con).await?;
 
+    span.finish();
     Ok(results.remove(0))
 }
 
 
-#[instrument(skip(con))]
+#[instrument(skip(con, parent_tx))]
 async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<FakeEmbed, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "get_post_by_id").into(),
@@ -296,7 +307,7 @@ async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis
     let mut index: u16 = con.incr(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 1i16).await?;
     let _:() = con.expire(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 60*60).await?;
     index -= 1;
-    let length: u16 = get_length_of_search_results(format!("idx:{}", &subreddit), search.clone(), con, Some(&span)).await.unwrap();
+    let length: u16 = get_length_of_search_results(format!("idx:{}", &subreddit), search.clone(), con, Some(&span)).await?;
 
     if length == 0 {
         return Ok(FakeEmbed {
@@ -328,7 +339,7 @@ async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis
 }
 
 
-#[instrument(skip(con))]
+#[instrument(skip(con, parent_tx))]
 async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<FakeEmbed, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("subreddit.get", "get_subreddit").into(),
@@ -474,7 +485,7 @@ async fn set_guild_config(old_config: Document, config: Document, data: &mut tok
     coll.replace_one(old_config, config, None).await.unwrap();
 }
 
-#[instrument(skip(command, data, _ctx))]
+#[instrument(skip(command, data, _ctx, parent_tx))]
 async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, _ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
     let mongodb_client = match data_mut.get_mut("mongodb_connection").unwrap() {
@@ -510,7 +521,7 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
     });
 }
 
-#[instrument(skip(con))]
+#[instrument(skip(con, parent_tx))]
 async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<bool, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "list_contains").into(),
@@ -531,7 +542,7 @@ async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connecti
     to_return
 }
 
-#[instrument(skip(command, ctx))]
+#[instrument(skip(command, ctx, parent_tx))]
 async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
     let mut data = ctx.data.write().await;
 
@@ -655,7 +666,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
     return get_subreddit_cmd(command, &mut data, ctx, parent_tx).await;
 }
 
-#[instrument(skip(command, data, ctx))]
+#[instrument(skip(command, data, ctx, parent_tx))]
 async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
@@ -855,7 +866,7 @@ macro_rules! fake_embed_to_message {
     };
 }
 
-#[instrument(skip(command, ctx))]
+#[instrument(skip(command, ctx, tx))]
 async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Context, tx: &sentry::Transaction) -> Result<FakeEmbed, anyhow::Error> {
     match command.data.name.as_str() {
         "ping" => {
@@ -1014,15 +1025,15 @@ impl EventHandler for Handler {
     /// Fires when a slash command or other interaction is received
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         debug!("Interaction received");
-
         let tx_ctx = sentry::TransactionContext::new("interaction_create", "interaction");
         let tx = sentry::start_transaction(tx_ctx);
+        sentry::configure_scope(|scope| scope.set_span(Some(tx.clone().into())));
         
         // Check if there is a deadlock
         {
             let try_write = ctx.data.try_write();
             if try_write.is_err() {
-                warn!("Couldn't get data lock");
+                debug!("Couldn't get data lock immediately");
             } else {
                 debug!("Got data lock");
             }
@@ -1045,12 +1056,13 @@ impl EventHandler for Handler {
                     let why = why.to_string();
                     let code = rand::thread_rng().gen_range(0..10000);
 
-                    error!("Error code {} getting command response: {:?}", code, why);
+                    info!("Error code {} getting command response: {:?}", code, why);
 
                     let mut data = ctx.data.write().await;
                     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
                     capture_event(data_mut, "command_error", None, Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
+                    sentry::capture_message(&format!("Error getting command response: {:?}", why), sentry::Level::Error);
 
                     let map = HashMap::from([("content", format!("Error code {} getting command response: {:?}", code, why))]);
                     let client = reqwest::Client::new();
@@ -1266,7 +1278,7 @@ async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge:
         let mut shard_manager = shard_manager.lock().await;
         if !shard_manager.has(serenity::client::bridge::gateway::ShardId(shard_id)).await {
             debug!("Shard {} not found, marking self for termination.", shard_id);
-            fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
+            let _ = fs::remove_file("/etc/probes/live");
         }
 
         if db_total_shards != total_shards {
@@ -1343,7 +1355,12 @@ async fn main() {
 
     let thread = tokio::spawn(async move {
         tracing_subscriber::Registry::default()
-        //.with(sentry::integrations::tracing::layer())
+        .with(sentry::integrations::tracing::layer().event_filter(|md| match md.level() {
+            &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
+            &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
+            &tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
+            _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
+        }))
         .with(tracing_subscriber::fmt::layer().compact().with_ansi(false).with_filter(tracing_subscriber::filter::LevelFilter::DEBUG).with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
             if !meta.target().contains("discord_shard") {
                 return false;
