@@ -1043,7 +1043,7 @@ impl EventHandler for Handler {
             let slash_command_tx = tx.start_child("interaction.slash_command", "handle slash command");
             match command.guild_id {
                 Some(guild_id) => {
-                    info!("{:?} ({:?}) > {:?} ({:?}) : /{} {:?}", guild_id.name(&ctx.cache).unwrap(), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
+                    info!("{:?} ({:?}) > {:?} ({:?}) : /{} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
                 },
                 None => {
                     info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
@@ -1059,7 +1059,7 @@ impl EventHandler for Handler {
                     info!("Error code {} getting command response: {:?}", code, why);
 
                     let mut data = ctx.data.write().await;
-                    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+                    let data_mut = data.get_mut::<ConfigStruct>().expect("Couldn't get config struct");
 
                     capture_event(data_mut, "command_error", None, Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
                     sentry::capture_message(&format!("Error getting command response: {:?}", why), sentry::Level::Error);
@@ -1097,7 +1097,7 @@ impl EventHandler for Handler {
             {
                 if format!("{}", why) == "Interaction has already been acknowledged." {
                     let api_span = slash_command_tx.start_child("discord.api", "edit slash command response");
-                    command.edit_original_interaction_response(&ctx.http, |response| {
+                    if let Err(why) = command.edit_original_interaction_response(&ctx.http, |response| {
                         let span = api_span.start_child("discord.prepare_response", "edit slash command response");
                         debug!("Already sent response, editing instead");
                         let to_pass = fake_embed.clone();
@@ -1106,7 +1106,9 @@ impl EventHandler for Handler {
                         response.components(fake_embed_to_buttons!(to_pass));
                         span.finish();
                         return response;
-                    }).await.unwrap();
+                    }).await {
+                        warn!("Cannot edit slash command response: {}", why);
+                    };
                     api_span.finish();
                 } else {
                     warn!("Cannot respond to slash command: {}", why);
@@ -1117,7 +1119,7 @@ impl EventHandler for Handler {
                 let url = fake_embed.image.clone().unwrap();
                 if (url.contains("imgur")  && url.contains(".gif")) || url.contains("redgifs") {
                     let followup_span = slash_command_tx.start_child("discord.api", "send followup");
-                    match command.channel_id.send_message(&ctx.http, |message| {
+                    if let Err(why) = command.channel_id.send_message(&ctx.http, |message| {
                         message.content(url);
 
                         if fake_embed.buttons.is_some() {
@@ -1125,10 +1127,7 @@ impl EventHandler for Handler {
                         }
                         message
                     }).await {
-                        Ok(_) => {}
-                        Err(why) => {
-                            warn!("Cannot send followup to slash command: {}", why);
-                        }
+                        warn!("Cannot send followup to slash command: {}", why);
                     }
                     followup_span.finish();
                 }
@@ -1139,18 +1138,23 @@ impl EventHandler for Handler {
         if let Interaction::MessageComponent(command) = interaction {
             let component_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.component", "handle component interaction"));
             let mut data = ctx.data.write().await;
-            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+            let data_mut = data.get_mut::<ConfigStruct>().expect("Couldn't get config struct");
 
             match command.guild_id {
                 Some(guild_id) => {
-                    info!("{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}", guild_id.name(&ctx.cache).unwrap(), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
+                    info!("{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
                 },
                 None => {
                     info!("{:?} ({:?}) : Button {} {:?}", command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
                 }
             }
 
-            let custom_id: HashMap<String, serde_json::Value> = serde_json::from_str(&command.data.custom_id).unwrap();
+            // If custom_id uses invalid data structure (old version of bot), ignore interaction
+            let custom_id: HashMap<String, serde_json::Value> = if let Ok(custom_id) = serde_json::from_str(&command.data.custom_id) {
+                custom_id
+            } else {
+                return;
+            };
 
             let subreddit = custom_id["subreddit"].to_string().replace('"', "");
             debug!("Search, {:?}", custom_id["search"]);
@@ -1161,10 +1165,10 @@ impl EventHandler for Handler {
 
             capture_event(data_mut, "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
             
-            let mut con = match data_mut.get_mut("redis_connection").unwrap() {
+            let mut con = match data_mut.get_mut("redis_connection").expect("Couldn't get redis connection") {
                 ConfigValue::REDIS(db) => Ok(db),
                 _ => Err(0),
-            }.unwrap();
+            }.expect("Redis connection wasn't a redis connection");
 
             let fake_embed = match search_enabled {
                 true => {
@@ -1184,7 +1188,7 @@ impl EventHandler for Handler {
                     let code = rand::thread_rng().gen_range(0..10000);
                     error!("Error code {} getting command response: {:?}", code, why);
 
-                    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+                    let data_mut = data.get_mut::<ConfigStruct>().expect("Couldn't get config struct");
 
                     capture_event(data_mut, "command_error", Some(&component_tx), Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
                     sentry::integrations::anyhow::capture_anyhow(&error);
@@ -1219,7 +1223,7 @@ impl EventHandler for Handler {
             {
                 if format!("{}", why) == "Interaction has already been acknowledged." {
                     let api_span = component_tx.start_child("discord.api", "edit button response");
-                    command.edit_original_interaction_response(&ctx.http, |response| {
+                    if let Err(why) = command.edit_original_interaction_response(&ctx.http, |response| {
                         let prepare_span = component_tx.start_child("discord.prepare_response", "edit button response");
                         debug!("Already sent response, editing instead");
                         let to_pass = fake_embed.clone();
@@ -1228,10 +1232,12 @@ impl EventHandler for Handler {
                         response.components(fake_embed_to_buttons!(to_pass));
                         prepare_span.finish();
                         response
-                    }).await.unwrap();
+                    }).await {
+                        warn!("Cannot edit button response: {}", why);
+                    };
                     api_span.finish();
                 } else {
-                    warn!("Cannot respond to slash command: {}", why);
+                    warn!("Cannot respond to button press: {}", why);
                 }
             }
 
@@ -1239,7 +1245,7 @@ impl EventHandler for Handler {
                 let url = fake_embed.image.clone().unwrap();
                 if (url.contains("imgur")  && url.contains(".gif")) || url.contains("redgifs") {
                     let api_span = component_tx.start_child("discord.api", "send followup");
-                    match command.channel_id.send_message(&ctx.http, |message| {
+                    if let Err(why) = command.channel_id.send_message(&ctx.http, |message| {
                         message.content(url);
 
                         if fake_embed.buttons.is_some() {
@@ -1247,10 +1253,7 @@ impl EventHandler for Handler {
                         }
                         message
                     }).await {
-                        Ok(_) => {}
-                        Err(why) => {
-                            warn!("Cannot send followup to slash command: {}", why);
-                        }
+                        warn!("Cannot send followup to slash command: {}", why);
                     }
                     api_span.finish();
                 }
