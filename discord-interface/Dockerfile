@@ -12,8 +12,5 @@ RUN echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] htt
 RUN apt-get -qq update
 RUN apt-get -qq install -y kubectl
 
-#RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-#RUN install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-
 ADD target/release/discord-interface /usr/bin/discord-interface
 ENTRYPOINT ["/usr/bin/discord-interface"]

@@ -1,0 +1,34 @@
+[package]
+name = "discord-shard"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = {version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures = { version = "0.3"}
+log = "0.4"
+env_logger = "*"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time", "full"]}
+reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"]}
+serenity = { version = "0.11.5", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
+redis = { version = "*", features = ["aio", "tokio-comp", "connection-manager"] }
+rand = { version = "*", features = ["alloc"]}
+mongodb = "2.3"
+serde_derive = "1.0"
+pretty_env_logger = "*"
+anyhow = { version = "*", features = ["backtrace"] }
+sentry = { version = "0.29.3", features = ["tracing", "anyhow", "debug-images"] }
+tracing = "*"
+tracing-subscriber = { version = "*"}
+
+posthog = {path = "../posthog"}
+memberships = {path = "../memberships"}
+rslash_types = {path = "../rslash_types"}
+
+[[bin]]
+name = "discord-shard"
+path = "src/main.rs"
