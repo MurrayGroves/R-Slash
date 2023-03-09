@@ -802,6 +802,7 @@ async fn main() {
     .with(sentry::integrations::tracing::layer().event_filter(|md| match md.level() {
         &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
         &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
+        &tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
         _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
     }))
     .with(tracing_subscriber::fmt::layer().compact().with_ansi(false))
