@@ -8,5 +8,5 @@ RUN dpkg -i openssl*deb
 ADD "http://security.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates-udeb_20211016ubuntu0.18.04.1_all.udeb" .
 RUN dpkg -i ca-certificates*deb
 
-ADD target/${package}/downloader /usr/bin/downloader
-ENTRYPOINT ["/usr/bin/downloader"]
+ADD target/${package}/reddit-downloader /usr/bin/reddit-downloader
+ENTRYPOINT ["/usr/bin/reddit-downloader"]

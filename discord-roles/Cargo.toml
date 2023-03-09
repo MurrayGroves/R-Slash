@@ -1,0 +1,20 @@
+[package]
+name = "discord-roles"
+version = "1.0.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serenity = { version = "0.11.5", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
+mongodb = "2.3"
+tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time", "full"]}
+log = "*"
+reqwest = { version = "*", features = ["json", "stream", "blocking", "rustls-tls"] }
+serde = {version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+rslash_types = {path = "../rslash_types"}
+env_logger = "*"
+posthog = {path = "../posthog"}
+memberships = {path = "../memberships"}

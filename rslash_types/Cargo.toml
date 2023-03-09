@@ -9,4 +9,4 @@ edition = "2021"
 mongodb = "2.3"
 posthog = {path = "../posthog"}
 serenity = "0.11"
-redis = "*"
+redis = { version = "*", features = ["aio", "tokio-comp"] }
