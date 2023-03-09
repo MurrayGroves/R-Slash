@@ -176,15 +176,21 @@ async fn get_length_of_search_results(search_index: String, search: String, con:
         }
     };
 
-    let search = match search.matches("\"").count() % 2 {
-        0 => search,
-        _ => search.replace("\"", "\\\"")
-    };
+    let mut new_search = String::new();
+    for c in search.chars() {
+        if c.is_whitespace() && c != ' ' && c != '_' {
+            new_search.push('\\');
+            new_search.push(c);
+        }
+        else {
+            new_search.push(c);
+        }
+    }
 
-    debug!("Getting length of search results for {} in {}", search, search_index);
+    debug!("Getting length of search results for {} in {}", new_search, search_index);
     let results: Vec<u16> = redis::cmd("FT.SEARCH")
         .arg(search_index)
-        .arg(search)
+        .arg(new_search)
         .arg("LIMIT")
         .arg(0) // Return no results, just number of results
         .arg(0)
@@ -206,14 +212,20 @@ async fn get_post_at_search_index(search_index: String, search: &str, index: u16
         }
     };
 
-    let search = match search.matches("\"").count() % 2 {
-        0 => search.into(),
-        _ => search.to_string().replace("\"", "\\\"")
-    };
+    let mut new_search = String::new();
+    for c in search.chars() {
+        if c.is_whitespace() && c != ' ' && c != '_' {
+            new_search.push('\\');
+            new_search.push(c);
+        }
+        else {
+            new_search.push(c);
+        }
+    }
 
     let results: Vec<redis::Value> = redis::cmd("FT.SEARCH")
         .arg(search_index)
-        .arg(search)
+        .arg(new_search)
         .arg("LIMIT")
         .arg(index)
         .arg(1)
