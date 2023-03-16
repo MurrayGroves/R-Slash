@@ -4,6 +4,10 @@ job "redis" {
     group "redis" {
         count = 1
 
+        ephemeral_disk {
+            size = 300
+        }
+
         task "redis" {
             driver = "docker"
             config = {
@@ -18,10 +22,6 @@ job "redis" {
                     # Ensure it's placed on a node with that port available
                     port "redis" {}
                 }
-            }
-
-            ephemeral_disk {
-                size = 300
             }
 
             service {
