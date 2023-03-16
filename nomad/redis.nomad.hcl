@@ -10,7 +10,7 @@ job "redis" {
 
         task "redis" {
             driver = "docker"
-            config = {
+            config {
                 image = "redis/redis-stack-server"
                 port_map = {
                     redis = 6379

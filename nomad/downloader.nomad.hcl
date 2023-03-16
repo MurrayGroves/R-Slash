@@ -12,7 +12,7 @@ job "reddit-downloader" {
 
         task "downloader" {
             driver = "docker"
-            config = {
+            config {
                 image = "registry.murraygrov.es/reddit-downloader"
             }
 

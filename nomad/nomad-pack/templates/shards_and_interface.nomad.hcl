@@ -12,11 +12,11 @@ job "[[ .bot_name ]]" {
 
         task "shard" {
             driver = "docker"
-            config = {
+            config {
                 image = "registry.murraygrov.es/discord-shard:[[ .shard.version ]]"
             }
 
-            env = {
+            env {
                 RUST_LOG = "discord_shard=debug"
             }
 
@@ -48,11 +48,11 @@ job "[[ .bot_name ]]" {
 
         task "interface" {
             driver = "docker"
-            config = {
+            config {
                 image = "registry.murraygrov.es/discord-interface:[[ .interface.version ]]"
             }
 
-            env = {
+            env {
                 RUST_LOG = "discord_interface=info"
             }
 
