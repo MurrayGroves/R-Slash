@@ -8,6 +8,10 @@ job "consul" {
             port "consul" {
                 static = 8600
             }
+
+            port "http" {
+                static = 8500
+            }
         }
 
         task "consul" {
@@ -16,6 +20,13 @@ job "consul" {
             config {
                 image = "consul"
                 network_mode = "host"
+                args = ["bootstrap-expect", "1", "-server", "-ui"]
+            }
+
+            volume_mount {
+                volume = "consul-data-mediaserver"
+                destination = "/consul/data"
+                readonly = false
             }
         }
 
