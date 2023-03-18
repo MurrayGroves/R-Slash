@@ -20,7 +20,8 @@ job "consul" {
             config {
                 image = "consul"
                 network_mode = "host"
-                args = ["bootstrap-expect", "1", "-server", "-ui"]
+                args = ["agent", "bootstrap-expect", "1", "-server", "-ui"]
+                command = "consul"
             }
 
             volume_mount {
