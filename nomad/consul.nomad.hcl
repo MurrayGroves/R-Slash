@@ -24,7 +24,7 @@ job "consul" {
             }
 
             volume_mount {
-                volume = "consul-data-mediaserver"
+                volume = "data"
                 destination = "/consul/data"
                 read_only = false
             }
