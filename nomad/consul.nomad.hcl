@@ -20,7 +20,7 @@ job "consul" {
             config {
                 image = "consul"
                 network_mode = "host"
-                args = ["agent", "bootstrap-expect", "1", "-server", "-ui", "-bind", "192.168.1.178"]
+                args = ["agent", "-bootstrap-expect=1", "-server", "-ui", "-bind=192.168.1.178"]
                 command = "consul"
             }
 
