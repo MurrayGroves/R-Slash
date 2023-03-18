@@ -12,15 +12,15 @@ job "redis" {
             driver = "docker"
             config {
                 image = "redis/redis-stack-server"
-                port_map = {
-                    redis = 6379
-                }
+                ports = ["redis"]
             }
 
             resources {
                 network {
                     # Ensure it's placed on a node with that port available
-                    port "redis" {}
+                    port "redis" {
+                        static = 6379
+                    }
                 }
             }
 
