@@ -15,12 +15,9 @@ job "redis" {
                 ports = ["redis"]
             }
 
-            resources {
-                network {
-                    # Ensure it's placed on a node with that port available
-                    port "redis" {
-                        static = 6379
-                    }
+            network {
+                port "redis" {
+                    static = 6379
                 }
             }
 
