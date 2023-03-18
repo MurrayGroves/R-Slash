@@ -9,15 +9,27 @@ job "mongodb" {
 
             config {
                 image = "mongo"
-                port_map {
-                    mongodb = 27017
-                }
+                ports = ["mongodb"]
             }
 
             resources {
                 network {
-                    port "mongodb" {}
+                    port "mongodb" {
+                        static = 27017
+                    }
                 }
+            }
+        }
+
+        service {
+            name = "mongodb"
+            port = "mongodb"
+
+            check {
+                name = "alive"
+                type = "tcp"
+                interval = "10s"
+                timeout = "2s"
             }
         }
 

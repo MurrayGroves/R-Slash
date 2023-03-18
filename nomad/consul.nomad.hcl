@@ -4,20 +4,24 @@ job "consul" {
     group "consul" {
         count = 1
 
+        network {
+            port "consul" {
+                static = 8600
+            }
+        }
+
         task "consul" {
             driver = "docker"
 
             config {
                 image = "consul"
                 network_mode = "host"
-                port_map {
-                    http = 8600
-                }
+                ports = ["consul"]
             }
 
             service {
                 name = "consul"
-                port = "http"
+                port = "consul"
                 tags = ["global"]
                 check {
                     name = "alive"
