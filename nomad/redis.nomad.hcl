@@ -8,17 +8,17 @@ job "redis" {
             size = 300
         }
 
+        network {
+            port "redis" {
+                static = 6379
+            }
+        }
+
         task "redis" {
             driver = "docker"
             config {
                 image = "redis/redis-stack-server"
                 ports = ["redis"]
-            }
-
-            network {
-                port "redis" {
-                    static = 6379
-                }
             }
 
             service {
