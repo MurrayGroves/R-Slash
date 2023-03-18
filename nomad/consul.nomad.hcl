@@ -26,15 +26,15 @@ job "consul" {
                     timeout = "2s"
                 }
             }
+        }
 
-            volume "data" {
-                type = "host"
-                # Means this deployment can only be deployed on my home server (for now). This will need to be changed to use a proper storage provider 
-                source = "consul-data-mediaserver"
+        volume "data" {
+            type = "host"
+            # Means this deployment can only be deployed on my home server (for now). This will need to be changed to use a proper storage provider 
+            source = "consul-data-mediaserver"
 
-                access_mode = "single-node-writer"
-                attachment_mode = "file-system"
-            }
+            access_mode = "single-node-writer"
+            attachment_mode = "file-system"
         }
     }
 }
