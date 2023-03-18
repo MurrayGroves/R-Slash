@@ -1,5 +1,5 @@
 job "consul" {
-    type "system"
+    type = "system"
 
     group "consul" {
         count = 1
