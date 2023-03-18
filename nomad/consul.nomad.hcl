@@ -16,19 +16,6 @@ job "consul" {
             config {
                 image = "consul"
                 network_mode = "host"
-                ports = ["consul"]
-            }
-
-            service {
-                name = "consul"
-                port = "consul"
-                tags = ["global"]
-                check {
-                    name = "alive"
-                    type = "tcp"
-                    interval = "10s"
-                    timeout = "2s"
-                }
             }
         }
 
