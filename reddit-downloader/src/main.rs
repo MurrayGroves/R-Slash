@@ -1,4 +1,5 @@
 use tracing::{debug, info, warn, error};
+use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use std::io::Write;
@@ -799,16 +800,28 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
 #[tokio::main]
 async fn main() {
     tracing_subscriber::Registry::default()
-    .with(sentry::integrations::tracing::layer().event_filter(|md| match md.level() {
-        &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
-        &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
-        &tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
-        _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
+    .with(sentry::integrations::tracing::layer().event_filter(|md| {
+        let level_filter = match md.level() {
+            &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
+            &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
+            &tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
+            _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
+        };
+        if md.target().contains("reddit_downloader") {
+            return level_filter;
+        } else {
+            return sentry::integrations::tracing::EventFilter::Ignore;
+        }
     }))
-    .with(tracing_subscriber::fmt::layer().compact().with_ansi(false))
+    .with(tracing_subscriber::fmt::layer().compact().with_ansi(false).with_filter(tracing_subscriber::filter::LevelFilter::DEBUG).with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
+        if !meta.target().contains("reddit_downloader") {
+            return false;
+        };
+        true
+    })))
     .init();
 
-    println!("Initialised tracing");
+    println!("Initialised tracing!");
 
     let _guard = sentry::init(("http://623a0a9dd73f41d19553fe485514664c@100.67.30.19:9000/2", sentry::ClientOptions {
         release: sentry::release_name!(),
