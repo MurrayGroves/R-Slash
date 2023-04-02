@@ -1370,11 +1370,18 @@ async fn main() {
 
     let thread = tokio::spawn(async move {
         tracing_subscriber::Registry::default()
-        .with(sentry::integrations::tracing::layer().event_filter(|md| match md.level() {
-            &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
-            &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
-            &tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
-            _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
+        .with(sentry::integrations::tracing::layer().event_filter(|md| {
+            let level_filter = match md.level() {
+                &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
+                &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
+                &tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
+                _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
+            };
+            if md.name().contains("serenity") {
+                return sentry::integrations::tracing::EventFilter::Ignore;
+            } else {
+                return level_filter;
+            }
         }))
         .with(tracing_subscriber::fmt::layer().compact().with_ansi(false).with_filter(tracing_subscriber::filter::LevelFilter::DEBUG).with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
             if !meta.target().contains("discord_shard") {
