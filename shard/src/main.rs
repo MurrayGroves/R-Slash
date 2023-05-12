@@ -1377,11 +1377,13 @@ async fn main() {
                 &tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
                 _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
             };
-            if md.name().contains("serenity") {
+            
+            if !(md.target().contains("discord_shard")) {
                 return sentry::integrations::tracing::EventFilter::Ignore;
             } else {
                 return level_filter;
             }
+
         }))
         .with(tracing_subscriber::fmt::layer().compact().with_ansi(false).with_filter(tracing_subscriber::filter::LevelFilter::DEBUG).with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
             if !meta.target().contains("discord_shard") {
