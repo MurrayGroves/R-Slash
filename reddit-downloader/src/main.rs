@@ -113,7 +113,26 @@ async fn request_access_token(reddit_client: String, reddit_secret: String, web_
         .send()
         .await?;
 
-    let results: serde_json::Value = res.json().await?;
+    let text = match res.text().await {
+        Ok(x) => x,
+        Err(x) => {
+            let txt = format!("Failed to get text from reddit: {}", x);
+            warn!("{}", txt);
+            sentry::capture_message(&txt, sentry::Level::Warning);
+            return Err(x)?;
+        }
+    };
+    debug!("Matched text");
+    let results: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(x) => x,
+        Err(x) => {
+            let txt = format!("Failed to parse JSON from Reddit: {}", text);
+            warn!("{}", txt);
+            sentry::capture_message(&txt, sentry::Level::Warning);
+            return Err(x)?;
+        }
+    };
+
     debug!("Reddit access token response: {:?}", results);
     let token = results.get("access_token").expect("Reddit did not return access token").to_string();
     let expires_in:u64 = results.get("expires_in").expect("Reddit did not provide expires_in").as_u64().unwrap();
@@ -629,6 +648,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
 
     let web_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .user_agent("Discord:RSlash:v1.0.1 (by /u/murrax2)")
         .build().expect("Failed to build client");
 
     let data_lock = data.lock().await;
