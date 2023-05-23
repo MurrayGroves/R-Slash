@@ -1,16 +1,11 @@
 FROM ubuntu:latest
 
 
-ADD "http://security.debian.org/debian-security/pool/updates/main/o/openssl/libssl1.1_1.1.0l-1~deb9u6_amd64.deb" .
-RUN dpkg -i libssl1.1*deb
-
-RUN apt-get -qq update
-RUN apt-get -qq install -y curl
-RUN apt-get -qq install -y ca-certificates
-RUN curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
-RUN echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | tee /etc/apt/sources.list.d/kubernetes.list
-RUN apt-get -qq update
-RUN apt-get -qq install -y kubectl
+RUN apt update -y
+RUN apt install -y libssl-dev
+RUN apt install -y openssl
+ADD "http://security.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates-udeb_20211016ubuntu0.18.04.1_all.udeb" .
+RUN dpkg -i ca-certificates*deb
 
 ADD target/release/discord-interface /usr/bin/discord-interface
 ENTRYPOINT ["/usr/bin/discord-interface"]
