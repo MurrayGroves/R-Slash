@@ -585,6 +585,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
 
     let web_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .user_agent("Discord:RSlash:v1.0.1 (by /u/murrax2)")
         .build()?;
     let res = web_client
         .get(format!("https://www.reddit.com/r/{}.json", subreddit))
@@ -592,6 +593,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
         .await?;
 
     if res.status() != 200 {
+        debug!("Subreddit response not 200: {}", res.text().await?);
         return Ok(FakeEmbed {
             title: Some("Subreddit Inaccessible".to_string()),
             description: Some(format!("r/{} is private or does not exist.", subreddit).to_string()),
@@ -1318,7 +1320,7 @@ async fn main() {
     let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
     let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
 
-    let redis_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
+    let redis_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
     let mut con = redis_client.get_async_connection().await.expect("Can't connect to redis");
 
     let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();

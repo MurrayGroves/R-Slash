@@ -335,7 +335,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                 debug!("{}", format!("subreddit:{}:post:{}", subreddit.clone(), &post["id"].to_string().replace('"', "")));
                 url = url.replace(".gifv", ".gif");
 
-                if url.contains("gfycat") {
+                /*if url.contains("gfycat") {
                     let id = match url.split("/").last() {
                         Some(x) => match x.split(".").next() {
                             Some(x) => x.replace('"', ""),
@@ -400,7 +400,8 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                         None => {continue},
                     };
 
-                } else if url.contains("imgur") && !url.contains(".gif") && !url.contains(".png") && !url.contains(".jpg") && !url.contains(".jpeg") {
+                } else*/
+                if url.contains("imgur") && !url.contains(".gif") && !url.contains(".png") && !url.contains(".jpg") && !url.contains(".jpeg") {
                     let auth = format!("Client-ID {}", imgur_client);
                     let id = match url.split("/").last() {
                         Some(x) => match x.split(".").next() {
@@ -666,7 +667,15 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
     let gfycat_secret = env::var("GFYCAT_SECRET").expect("GFYCAT_SECRET not set");
     let imgur_client = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
     let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
-    let mut gfycat_token = OauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await.expect("Failed to get gfycat token");
+
+    // GFYCAT is dead so no longer needed, but still need to provide a token for the rest of the code.
+    let mut gfycat_token = OauthToken {
+        token: "".to_string(),
+        expires_at: 0,
+        client_id: gfycat_client.clone(),
+        client_secret: gfycat_secret.clone(),
+        url: "https://api.gfycat.com/v1/oauth/token".to_string(),
+    }; //{OauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await.expect("Failed to get gfycat token");
 
     let mut client_options = mongodb::options::ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.expect("Failed to parse client options");
     client_options.app_name = Some("Downloader".to_string());

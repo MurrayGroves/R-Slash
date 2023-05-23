@@ -71,13 +71,7 @@ async fn add_shards(num: u64, max_concurrency: u64) {
 }
 
 async fn get_redis_connection() -> redis::Connection {
-    let mut get_ip = Command::new("kubectl");
-    get_ip.arg("get").arg("nodes").arg("-o").arg("json");
-    let output = get_ip.output().expect("Failed to run kubectl");
-    let ip_output = String::from_utf8(output.stdout).expect("Failed to convert output to string");
-    let ip_json: Result<serde_json::Value, serde_json::Error> = serde_json::from_str(&ip_output);
-    let ip = ip_json.expect("Failed to convert string to json")["items"][0]["status"]["addresses"][0]["address"].to_string().replace('"', "");
-    let db_client = redis::Client::open(format!("redis://{}:31090/", ip)).unwrap();
+    let db_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
     let con = db_client.get_connection().expect("Can't connect to redis");
     return con;
 }
