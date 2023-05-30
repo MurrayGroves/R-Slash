@@ -20,8 +20,10 @@
 config.json
 
 discord-interface/target/
-
 reddit-downloader/target/
+discord-roles/target/
+*/target/
+
 
 shard/target/
 

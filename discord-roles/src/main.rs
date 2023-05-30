@@ -81,7 +81,13 @@ impl EventHandler for Handler {
         debug!("Old: {:?}, New: {:?}", old, new);
         let now_donator = new.roles.contains(&RoleId(777150304155861013));
 
-        let previously_donator = get_user_tiers(new.user.id.0.to_string(), &mut ctx.data.write().await).await.bronze.active;        
+        let tiers = get_user_tiers(new.user.id.0.to_string(), &mut ctx.data.write().await, None).await;
+
+        if tiers.bronze.manual { // If the user has a manual bronze membership, don't do anything
+            return;
+        }
+
+        let previously_donator = tiers.bronze.active;        
 
         debug!("Previously donator: {}, now donator: {}", previously_donator, now_donator);
 
@@ -119,7 +125,7 @@ impl EventHandler for Handler {
     async fn guild_member_addition(&self, ctx: Context, new: Member) {
         let now_donator = new.roles.contains(&RoleId(777150304155861013));
 
-        let previously_donator = get_user_tiers(new.user.id.0.to_string(), &mut ctx.data.write().await).await.bronze.active;        
+        let previously_donator = get_user_tiers(new.user.id.0.to_string(), &mut ctx.data.write().await, None).await.bronze.active;        
 
         debug!("Previously donator: {}, now donator: {}", previously_donator, now_donator);
 

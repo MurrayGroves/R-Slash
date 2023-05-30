@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "discord-shard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -1419,6 +1419,8 @@ dependencies = [
  "mongodb",
  "rslash_types",
  "sentry",
+ "serde",
+ "serde_derive",
  "serenity 0.11.5 (git+https://github.com/serenity-rs/serenity?branch=current)",
  "tokio",
 ]
