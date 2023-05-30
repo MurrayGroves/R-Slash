@@ -1379,8 +1379,8 @@ async fn main() {
                 &tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
                 _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
             };
-            
-            if !(md.target().contains("discord_shard")) {
+
+            if (!md.target().contains("discord_shard")) || md.name().contains("serenity") || md.target().contains("serenity") {
                 return sentry::integrations::tracing::EventFilter::Ignore;
             } else {
                 return level_filter;
@@ -1388,16 +1388,32 @@ async fn main() {
 
         }))
         .with(tracing_subscriber::fmt::layer().compact().with_ansi(false).with_filter(tracing_subscriber::filter::LevelFilter::DEBUG).with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
-            if !meta.target().contains("discord_shard") {
+            if !meta.target().contains("discord_shard") || meta.name().contains("serenity") {
                 return false;
             };
             true
         })))
         .init();
     
+        let bot_name: std::borrow::Cow<str>  = match &application_id {
+            278550142356029441 => "booty-bot".into(),
+            _ => "r-slash".into()
+        };
+
         let _guard = sentry::init(("http://9ebbf7835f99405ebfca243cf5263782@100.67.30.19:9000/3", sentry::ClientOptions {
             release: sentry::release_name!(),
             traces_sample_rate: 1.0,
+            before_send: Some(Arc::new(move |mut event| {
+                if let Some(msg) = &event.transaction {
+                    if msg.contains("serenity") {
+                        return None;
+                    }
+                };
+
+                event.environment = Some(bot_name.clone());
+                event.server_name = Some(shard_id.to_string().into());
+                Some(event)
+            })),
             ..Default::default()
         }));
     
