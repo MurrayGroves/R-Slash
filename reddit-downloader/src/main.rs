@@ -21,6 +21,8 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{FindOptions};
 use serde_json::Value::Null;
 
+mod redgifs;
+
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
 pub enum ConfigValue {
@@ -309,8 +311,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
 
         let mut posts = Vec::new();
         for post in results {
-            // For gfycat get media/oembed/thumbnail_url, replace thumbs with giant, and remove size-restricted, and replace .gif with .mp4
-            // If removed_by_category is present then post is removed
+            // If removed_by_category is present then post is removed, so skip it
             // For imgur, get url, and replace extension with .mp4 (might not have any extension), if url has gallery in it, get url from media/oembed/thumbnail_url and replace with .mp4 again
             // For i.redd.it just take the L and use the url
             let post = post["data"].clone();
@@ -335,72 +336,6 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                 debug!("{}", format!("subreddit:{}:post:{}", subreddit.clone(), &post["id"].to_string().replace('"', "")));
                 url = url.replace(".gifv", ".gif");
 
-                /*if url.contains("gfycat") {
-                    let id = match url.split("/").last() {
-                        Some(x) => match x.split(".").next() {
-                            Some(x) => x.replace('"', ""),
-                            None => {
-                                let txt = format!("Failed to get id from gfycat url: {}", url);
-                                warn!("{}", txt);
-                                sentry::capture_message(&txt, sentry::Level::Warning);
-                                continue;
-                            }
-                        },
-                        None => {
-                            let txt = format!("Failed to get id from gfycat url: {}", url);
-                            warn!("{}", txt);
-                            sentry::capture_message(&txt, sentry::Level::Warning);
-                            continue;
-                        }
-                    };
-                    debug!("Gfycat ID: {}", id);
-
-                    if gfycat_token.expires_at < get_epoch_ms()? - 1000 {
-                        match gfycat_token.refresh().await {
-                            Ok(_) => {},
-                            Err(x) => {
-                                let txt = format!("Failed to refresh gfycat token: {}", x);
-                                error!("{}", txt);
-                                sentry::capture_message(&txt, sentry::Level::Error);
-                                continue;
-                            }
-                        };
-                    }
-
-                    let auth = format!("Bearer {}", gfycat_token.token);
-
-                    let res = match web_client
-                        .get(format!("https://api.gfycat.com/v1/gfycats/{}", id))
-                        .header("Authorization", auth)
-                        .send()
-                        .await {
-                            Ok(x) => x,
-                            Err(x) => {
-                                let txt = format!("Failed to request from gfycat: {}", x);
-                                error!("{}", txt);
-                                sentry::capture_message(&txt, sentry::Level::Error);
-                                continue;
-                            }
-                    };
-
-                    let results: serde_json::Value = res.json().await.unwrap();
-                    let result = results.get("gfyItem");
-                    match result {
-                        Some(x) => {
-                            url = match x.get("gifUrl") {
-                                Some(x) => x.to_string(),
-                                None => {
-                                    let txt = format!("Failed to get gifUrl from gfycat response: {}", results);
-                                    warn!("{}", txt);
-                                    sentry::capture_message(&txt, sentry::Level::Warning);
-                                    continue;
-                                }
-                            };
-                        },
-                        None => {continue},
-                    };
-
-                } else*/
                 if url.contains("imgur") && !url.contains(".gif") && !url.contains(".png") && !url.contains(".jpg") && !url.contains(".jpeg") {
                     let auth = format!("Client-ID {}", imgur_client);
                     let id = match url.split("/").last() {

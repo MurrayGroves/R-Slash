@@ -18,3 +18,4 @@ sentry = { version = "0.29.3", features = ["tracing", "anyhow", "debug-images"] 
 tracing = "*"
 tracing-subscriber = { version = "*"}
 anyhow = { version = "*", features = ["backtrace"] }
+chrono = "*"
