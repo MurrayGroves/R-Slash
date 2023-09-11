@@ -124,7 +124,7 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
 
     let subreddit = options[0].value.clone();
     let subreddit = subreddit.unwrap();
-    let subreddit = subreddit.as_str().unwrap().to_string();
+    let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
 
     let search_enabled = options.len() > 1;
     capture_event(data_mut, "subreddit_cmd", Some(tx),
