@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::env;
 
-use serenity::builder::CreateEmbed;
-use serenity::model::id::{ChannelId, GuildId};
+use serenity::builder::{CreateEmbed, CreateComponents};
+use serenity::model::id::{ChannelId};
 use serenity::model::gateway::GatewayIntents;
 use serenity::{
     async_trait,
@@ -37,7 +37,6 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 
 use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
-use serenity::model::application::command::CommandOptionType;
 use serenity::model::application::component::ButtonStyle;
 use serenity::model::guild::{Guild, UnavailableGuild};
 use serenity::utils::Colour;
@@ -46,31 +45,6 @@ use anyhow::anyhow;
 
 use memberships::*;
 use rslash_types::*;
-
-
-#[derive(Debug, Clone)]
-pub struct FakeEmbed {
-    title: Option<String>,
-    description: Option<String>,
-    url: Option<String>,
-    color: Option<Colour>,
-    footer: Option<String>,
-    image: Option<String>,
-    thumbnail: Option<String>,
-    author: Option<String>,
-    timestamp: Option<u64>,
-    fields: Option<Vec<(String, String, bool)>>,
-    buttons: Option<Vec<FakeButton>>
-}
-
-#[derive(Debug, Clone)]
-pub struct FakeButton {
-    label: String,
-    style: ButtonStyle,
-    url: Option<String>,
-    custom_id: Option<String>,
-    disabled: bool,
-}
 
 
 /// Returns current milliseconds since the Epoch
@@ -109,7 +83,7 @@ async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, par
 
 
 #[instrument(skip(command, data, ctx, tx))]
-async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context, tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+async fn get_subreddit_cmd<'a, 'b>(command: &'a ApplicationCommandInteraction, data: &'b mut tokio::sync::RwLockWriteGuard<'a, TypeMap>, ctx: &'a Context, tx: &'b sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
     let nsfw_subreddits = match data_mut.get_mut("nsfw_subreddits").unwrap() {
@@ -139,19 +113,15 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
     if nsfw_subreddits.contains(&subreddit) {
         if let Some(channel) = command.channel_id.to_channel_cached(&ctx.cache) {
             if !channel.is_nsfw() {
-                return Ok(FakeEmbed {
-                    title: Some("NSFW subreddits can only be used in NSFW channels".to_string()),
-                    author: None,
-                    timestamp: None,
-                    description: Some("Discord requires NSFW content to only be sent in NSFW channels, find out how to fix this [here](https://support.discord.com/hc/en-us/articles/115000084051-NSFW-Channels-and-Content)".to_string()),
-                    url: None,
-                    color: Some(Colour::from_rgb(255, 0, 0)),
-                    footer: None,
-                    image: None,
-                    thumbnail: None,
-                    fields: None,
-                    buttons: None
-                })
+                return Ok(InteractionResponse {
+                    embed: Some(CreateEmbed::default()
+                        .title("NSFW subreddits can only be used in NSFW channels")
+                        .description("Discord requires NSFW content to only be sent in NSFW channels, find out how to fix this [here](https://support.discord.com/hc/en-us/articles/115000084051-NSFW-Channels-and-Content)")
+                        .color(Colour::from_rgb(255, 0, 0))
+                        .to_owned()
+                    ),
+                    ..Default::default()
+                });
             }
         }
     }
@@ -263,7 +233,7 @@ async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::
 
 
 #[instrument(skip(con, parent_tx))]
-async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<FakeEmbed, anyhow::Error> {
+async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse<'a>, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "get_post_by_id").into(),
         None => {
@@ -281,24 +251,39 @@ async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis
         "search": search,
     }).to_string();
 
-    let to_return = FakeEmbed {
-        title: Some(from_redis_value(&post.get("title").unwrap().clone())?),
-        description: Some(format!("r/{}", subreddit)),
-        author: Some(format!("u/{}", from_redis_value::<String>(&post.get("author").unwrap().clone())?)),
-        url: Some(from_redis_value(&post.get("url").unwrap().clone())?),
-        color: Some(Colour::from_rgb(0, 255, 0)),
-        footer: None,
-        image: Some(from_redis_value(&post.get("embed_url").unwrap().clone())?),
-        thumbnail: None,
-        timestamp: Some(from_redis_value(post.get("timestamp").unwrap())?),
-        fields: None,
-        buttons: Some(vec![FakeButton {
-            label: "🔁".to_string(),
-            style: ButtonStyle::Primary,
-            url: None,
-            custom_id: Some(custom_data),
-            disabled: false
-        }])
+    let author = from_redis_value::<String>(&post.get("author").unwrap().clone())?;
+    let title = from_redis_value::<String>(&post.get("title").unwrap().clone())?;
+    let url = from_redis_value::<String>(&post.get("url").unwrap().clone())?;
+    let embed_url = from_redis_value::<String>(&post.get("embed_url").unwrap().clone())?;
+    let timestamp = from_redis_value::<String>(&post.get("timestamp").unwrap().clone())?;
+
+    let to_return = InteractionResponse {
+        embed: Some(CreateEmbed::default()
+            .title(title)
+            .description(format!("r/{}", subreddit))
+            .author(|a|
+                a.name(format!("u/{}", author))
+                .url(format!("https://reddit.com/u/{}", author))
+            )
+            .url(url)
+            .color(0x00ff00)
+            .image(embed_url)
+            .timestamp(timestamp)
+            .to_owned()
+        ),
+
+        components: Some(CreateComponents::default()
+            .create_action_row(|a|
+                a.create_button(|b|
+                    b.label("🔁")
+                    .style(ButtonStyle::Primary)
+                    .custom_id(custom_data)
+                )
+            ).to_owned()
+        ),
+
+        fallback: ResponseFallbackMethod::Edit,
+        ..Default::default()
     };
 
     span.finish();
@@ -307,7 +292,7 @@ async fn get_post_by_id(post_id: String, search: Option<String>, con: &mut redis
 
 
 #[instrument(skip(con, parent_tx))]
-async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<FakeEmbed, anyhow::Error> {
+async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse<'a>, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("subreddit.search", "get_subreddit_search").into(),
         None => {
@@ -322,18 +307,13 @@ async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis
     let length: u16 = get_length_of_search_results(format!("idx:{}", &subreddit), search.clone(), con, Some(&span)).await?;
 
     if length == 0 {
-        return Ok(FakeEmbed {
-            title: Some("No search results found".to_string()),
-            description: None,
-            url: None,
-            color: Some(Colour::from_rgb(255, 0, 0)),
-            footer: None,
-            image: None,
-            thumbnail: None,
-            author: None,
-            timestamp: None,
-            fields: None,
-            buttons: None,
+        return Ok(InteractionResponse {
+            embed: Some(CreateEmbed::default()
+                .title("No search results found")
+                .color(0xff0000)
+                .to_owned()
+            ),
+            ..Default::default()
         });
     }
 
@@ -352,7 +332,7 @@ async fn get_subreddit_search(subreddit: String, search: String, con: &mut redis
 
 
 #[instrument(skip(con, parent_tx))]
-async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<FakeEmbed, anyhow::Error> {
+async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse<'a>, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("subreddit.get", "get_subreddit").into(),
         None => {
@@ -380,125 +360,25 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, chan
 }
 
 
-fn error_embed(code: &str) -> FakeEmbed {
-    return FakeEmbed {
-        title: Some("An Error Occurred".to_string()),
-        description: Some(format!("Please report this in the support server.\n Error: {}", code)),
-        author: None,
-        url: None,
-        color: Some(Colour::from_rgb(255, 0,0)),
-        footer: None,
-        image: None,
-        thumbnail: None,
-        timestamp: None,
-        fields: None,
-        buttons: None
+fn error_response(code: String) -> InteractionResponse<'static> {
+    let embed = CreateEmbed::default()
+        .title("An Error Occurred")
+        .description(format!("Please report this in the support server.\n Error: {}", code))
+        .color(Colour::from_rgb(255, 0, 0)).to_owned();
+
+    return InteractionResponse {
+        file: None,
+        embed: Some(embed),
+        content: None,
+        ephemeral: false,
+        components: None,
+        fallback: ResponseFallbackMethod::Followup,
     };
 }
 
-
-async fn update_guild_commands(guild_id: GuildId, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) {
-    let mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
-        ConfigValue::MONGODB(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
-
-    let db = mongodb_client.database("config");
-    let coll = db.collection::<Document>("settings");
-
-    let filter = doc! {"id": "subreddit_list".to_string()};
-    let find_options = FindOptions::builder().build();
-    let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
-
-    let doc = cursor.try_next().await.unwrap().unwrap();
-    let sfw_subreddits: Vec<&str> = doc.get_array("sfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
-    let nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
-
-
-    let guild_config = fetch_guild_config(guild_id, data).await;
-    let nsfw = guild_config.get_str("nsfw").unwrap();
-
-    let _ = guild_id.create_application_command(&ctx.http, |command| {
-    command
-        .name("get")
-        .description("Get a post from a specified subreddit");
-
-    command.create_option(|option| {
-        option.name("subreddit")
-            .description("The subreddit to get a post from")
-            .required(true)
-            .kind(CommandOptionType::String);
-
-        if nsfw == "nsfw" || nsfw == "both" {
-            for subreddit in &nsfw_subreddits {
-                option.add_string_choice(subreddit, subreddit);
-            }
-        }
-        if nsfw == "non-nsfw" || nsfw == "both" {
-            for subreddit in &sfw_subreddits {
-                option.add_string_choice(subreddit, subreddit);
-            }
-        }
-
-        return option;
-    });
-
-    return command;
-    }).await.expect("Failed to register slash commands");
-
-}
-
-
-/// Fetches a guild's configuration, creating it if it doesn't exist.
-async fn fetch_guild_config(guild_id: GuildId, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>) -> Document {
-    let mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
-        ConfigValue::MONGODB(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
-
-    let db = mongodb_client.database("config");
-    let coll = db.collection::<Document>("servers");
-
-    let filter = doc! {"id": guild_id.0.to_string()};
-    let find_options = FindOptions::builder().build();
-    let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
-
-    return match cursor.try_next().await.unwrap() {
-        Some(doc) => doc, // If guild configuration does exist
-        None => { // If guild configuration doesn't exist
-            let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
-
-            // Check if booty bot or r slash
-            let nsfw = match application_id {
-                278550142356029441 => "nsfw",
-                _ => "non-nsfw"
-            };
-
-            let server = doc! {
-                "id": guild_id.0.to_string(),
-                "nsfw": nsfw,
-            };
-
-            coll.insert_one(server, None).await.unwrap();
-            let mut cursor = coll.find(filter, find_options).await.unwrap();
-            cursor.try_next().await.unwrap().unwrap()
-        }
-    };
-}
-
-async fn set_guild_config(old_config: Document, config: Document, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>) {
-    let mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
-        ConfigValue::MONGODB(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
-
-    let db = mongodb_client.database("config");
-    let coll = db.collection::<Document>("servers");
-    coll.replace_one(old_config, config, None).await.unwrap();
-}
 
 #[instrument(skip(command, data, _ctx, parent_tx))]
-async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, _ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+async fn cmd_get_user_tiers<'a>(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, _ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
     let mongodb_client = match data_mut.get_mut("mongodb_connection").unwrap() {
         ConfigValue::MONGODB(db) => Ok(db),
@@ -516,20 +396,13 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
 
     capture_event(data_mut, "cmd_get_user_tiers", Some(parent_tx), Some(HashMap::from([("bronze_active", bronze.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
 
-    return Ok(FakeEmbed {
-        title: Some("Your membership tiers".to_string()),
-        description: Some("Get Premium here: https://ko-fi.com/rslash".to_string()),
-        url: None,
-        fields: Some(vec![
-            ("Premium".to_string(), bronze, false),
-        ]),
-        author: None,
-        timestamp: None,
-        footer: None,
-        image: None,
-        color: None,
-        thumbnail: None,
-        buttons: None
+    return Ok(InteractionResponse {
+        embed: Some(CreateEmbed::default()
+            .title("Your membership tiers")
+            .description("Get Premium here: https://ko-fi.com/rslash")
+            .field("Premium", bronze, false).to_owned()
+        ),
+        ..Default::default()
     });
 }
 
@@ -555,25 +428,20 @@ async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connecti
 }
 
 #[instrument(skip(command, ctx, parent_tx))]
-async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+async fn get_custom_subreddit<'a, 'b>(command: &'a ApplicationCommandInteraction, ctx: &'a Context, parent_tx: &'b sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
     let mut data = ctx.data.write().await;
 
     let membership = get_user_tiers(command.user.id.0.to_string(), &mut data, Some(parent_tx)).await;
     if !membership.bronze.active {
-        return Ok(FakeEmbed {
-            title: Some("Premium Feature".to_string()),
-            description: Some("You must have premium in order to use this command.
-            Get it here: https://ko-fi.com/rslash".to_string()),
-            url: None,
-            color: Some(Colour::from_rgb(255, 0, 0)),
-            footer: None,
-            image: None,
-            thumbnail: None,
-            author: None,
-            timestamp: None,
-            fields: None,
-            buttons: None
-        })
+        return Ok(InteractionResponse {
+            embed: Some(CreateEmbed::default()
+                .title("Premium Feature")
+                .description("You must have premium in order to use this command.
+                Get it here: https://ko-fi.com/rslash")
+                .color(0xff0000).to_owned()
+            ),
+            ..Default::default()
+        });
     }
 
     drop(data); // Release lock while performing web request
@@ -594,19 +462,14 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
 
     if res.status() != 200 {
         debug!("Subreddit response not 200: {}", res.text().await?);
-        return Ok(FakeEmbed {
-            title: Some("Subreddit Inaccessible".to_string()),
-            description: Some(format!("r/{} is private or does not exist.", subreddit).to_string()),
-            url: None,
-            color: Some(Colour::from_rgb(255, 0, 0)),
-            footer: None,
-            image: None,
-            thumbnail: None,
-            author: None,
-            timestamp: None,
-            fields: None,
-            buttons: None
-        })
+        return Ok(InteractionResponse {
+            embed: Some(CreateEmbed::default()
+                .title("Subreddit Inaccessible")
+                .description(format!("r/{} is private or does not exist.", subreddit))
+                .color(0xff0000).to_owned()
+            ),
+            ..Default::default()
+        });
     }
 
     let mut data = ctx.data.write().await;
@@ -681,7 +544,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
 }
 
 #[instrument(skip(command, data, ctx, parent_tx))]
-async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+async fn info<'a>(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
     capture_event(data_mut, "cmd_info", Some(parent_tx), None, &format!("user_{}", command.user.id.0.to_string())).await;
@@ -699,220 +562,58 @@ async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::R
 
     let id = ctx.cache.current_user_id().0;
 
-    return Ok(FakeEmbed {
-        title: Some("Info".to_string()),
-        description: Some(format!("[Support Server](https://discord.gg/jYtCFQG)
+    return Ok(InteractionResponse {
+        embed: Some(CreateEmbed::default()
+            .title("Info")
+            .description(format!("[Support Server](https://discord.gg/jYtCFQG)
         
-        [Add me to a server](https://discord.com/api/oauth2/authorize?client_id={}&permissions=515463498752&scope=applications.commands%20bot)
-        
-        [Privacy Policy](https://pastebin.com/DtZvJJhG)
-        [Terms & Conditions](https://pastebin.com/6c4z3uM5)", id).to_string()),
-        url: None,
-        color: Some(Colour::from_rgb(0, 255, 0)),
-        footer: None,
-        image: None,
-        thumbnail: None,
-        author: None,
-        timestamp: None,
-        fields: Some(vec![
-            ("Servers".to_string(), guild_count.to_string(), true),
-            ("Shard ID".to_string(), ctx.shard_id.to_string(), true),
-            ("Shard Count".to_string(), ctx.cache.shard_count().to_string(), true),
-        ]),
-        buttons: None
+            [Add me to a server](https://discord.com/api/oauth2/authorize?client_id={}&permissions=515463498752&scope=applications.commands%20bot)
+            
+            [Privacy Policy](https://pastebin.com/DtZvJJhG)
+            [Terms & Conditions](https://pastebin.com/6c4z3uM5)", id))
+            .color(0x00ff00).to_owned()
+            .fields(vec![
+                ("Servers".to_string(), guild_count.to_string(), true),
+                ("Shard ID".to_string(), ctx.shard_id.to_string(), true),
+                ("Shard Count".to_string(), ctx.cache.shard_count().to_string(), true),
+            ]).to_owned()
+        ),
+        ..Default::default()
     })
 }
 
 
-async fn configure_server(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
-    debug!("{:?}", command.data.options);
-
-    let mut embed = FakeEmbed {
-        title: None,
-        description: None,
-        author: None,
-        url: None,
-        color: None,
-        footer: None,
-        image: None,
-        thumbnail: None,
-        timestamp: None,
-        fields: None,
-        buttons: None
-    };
-
-    match command.data.options[0].name.as_str() {
-        "commands" => {
-            match command.data.options[0].options[0].name.as_str() {
-                "nsfw" => {
-                    let mut guild = fetch_guild_config(command.guild_id.unwrap(), data).await;
-                    let old_config = guild.clone();
-                    let nsfw = command.data.options[0].options[0].options[0].value.clone().unwrap().to_string().replace('"', "");
-                    guild.insert("nsfw", &nsfw);
-
-                    set_guild_config(old_config, guild, data).await;
-
-
-                    embed.title = Some("Server Configuration Changed".to_string());
-                    embed.description = Some(format!("The server's nsfw configuration has been changed to {}", &nsfw));
-                    embed.color = Some(Colour::from_rgb(0, 255, 0));
-
-                    update_guild_commands(command.guild_id.unwrap(), data, ctx).await;
-                },
-                _ => {
-                    embed = error_embed("11615");
-                }
-
-            };
-        },
-        _ => {
-            embed = error_embed("171651");
-        }
-    }
-
-
-    return Ok(embed);
-}
-
-macro_rules! fake_embed_to_embed {
-    ($a:expr) => {
-        |e: &mut CreateEmbed| {
-            if $a.timestamp.is_some() {
-                e.timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp($a.timestamp.unwrap() as i64).unwrap());
-            }
-
-            if $a.footer.is_some() {
-                let text = $a.footer.unwrap();
-                e.footer(|footer| {
-                    footer.text(text)
-                });
-            }
-
-            if $a.fields.is_some() {
-                e.fields($a.fields.unwrap());
-            }
-
-            if $a.color.is_some() {
-                e.colour($a.color.unwrap());
-            }
-
-            if $a.description.is_some() {
-                e.description($a.description.unwrap());
-            }
-
-            if $a.title.is_some() {
-                e.title($a.title.unwrap());
-            }
-
-            if $a.url.is_some() {
-                e.url($a.url.unwrap().clone());
-            }
-
-            if $a.author.is_some() {
-                let name = $a.author.unwrap();
-                e.author(|author| {
-                    author.name(&name)
-                        .url(format!("https://reddit.com/u/{}", name))
-                });
-            }
-
-            if $a.thumbnail.is_some() {
-                e.thumbnail($a.thumbnail.unwrap());
-            }
-
-            if $a.image.is_some() {
-                let url = $a.image.clone().unwrap();
-                if !(url.contains("imgur") && url.contains(".gif")) && !(url.contains("redgifs")) {
-                    e.image(url);
-                }
-            }
-
-            return e;
-        }
-    }
-}
-
-macro_rules! fake_embed_to_buttons {
-    ($a:expr) => {
-        |c| {
-            c.create_action_row(|a| {
-                for button in $a.clone().buttons.unwrap() {
-                    a.create_button(|b| {
-                        b.label(button.label)
-                            .style(button.style)
-                            .disabled(button.disabled);
-
-                        if button.url.is_some() {
-                            b.url(button.url.unwrap());
-                        }
-
-                        if button.custom_id.is_some() {
-                            b.custom_id(button.custom_id.unwrap());
-                        }
-
-                        return b;
-                    });
-                }
-
-                return a;
-            })
-        }
-    };
-}
-
-macro_rules! fake_embed_to_message {
-    ($a:expr) => {
-        |message| {
-            let mut do_buttons = true;
-            if $a.url.is_some() {
-                let url = $a.image.clone().unwrap();
-                if (url.contains("imgur") && url.contains(".gif") ) || url.contains("redgifs") {
-                    do_buttons = false;
-                }
-            }
-    
-            if ($a.buttons.is_some()) && do_buttons {
-                message.components(fake_embed_to_buttons!($a));
-            }
-    
-            message.embed(fake_embed_to_embed!($a))
-        }
-    };
-}
-
 #[instrument(skip(command, ctx, tx))]
-async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Context, tx: &sentry::Transaction) -> Result<FakeEmbed, anyhow::Error> {
+async fn get_command_response<'a>(command: &'a ApplicationCommandInteraction, ctx: &'a Context, tx: &'a sentry::Transaction) -> Result<InteractionResponse<'a>, anyhow::Error> {
     match command.data.name.as_str() {
         "ping" => {
-            Ok(FakeEmbed {
-                title: Some("Pong!".to_string()),
-                author: None,
-                description: None, // TODO - Add latency
-                url: None,
-                color: Some(Colour::from_rgb(0, 255, 0)),
-                footer: None,
-                image: None,
-                thumbnail: None,
-                timestamp: None,
-                fields: None,
-                buttons: None
+            Ok(InteractionResponse {
+                content: None,
+                embed: Some(CreateEmbed::default()
+                    .title("Pong!")
+                    .color(Colour::from_rgb(0, 255, 0)).to_owned()
+                ),
+                components: None,
+                file: None,
+                ephemeral: false,
+                fallback: ResponseFallbackMethod::Error
             })
         },
 
         "support" => {
-            Ok(FakeEmbed {
-                title: Some("Get Support".to_string()),
-                author: None,
-                description: Some("[Discord Server](https://discord.gg/jYtCFQG)
-                Email: rslashdiscord@gmail.com".to_string()),
-                url: None,
-                color: Some(Colour::from_rgb(0, 255, 0)),
-                footer: None,
-                image: None,
-                thumbnail: None,
-                timestamp: None,
-                fields: None,
-                buttons: None
+            Ok(InteractionResponse {
+                content: None,
+                embed: Some(CreateEmbed::default()
+                    .title("Get Support")
+                    .description("[Discord Server](https://discord.gg/jYtCFQG)
+                    Email: rslashdiscord@gmail.com")
+                    .color(Colour::from_rgb(0, 255, 0))
+                    .url("https://discord.gg/jYtCFQG").to_owned()
+                ),
+                components: None,
+                file: None,
+                ephemeral: false,
+                fallback: ResponseFallbackMethod::Error
             })
         },
 
@@ -932,12 +633,6 @@ async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Con
             let resp = cmd_get_user_tiers(&command, &mut data, &ctx, &cmd_tx).await;
             cmd_tx.finish();
             resp
-        },
-
-        "configure-server" => {
-            let mut data = ctx.data.write().await;
-            debug!("Got lock");
-            configure_server(&command, &mut data, &ctx).await
         },
 
         "custom" => {
@@ -962,6 +657,42 @@ async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Con
     }
 }
 
+
+/// What to do if sending a response fails due to already being acknowledged
+#[derive(Debug, Clone)]
+enum ResponseFallbackMethod {
+    /// Edit the original response
+    Edit,
+    /// Send a followup response
+    Followup,
+    /// Return an error
+    Error,
+    /// Do nothing
+    None
+}
+
+#[derive(Debug, Clone)]
+struct InteractionResponse<'a> {
+    file: Option<serenity::model::channel::AttachmentType<'a>>,
+    embed: Option<serenity::builder::CreateEmbed>,
+    content: Option<String>,
+    ephemeral: bool,
+    components: Option<serenity::builder::CreateComponents>,
+    fallback: ResponseFallbackMethod
+}
+
+impl Default for InteractionResponse<'_> {
+    fn default() -> Self {
+        InteractionResponse {
+            file: None,
+            embed: None,
+            content: None,
+            ephemeral: false,
+            components: None,
+            fallback: ResponseFallbackMethod::Error
+        }
+    }
+}
 
 /// Discord event handler
 struct Handler;
@@ -1064,9 +795,9 @@ impl EventHandler for Handler {
                 }
             }
             let command_response = get_command_response(&command, &ctx, &tx).await;
-            let fake_embed = match command_response {
-                Ok(ref embed) => embed.clone(),
-                Err(ref why) => {
+            let command_response = match command_response {
+                Ok(embed) => embed,
+                Err(why) => {
                     let why = why.to_string();
                     let code = rand::thread_rng().gen_range(0..10000);
 
@@ -1085,21 +816,39 @@ impl EventHandler for Handler {
                         .send()
                         .await;
 
-                    error_embed(&code.to_string())
+                    error_response(code.to_string())
                 }
             };
 
-            debug!("Sending response: {:?}", fake_embed);
+            debug!("Sending response: {:?}", command_response);
 
+            // Try to send response
             if let Err(why) = {
                 let api_span = slash_command_tx.start_child("discord.api", "create slash command response");
                 let to_return = command
                 .create_interaction_response(&ctx.http, |response| {
                     let span = slash_command_tx.start_child("discord.prepare_response", "create slash command response");
-                    let to_pass = fake_embed.clone();
                     let to_return = response
                         .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(fake_embed_to_message!(to_pass));
+                        .interaction_response_data(|mut message| {
+                            // Clone component_response so we can use it in the closure without moving the original data
+                            let command_response = command_response.clone();
+                            if command_response.embed.is_some() {
+                                message = message.set_embed(command_response.embed.unwrap());
+                            };
+
+                            if command_response.components.is_some() {
+                                message = message.set_components(command_response.components.unwrap());
+                            };
+
+                            if command_response.content.is_some() {
+                                message = message.content(command_response.content.unwrap());
+                            };
+
+                            message = message.ephemeral(command_response.ephemeral);
+
+                            message
+                        });
 
                     span.finish();
                     to_return
@@ -1109,44 +858,84 @@ impl EventHandler for Handler {
                 to_return
             }
             {
-                if format!("{}", why) == "Interaction has already been acknowledged." {
-                    let api_span = slash_command_tx.start_child("discord.api", "edit slash command response");
-                    if let Err(why) = command.edit_original_interaction_response(&ctx.http, |response| {
-                        let span = api_span.start_child("discord.prepare_response", "edit slash command response");
-                        debug!("Already sent response, editing instead");
-                        let to_pass = fake_embed.clone();
-                        response.embed(fake_embed_to_embed!(to_pass));
-                        let to_pass = fake_embed.clone();
-                        response.components(fake_embed_to_buttons!(to_pass));
-                        span.finish();
-                        return response;
-                    }).await {
-                        warn!("Cannot edit slash command response: {}", why);
-                    };
-                    api_span.finish();
-                } else {
-                    warn!("Cannot respond to slash command: {}", why);
-                }
-            }
+                match why {
+                    serenity::Error::Http(e) => {
+                        if format!("{}", e) == "Interaction has already been acknowledged." {
+                            debug!("Interaction already acknowledged, fallback is: {:?}", command_response.fallback);
 
-            if fake_embed.image.is_some() {
-                let url = fake_embed.image.clone().unwrap();
-                if (url.contains("imgur")  && url.contains(".gif")) || url.contains("redgifs") {
-                    let followup_span = slash_command_tx.start_child("discord.api", "send followup");
-                    if let Err(why) = command.channel_id.send_message(&ctx.http, |message| {
-                        message.content(url);
+                            // Interaction has already been responded to, we either need to edit the response, send a followup, error, or do nothing
+                            // depending on the fallback method specified
+                            match command_response.fallback {
+                                ResponseFallbackMethod::Edit => {
+                                    let api_span = slash_command_tx.start_child("discord.api", "edit slash command response");
+                                    if let Err(why) = command.edit_original_interaction_response(&ctx.http, |mut message| {
+                                        // Clone component_response so we can use it in the closure without moving the original data
+                                        let command_response = command_response.clone();
+                                        if command_response.embed.is_some() {
+                                            message = message.set_embed(command_response.embed.unwrap());
+                                        };
+            
+                                        if command_response.components.is_some() {
+                                            message = message.components(|msg| {
+                                                // Copy properties across, need to do this because for some reason edit_original_interaction_response doesn't provide set_components
+                                                msg.0 = command_response.components.unwrap().0;
+                                                msg
+                                            });
+                                        };
+            
+                                        if command_response.content.is_some() {
+                                            message = message.content(command_response.content.unwrap());
+                                        };
+                        
+                                        message
+                                    }).await {
+                                        warn!("Cannot edit slash command response: {}", why);
+                                    };
+                                    api_span.finish();
+                                },
 
-                        if fake_embed.buttons.is_some() {
-                            message.components(fake_embed_to_buttons!(fake_embed));
+                                ResponseFallbackMethod::Followup => {
+                                    let followup_span = slash_command_tx.start_child("discord.api", "send followup");
+                                    if let Err(why) = command.channel_id.send_message(&ctx.http, |mut message| {
+                                        // Clone component_response so we can use it in the closure without moving the original data
+                                        let command_response = command_response.clone();
+                                        if command_response.embed.is_some() {
+                                            message = message.set_embed(command_response.embed.unwrap());
+                                        };
+            
+                                        if command_response.components.is_some() {
+                                            message = message.components(|msg| {
+                                                msg.0 = command_response.components.unwrap().0;
+                                                msg
+                                            });
+                                        };
+            
+                                        if command_response.content.is_some() {
+                                            message = message.content(command_response.content.unwrap());
+                                        };
+                        
+                                        message
+                                    }).await {
+                                        warn!("Cannot send followup to slash command: {}", why);
+                                    }
+                                    followup_span.finish();
+                                },
+
+                                ResponseFallbackMethod::Error => {
+                                    error!("Cannot respond to slash command: {}", e);
+                                },
+
+                                ResponseFallbackMethod::None => {}
+                            };
                         }
-                        message
-                    }).await {
-                        warn!("Cannot send followup to slash command: {}", why);
                     }
-                    followup_span.finish();
-                }
+
+                    _ => {
+                        warn!("Cannot respond to slash command: {}", why);
+                    }
+                };
+                slash_command_tx.finish();
             }
-            slash_command_tx.finish();
         }
 
         if let Interaction::MessageComponent(command) = interaction {
@@ -1184,7 +973,7 @@ impl EventHandler for Handler {
                 _ => Err(0),
             }.expect("Redis connection wasn't a redis connection");
 
-            let fake_embed = match search_enabled {
+            let component_response = match search_enabled {
                 true => {
                     let search = custom_id["search"].to_string().replace('"', "");
                     get_subreddit_search(subreddit, search, &mut con, command.channel_id, Some(&component_tx)).await
@@ -1194,9 +983,8 @@ impl EventHandler for Handler {
                 }
             };
 
-            drop(data_mut);
-            let fake_embed = match fake_embed {
-                Ok(embed) => embed,
+            let component_response = match component_response {
+                Ok(component_response) => component_response,
                 Err(error) => {
                     let why = format!("{:?}", error);
                     let code = rand::thread_rng().gen_range(0..10000);
@@ -1214,7 +1002,7 @@ impl EventHandler for Handler {
                         .json(&map)
                         .send()
                         .await;
-                    error_embed(&code.to_string())
+                    error_response(code.to_string())
                 }
             };
 
@@ -1222,12 +1010,27 @@ impl EventHandler for Handler {
                 let api_span = component_tx.start_child("discord.api", "send button response");
                 let to_return = command
                 .create_interaction_response(&ctx.http, |response| {
-                    let prepare_span = component_tx.start_child("discord.prepare_response", "send button response");
-                    let to_pass = fake_embed.clone();
                     response
                         .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(fake_embed_to_message!(to_pass));
-                    prepare_span.finish();
+                        .interaction_response_data(|mut message| {
+                            // Clone component_response so we can use it in the closure without moving the original data
+                            let component_response = component_response.clone();
+                            if component_response.embed.is_some() {
+                                message = message.set_embed(component_response.embed.unwrap());
+                            };
+
+                            if component_response.components.is_some() {
+                                message = message.set_components(component_response.components.unwrap());
+                            };
+
+                            if component_response.content.is_some() {
+                                message = message.content(component_response.content.unwrap());
+                            };
+
+                            message = message.ephemeral(component_response.ephemeral);
+
+                            message
+                        });
                     response
                 })
                 .await;
@@ -1235,42 +1038,81 @@ impl EventHandler for Handler {
                 to_return
             }
             {
-                if format!("{}", why) == "Interaction has already been acknowledged." {
-                    let api_span = component_tx.start_child("discord.api", "edit button response");
-                    if let Err(why) = command.edit_original_interaction_response(&ctx.http, |response| {
-                        let prepare_span = component_tx.start_child("discord.prepare_response", "edit button response");
-                        debug!("Already sent response, editing instead");
-                        let to_pass = fake_embed.clone();
-                        response.embed(fake_embed_to_embed!(to_pass));
-                        let to_pass = fake_embed.clone();
-                        response.components(fake_embed_to_buttons!(to_pass));
-                        prepare_span.finish();
-                        response
-                    }).await {
-                        warn!("Cannot edit button response: {}", why);
-                    };
-                    api_span.finish();
-                } else {
-                    warn!("Cannot respond to button press: {}", why);
-                }
-            }
+                match why {
+                    serenity::Error::Http(e) => {
+                        if format!("{}", e) == "Interaction has already been acknowledged." {
+                            debug!("Interaction already acknowledged, fallback is: {:?}", component_response.fallback);
 
-            if fake_embed.image.is_some() {
-                let url = fake_embed.image.clone().unwrap();
-                if (url.contains("imgur")  && url.contains(".gif")) || url.contains("redgifs") {
-                    let api_span = component_tx.start_child("discord.api", "send followup");
-                    if let Err(why) = command.channel_id.send_message(&ctx.http, |message| {
-                        message.content(url);
+                            // Interaction has already been responded to, we either need to edit the response, send a followup, error, or do nothing
+                            // depending on the fallback method specified
+                            match component_response.fallback {
+                                ResponseFallbackMethod::Edit => {
+                                    let api_span = component_tx.start_child("discord.api", "edit slash command response");
+                                    if let Err(why) = command.edit_original_interaction_response(&ctx.http, |mut message| {
+                                        // Clone component_response so we can use it in the closure without moving the original data
+                                        let component_response = component_response.clone();
+                                        if component_response.embed.is_some() {
+                                            message = message.set_embed(component_response.embed.unwrap());
+                                        };
+            
+                                        if component_response.components.is_some() {
+                                            message = message.components(|msg| {
+                                                msg.0 = component_response.components.unwrap().0;
+                                                msg
+                                            });
+                                        };
+            
+                                        if component_response.content.is_some() {
+                                            message = message.content(component_response.content.unwrap());
+                                        };
+                        
+                                        message
+                                    }).await {
+                                        warn!("Cannot edit slash command response: {}", why);
+                                    };
+                                    api_span.finish();
+                                },
 
-                        if fake_embed.buttons.is_some() {
-                            message.components(fake_embed_to_buttons!(fake_embed));
+                                ResponseFallbackMethod::Followup => {
+                                    let followup_span = component_tx.start_child("discord.api", "send followup");
+                                    if let Err(why) = command.channel_id.send_message(&ctx.http, |mut message| {
+                                        // Clone component_response so we can use it in the closure without moving the original data
+                                        let component_response = component_response.clone();
+                                        if component_response.embed.is_some() {
+                                            message = message.set_embed(component_response.embed.unwrap());
+                                        };
+            
+                                        if component_response.components.is_some() {
+                                            message = message.components(|msg| {
+                                                msg.0 = component_response.components.unwrap().0;
+                                                msg
+                                            });
+                                        };
+            
+                                        if component_response.content.is_some() {
+                                            message = message.content(component_response.content.unwrap());
+                                        };
+                        
+                                        message
+                                    }).await {
+                                        warn!("Cannot send followup to slash command: {}", why);
+                                    }
+                                    followup_span.finish();
+                                },
+
+                                ResponseFallbackMethod::Error => {
+                                    error!("Cannot respond to slash command: {}", e);
+                                },
+
+                                ResponseFallbackMethod::None => {}
+                            };
                         }
-                        message
-                    }).await {
-                        warn!("Cannot send followup to slash command: {}", why);
                     }
-                    api_span.finish();
-                }
+
+                    _ => {
+                        warn!("Cannot respond to slash command: {}", why);
+                    }
+                };
             }
             component_tx.finish();
         }
