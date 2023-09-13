@@ -21,7 +21,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{FindOptions};
 use serde_json::Value::Null;
 
-mod redgifs;
+mod downloaders;
 
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)

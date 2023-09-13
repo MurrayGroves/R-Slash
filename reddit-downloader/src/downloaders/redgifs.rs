@@ -2,6 +2,10 @@ use std::collections::HashMap;
 
 use tracing::{debug, info, warn, error};
 
+struct Client {
+    
+}
+
 /// Request access token from Redgifs API, returns token and expiry time from epoch
 pub async fn get_token(client: reqwest::Client, client_id: String, client_secret: String) -> Result<(String, u64), Box<dyn std::error::Error>> {
     let response = client.post("https://api.redgifs.com/v2/oauth/client")
