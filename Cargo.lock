@@ -1890,6 +1890,7 @@ dependencies = [
  "futures-util",
  "mongodb",
  "mp4",
+ "posthog",
  "redis",
  "reqwest",
  "sentry",

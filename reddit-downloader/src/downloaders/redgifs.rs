@@ -1,13 +1,30 @@
 use std::collections::HashMap;
 
 use tracing::{debug, info, warn, error};
+use anyhow::Error;
 
-struct Client {
-    
+pub struct Client {
+    path: &'static str,
+}
+
+impl Client {
+    pub fn new(path: &'static str) -> Self {
+        Self {
+            path,
+        }
+    }
+
+    pub async fn request(&self, url: &str) -> Result<String, Error> {
+        todo!();
+    }
+
+    pub async fn request_batch(&self, urls: Vec<&str>) -> Result<HashMap<String, String>, Error> {
+        todo!();
+    }
 }
 
 /// Request access token from Redgifs API, returns token and expiry time from epoch
-pub async fn get_token(client: reqwest::Client, client_id: String, client_secret: String) -> Result<(String, u64), Box<dyn std::error::Error>> {
+pub async fn get_token(client: reqwest::Client, client_id: String, client_secret: String) -> Result<(String, u64), Error> {
     let response = client.post("https://api.redgifs.com/v2/oauth/client")
         .form(&[("grant_type", "client_credentials"),
                 ("client_id", &client_id),
@@ -19,11 +36,11 @@ pub async fn get_token(client: reqwest::Client, client_id: String, client_secret
         let txt = "Failed to get token from Redgifs API, status code: ".to_owned() + &response.status().to_string();
         sentry::capture_message(&txt, sentry::Level::Warning);
         warn!("{}", txt);
-        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, txt)));
+        return Err(Error::msg(txt))?;
     }
     let response_json: serde_json::Value = response.json().await?;
-    let token = response_json["access_token"].as_str().ok_or("access_token not present in response")?.to_owned();
-    let expiry = response_json["expires_in"].as_u64().ok_or("expires_in not present in response")?;
+    let token = response_json["access_token"].as_str().ok_or(Error::msg("access_token not present in response"))?.to_owned();
+    let expiry = response_json["expires_in"].as_u64().ok_or(Error::msg("expires_in not present in response"))?;
     let expiry = chrono::Utc::now().timestamp() + expiry as i64;
     Ok((token, expiry as u64))
 }

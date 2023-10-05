@@ -30,3 +30,6 @@ shard/target/
 Kubernetes/
 
 .vscode/
+
+reddit-downloader/src/downloaders/secrets.txt
+reddit-downloader/test-data/

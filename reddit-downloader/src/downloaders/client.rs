@@ -1,37 +1,52 @@
+use std::collections::HashMap;
+use std::io::Write;
 use std::process::Command;
 
-mod redgifs;
-mod imgur;
-mod generic;
+use anyhow::Error;
+
+use super::redgifs;
+use super::imgur;
+use super::generic;
 
 
 /// Client for downloading mp4s from various sources and converting them to gifs for embedding
-struct Client {
+pub struct Client<'a> {
     redgifs: redgifs::Client,
-    imgur: imgur::Client,
+    imgur: Option<imgur::Client<'a>>,
     generic: generic::Client,
+    posthog: Option<posthog::Client>,
+    path: &'a str,
 }
 
-impl Client {
+impl <'a>Client<'a> {
     /// # Arguments
     /// * `path` - Path to the directory where the downloaded files will be stored
-    pub fn new(path: &str) -> Self {
+    /// * `imgur_client_id` - Client ID for the Imgur API, if missing then Imgur downloads will fail
+    /// * `posthog_client` - Optional Posthog client for tracking downloads and api usage
+    pub fn new(path: &'static str, imgur_client_id: Option<&'static str>, posthog_client: Option<posthog::Client>) -> Self {
         Self {
-            redgifs: redgifs::Client::new(path),
-            imgur: imgur::Client::new(path),
-            generic: generic::Client::new(path),
+            redgifs: redgifs::Client::new(&path),
+            imgur: match imgur_client_id {
+                Some(client_id) => Some(imgur::Client::new(&path, client_id)),
+                None => None,
+            },
+            generic: generic::Client::new(&path),
+            path: &path,
+            posthog: posthog_client
         }
     }
 
     /// Convert a single mp4 to a gif, and return the path to the gif
-    async fn process(&self, path: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let f = std::fs::File::open(path)?;
+    async fn process(&self, path: &str) -> Result<String, Error> {
+        let f = std::fs::File::open(format!("{}/{}", self.path, path))?;
         let size = f.metadata()?.len();
         let reader = std::io::BufReader::new(f);
         let mp4 = mp4::Mp4Reader::read_header(reader, size)?;
-        let track = mp4.tracks().next()?;
+        let track = mp4.tracks().iter().next().ok_or(Error::msg("no mp4 tracks"))?.1;
         let width = track.width();
         let height = track.height();
+
+        let path = format!("{}/{}", self.path, path);
 
         // If the video is too big, scale it down
         let scale = if width > height {
@@ -49,78 +64,58 @@ impl Client {
 
         let new_path = format!("{}.gif", path.replace(".mp4", ""));
 
-        let status = Command::new("ffmpeg")
+        let output = Command::new("ffmpeg")
+            .arg("-y")
             .arg("-i")
             .arg(path)
             .arg("-vf")
-            .arg(format!("\"fps=15{}\",split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\"", scale))
+            .arg(format!("fps=fps=15{},split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse", scale))
             .arg("-loop")
             .arg("0")
-            .arg(new_path)
-            .output()
-            .status()?;
+            .arg(&new_path)
+            .output()?;
 
-        if !status.success() {
-            return Err("ffmpeg failed: {}\n{}", status.to_string(), String::from_utf8_lossy(&status.stderr).to_string());
+        if !output.status.success() {
+            std::io::stderr().write_all(&output.stderr).unwrap();
+            Err(Error::msg(format!("ffmpeg failed: {}\n{}", output.status.to_string(), output.status)))?;
         }
 
         Ok(new_path)
     }
 
-    /// Convert a batch of mp4s to gifs, and return a map of mp4 paths to gif paths
-    async fn process_batch(&self, paths: HashMap<String, String>) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
-        let mut gifs = HashMap::new();
-
-        for (url, path) in paths {
-            gifs.insert(url, self.process(path).await?);
-        };
-
-        Ok(gifs)
-    }
-
     /// Download a single mp4 from a url, and return the path to the mp4
-    pub async fn request(&self, url: &str) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn request(&self, url: &str) -> Result<String, Error> {
         let path = if url.contains("redgifs.com") {
             self.redgifs.request(url).await?
         } else if url.contains("imgur.com") {
-            self.imgur.request(url).await?
+            match &self.imgur {
+                Some(imgur) => imgur.request(url).await?,
+                None => Err(Error::msg("Imgur client ID not set"))?,
+            }
         } else {
             self.generic.request(url).await?
         };
 
-        return self.process(path).await;
+        return self.process(&path).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn process_output_success() -> Result<(), Error> {
+        let client = Client::new("test-data".into(), None, None);
+        client.process("test.mp4").await?;
+        Ok(())
     }
 
-    /// Download a batch of mp4s from urls, and return a map of urls to mp4 paths
-    pub async fn request_batch(&self, urls: Vec<&str>) -> Result<HashMap<String, Option<String>>, Box<dyn std::error::Error>> {
-        let mut redgifs = Vec::new();
-        let mut imgur = Vec::new();
-        let mut generic = Vec::new();
-
-        for url in urls {
-            if url.contains("redgifs.com") {
-                redgifs.push(url);
-            } else if url.contains("imgur.com") {
-                imgur.push(url);
-            } else {
-                generic.push(url);
-            }
-        }
-
-        let mut paths = HashMap::new();
-
-        if !redgifs.is_empty() {
-            paths.extend(self.redgifs.request_batch(redgifs).await?.into_iter());
-        }
-        
-        if !imgur.is_empty() {
-            paths.extend(self.imgur.request_batch(imgur).await?.into_iter());
-        }
-
-        if !generic.is_empty() {
-            paths.extend(self.generic.request_batch(generic).await?.into_iter());
-        }
-
-        return self.process_batch(paths).await;
+    #[tokio::test]
+    async fn process_filename_correct() -> Result<(), Error> {
+        let client = Client::new("test-data".into(), None, None);
+        let path = client.process("test.mp4").await?;
+        assert_eq!(path, "test-data/test.gif");
+        Ok(())
     }
 }
