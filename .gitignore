@@ -31,4 +31,5 @@ Kubernetes/
 
 .vscode/
 
-reddit-downloader/
+reddit-downloader/src/downloaders/secrets.txt
+reddit-downloader/test-data/
