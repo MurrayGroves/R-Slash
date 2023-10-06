@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use anyhow::Error;
 
-pub struct Client {
-    path: &'static str,
+pub struct Client<'a> {
+    path: &'a str,
 }
 
-impl Client {
-    pub fn new(path: &'static str) -> Self {
+impl <'a>Client<'a> {
+    pub fn new(path: &'a str) -> Self {
         Self {
             path,
         }

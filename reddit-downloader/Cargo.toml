@@ -20,5 +20,6 @@ tracing-subscriber = { version = "*"}
 anyhow = { version = "*", features = ["backtrace"] }
 chrono = "*"
 mp4 = "0.14"
+console-subscriber = "*"
 
 posthog = {path = "../posthog"}

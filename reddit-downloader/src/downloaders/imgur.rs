@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Error, anyhow, Context, Result};
 
@@ -7,18 +7,19 @@ use tokio::io::AsyncWriteExt;
 
 pub struct Client<'a> {
     path: &'a str,
-    client_id: &'a str,
+    client_id: Arc<String>,
     client: reqwest::Client,
 }
 
 impl <'a>Client<'a> {
-    pub fn new(path: &'a str, client_id: &'a str) -> Self {
+    pub fn new(path: &'a str, client_id: Arc<String>) -> Self {
         Self {
             path,
-            client_id,
+            client_id: client_id,
             client: reqwest::Client::new(),
         }
     }
+    
 
     async fn request_gallery(&self, id: &str) -> Result<String, Error> {
         let response = self.client.get(&format!("https://api.imgur.com/3/gallery/{}", id))
@@ -44,6 +45,13 @@ impl <'a>Client<'a> {
     }
 
     async fn request_image(&self, id: &str) -> Result<String, Error> {
+        let gif = format!("https://i.imgur.com/{}.gif", id);
+        let head = self.client.head(&gif).send().await?;
+
+        if head.headers().get("Content-Type").ok_or(Error::msg("Failed to get content type"))?.to_str()? == "image/gif" {
+            return Ok(gif);
+        }
+
         let mp4 = format!("https://i.imgur.com/{}.mp4", id);
         let exists = self.client.head(&mp4).send().await?.status().is_success();
         if exists {
@@ -66,8 +74,8 @@ impl <'a>Client<'a> {
             self.request_image(id).await?
         };
 
-        // JPGs and PNGs dont need to be converted
-        if download_url.ends_with(".jpg") || download_url.ends_with(".png") {
+        // JPGs, PNGs and GIFs dont need to be converted
+        if download_url.ends_with(".jpg") || download_url.ends_with(".png") || download_url.ends_with(".gif") {
             return Ok(download_url);
         }
 
@@ -81,7 +89,7 @@ impl <'a>Client<'a> {
             tokio::io::copy(&mut item?.as_ref(), &mut file).await?;
         }
 
-        Ok(write_path)
+        Ok(format!("{}.mp4", id))
     }
 }
 
@@ -92,9 +100,9 @@ mod tests {
     #[tokio::test]
     async fn check_for_file_gallery() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", &client_id);
+        let client = Client::new("test-data", Arc::new(client_id));
         // Gallery that contains a GIF
-        let path = client.request("https://imgur.com/gallery/bXw2p90").await?;
+        let path = format!("test-data/{}", client.request("https://imgur.com/gallery/bXw2p90").await?);
         let file = tokio::fs::read(&path).await?;
         assert_ne!(file.len(), 0);
 
@@ -104,7 +112,7 @@ mod tests {
     #[tokio::test]
     async fn check_for_link_gallery() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", &client_id);
+        let client = Client::new("test-data", Arc::new(client_id));
         // Gallery that contains a JPG
         let path = client.request("https://imgur.com/gallery/u1tFRrk").await?;
         assert_eq!(path, "https://i.imgur.com/GUvTNyl.jpg");
@@ -115,9 +123,9 @@ mod tests {
     #[tokio::test]
     async fn check_for_file_album() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", &client_id);
+        let client = Client::new("test-data", Arc::new(client_id));
         // Album that contains a GIF
-        let path = client.request("https://imgur.com/a/iv1rtf1").await?;
+        let path = format!("test-data/{}", client.request("https://imgur.com/a/Xz70QCa").await?);
         let file = tokio::fs::read(&path).await?;
         assert_ne!(file.len(), 0);
 
@@ -127,7 +135,7 @@ mod tests {
     #[tokio::test]
     async fn check_for_link_album() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", &client_id);
+        let client = Client::new("test-data", Arc::new(client_id));
         // Album that contains a JPG
         let path = client.request("https://imgur.com/a/w6uDYLW").await?;
         assert_eq!(path, "https://i.imgur.com/LIcehKQ.jpg");
@@ -136,9 +144,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_for_link_album_gif() -> Result<(), Error> {
+        let client_id = std::env::var("IMGUR_CLIENT_ID")?;
+        let client = Client::new("test-data", Arc::new(client_id));
+        // Album that contains a JPG
+        let path = client.request("https://imgur.com/a/iv1rtf1").await?;
+        assert_eq!(path, "https://i.imgur.com/H48hDPg.gif");
+
+        Ok(())
+    }
+
+
+    #[tokio::test]
     async fn check_for_link_image() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", &client_id);
+        let client = Client::new("test-data", Arc::new(client_id));
         // Single JPG image
         let path = client.request("https://imgur.com/GUvTNyl").await?;
         assert_eq!(path, "https://i.imgur.com/GUvTNyl.jpg");
@@ -149,9 +169,9 @@ mod tests {
     #[tokio::test]
     async fn check_for_file_image() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", &client_id);
-        // Album that contains a GIF
-        let path = client.request("https://imgur.com/H48hDPg").await?;
+        let client = Client::new("test-data", Arc::new(client_id));
+        // Single GIF image
+        let path = format!("test-data/{}", client.request("https://imgur.com/K2sN8du").await?);
         let file = tokio::fs::read(&path).await?;
         assert_ne!(file.len(), 0);
 
