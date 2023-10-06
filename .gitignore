@@ -28,3 +28,7 @@ discord-roles/target/
 shard/target/
 
 Kubernetes/
+
+.vscode/
+
+reddit-downloader/
