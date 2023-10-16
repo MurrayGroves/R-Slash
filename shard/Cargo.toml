@@ -24,6 +24,7 @@ anyhow = { version = "*", features = ["backtrace"] }
 sentry = { version = "0.29.3", features = ["tracing", "anyhow", "debug-images"] }
 tracing = "*"
 tracing-subscriber = { version = "*"}
+compile-time = "*"
 
 posthog = {path = "../posthog"}
 memberships = {path = "../memberships"}

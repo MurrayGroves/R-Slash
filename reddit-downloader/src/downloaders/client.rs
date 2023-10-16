@@ -17,6 +17,7 @@ pub struct Client<'a> {
     generic: generic::Client<'a>,
     posthog: Option<posthog::Client>,
     path: &'a str,
+    cdn_url: &'a str,
 }
 
 impl <'a>Client<'a> {
@@ -24,7 +25,7 @@ impl <'a>Client<'a> {
     /// * `path` - Path to the directory where the downloaded files will be stored
     /// * `imgur_client_id` - Client ID for the Imgur API, if missing then Imgur downloads will fail
     /// * `posthog_client` - Optional Posthog client for tracking downloads and api usage
-    pub fn new(path: &'a str, imgur_client_id: Option<String>, posthog_client: Option<posthog::Client>) -> Self {
+    pub fn new(path: &'a str, imgur_client_id: Option<String>, posthog_client: Option<posthog::Client>, cdn_url: &'a str) -> Self {
         Self {
             redgifs: redgifs::Client::new(&path),
             imgur: match imgur_client_id {
@@ -33,7 +34,8 @@ impl <'a>Client<'a> {
             },
             generic: generic::Client::new(&path),
             path: &path,
-            posthog: posthog_client
+            posthog: posthog_client,
+            cdn_url: &cdn_url,
         }
     }
 
@@ -88,7 +90,7 @@ impl <'a>Client<'a> {
 
     /// Download a single mp4 from a url, and return the path to the mp4
     pub async fn request(&self, url: &str) -> Result<String, Error> {
-        let path = if url.contains("redgifs.com") {
+        let mut path = if url.contains("redgifs.com") {
             self.redgifs.request(url).await?
         } else if url.contains("imgur.com") {
             match &self.imgur {
@@ -100,11 +102,14 @@ impl <'a>Client<'a> {
         };
 
         if path.ends_with(".mp4") {
-            return self.process(&path).await.context("Processing gif");
-        } else {
-            return Ok(path);
+            path = self.process(&path).await.context("Processing gif")?;
         }
 
+        if !path.starts_with("http://") { // Local file
+            path = self.cdn_url.to_string() + &path;
+        }
+
+        Ok(path)
     }
 }
 
@@ -118,14 +123,14 @@ mod tests {
 
     #[tokio::test]
     async fn process_output_success() -> Result<(), Error> {
-        let client = Client::new("test-data".into(), None, None);
+        let client = Client::new("test-data".into(), None, None, "https://cdn.example.com");
         client.process("test.mp4").await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn process_filename_correct() -> Result<(), Error> {
-        let client = Client::new("test-data".into(), None, None);
+        let client = Client::new("test-data".into(), None, None, "https://cdn.example.com");
         let path = client.process("test.mp4").await?;
         assert_eq!(path, "test.gif");
         Ok(())
@@ -134,7 +139,7 @@ mod tests {
     #[tokio::test]
     async fn imgur_gif_image() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data".into(), Some(client_id), None);
+        let client = Client::new("test-data".into(), Some(client_id), None, "https://cdn.example.com");
 
         let path = client.request("https://imgur.com/H48hDPg").await.context("initiating request")?;
         println!("{}", path);
@@ -148,7 +153,7 @@ mod tests {
     #[tokio::test]
     async fn imgur_gif_album() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data".into(), Some(client_id), None);
+        let client = Client::new("test-data".into(), Some(client_id), None, "https://cdn.example.com");
 
         let path = client.request("https://imgur.com/a/iv1rtf1").await.context("initiating request")?;
         assert_eq!(path, "https://i.imgur.com/H48hDPg.gif");
@@ -159,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn imgur_gif_gallery() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data".into(), Some(client_id), None);
+        let client = Client::new("test-data".into(), Some(client_id), None, "https://cdn.example.com");
 
         let path = client.request("https://imgur.com/gallery/bXw2p90").await.context("initiating request")?;
         println!("{}", path);
@@ -179,7 +184,7 @@ mod tests {
         //console_subscriber::init();
 
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data".into(), Some(client_id), None);
+        let client = Client::new("test-data".into(), Some(client_id), None, "https://cdn.example.com/gifs/");
 
         let urls = vec![
             "https://imgur.com/gallery/bXw2p90",
@@ -227,7 +232,7 @@ mod tests {
 
         assert_eq!(resolved.len(), 3);
         let first_resp = resolved.get("https://imgur.com/gallery/bXw2p90").ok_or(anyhow!("No response"))?.to_string();
-        assert_eq!(first_resp, "bXw2p90.gif".to_string());
+        assert_eq!(first_resp, "https://cdn.example.com/gifs/bXw2p90.gif".to_string());
 
         let first_resp = resolved.get("https://imgur.com/a/iv1rtf1").ok_or(anyhow!("No response"))?.to_string();
         assert_eq!(first_resp, "https://i.imgur.com/H48hDPg.gif".to_string());

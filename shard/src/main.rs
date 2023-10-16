@@ -453,7 +453,7 @@ async fn get_custom_subreddit<'a, 'b>(command: &'a ApplicationCommandInteraction
 
     let web_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("Discord:RSlash:v1.0.1 (by /u/murrax2)")
+        .user_agent(format!("Discord:RSlash:{} (by /u/murrax2)", env!("CARGO_PKG_VERSION")))
         .build()?;
     let res = web_client
         .get(format!("https://www.reddit.com/r/{}.json", subreddit))
@@ -572,6 +572,7 @@ async fn info<'a>(command: &ApplicationCommandInteraction, data: &mut tokio::syn
             [Privacy Policy](https://pastebin.com/DtZvJJhG)
             [Terms & Conditions](https://pastebin.com/6c4z3uM5)", id))
             .color(0x00ff00).to_owned()
+            .footer(|f| f.text(format!("v{} compiled at {}", env!("CARGO_PKG_VERSION"), compile_time::datetime_str!())))
             .fields(vec![
                 ("Servers".to_string(), guild_count.to_string(), true),
                 ("Shard ID".to_string(), ctx.shard_id.to_string(), true),

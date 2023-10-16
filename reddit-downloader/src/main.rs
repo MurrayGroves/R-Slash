@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use tracing::{debug, info, warn, error};
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
@@ -11,11 +12,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use truncrate::*;
 
+use anyhow::anyhow;
+
 use redis::AsyncCommands;
 
 use reqwest::header::{USER_AGENT, HeaderMap};
 use std::env;
-use futures_util::TryStreamExt;
+use futures_util::{TryStreamExt, StreamExt};
 
 use mongodb::bson::{doc, Document};
 use mongodb::options::{FindOptions};
@@ -25,15 +28,16 @@ mod downloaders;
 
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
-pub enum ConfigValue {
+pub enum ConfigValue<'a> {
     U64(u64),
     Bool(bool),
     String(String),
+    DownloaderClient(downloaders::client::Client<'a>)
 }
 
 /// Stores config values required for operation of the downloader
-pub struct ConfigStruct {
-    _value: HashMap<String, ConfigValue>
+pub struct ConfigStruct<'a> {
+    _value: HashMap<String, ConfigValue<'a>>
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +61,7 @@ pub struct Post {
     url: String,
     title: String,
     /// Embed URL of the post media
-    embed_url: String,
+    embed_url: Option<String>,
     /// Name of the author of the post
     author: String,
     /// The post's unique ID
@@ -69,15 +73,20 @@ pub struct Post {
 impl From<Post> for Vec<(String, String)> {
     #[tracing::instrument]
     fn from(post: Post) -> Vec<(String, String)> {
-        vec![
+        let mut tmp = vec![
             ("score".to_string(), post.score.to_string()),
             ("url".to_string(), post.url.to_string()),
             ("title".to_string(), post.title.to_string()),
-            ("embed_url".to_string(), post.embed_url.to_string()),
             ("author".to_string(), post.author.to_string()),
             ("id".to_string(), post.id.to_string()),
             ("timestamp".to_string(), post.timestamp.to_string())
-        ]
+        ];
+
+        if post.embed_url.is_some() {
+            tmp.push(("embed_url".to_string(), post.embed_url.unwrap()));
+        };
+
+        tmp
     }
 }
 
@@ -211,22 +220,31 @@ async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: Strin
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-#[tracing::instrument(skip(con, web_client))]
-async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut OauthToken, imgur_client: String, mut after: Option<String>, pages: Option<u8>) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
-    debug!("Placeholder: {:?}", subreddit);
+#[tracing::instrument(skip(con, web_client, downloaders_client))]
+async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut OauthToken, imgur_client: String, mut after: Option<String>, pages: Option<u8>, downloaders_client: &downloaders::client::Client<'_>) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
+    debug!("Fetching subreddit: {:?}", subreddit);
 
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await?;
 
-    let mut keys = Vec::new();
     let url_base = format!("https://oauth.reddit.com/r/{}/hot.json?limit=100", subreddit);
     let mut url = String::new();
-    let mut existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query_async(con).await?;
+
+    let existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query_async(con).await?;
     debug!("Existing posts: {:?}", existing_posts);
+    
+    // Wrap data that needs to be shared between threads in Arcs
+    let existing_posts = Arc::new(existing_posts);
+    let con = Arc::new(Mutex::new(con));
+    let subreddit = Arc::new(subreddit);
+
+    // Fetch pages of posts
     for x in 0..pages.unwrap_or(10) {
         debug!("Making {}th request to reddit", x);
 
+        // If we haven't constructed the URL yet
         if url.len() == 0 {
             url = url_base.clone();
+            // If we aren't on the first page, add the after parameter to specify the last post we processed
             match &after {
                 Some(x) => {
                     url = format!("{}&after={}", url, x.clone());
@@ -235,12 +253,14 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             }
         }
 
+        // Set headers to tell Reddit who we are
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, "Discord:RSlash:v1.0.1 (by /u/murrax2)".parse()?);
+        headers.insert(USER_AGENT, format!("Discord:RSlash:v{} (by /u/murrax2)", env!("CARGO_PKG_VERSION")).parse()?);
         headers.insert("Authorization", format!("bearer {}", access_token.clone()).parse()?);
 
         debug!("{}", url);
         debug!("{:?}", headers);
+
         let res = web_client
             .get(&url)
             .headers(headers)
@@ -249,8 +269,11 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
 
         debug!("Finished request");
         debug!("Response Headers: {:?}", res.headers());
+
+        // Get current time, so we know when next to fetch this subreddit
         let last_requested = get_epoch_ms()?;
-        debug!("Got time");
+
+        // Process text response from Reddit
         let text = match res.text().await {
             Ok(x) => x,
             Err(x) => {
@@ -260,7 +283,10 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                 return Ok(after);
             }
         };
-        debug!("Matched text");
+
+        debug!("Response successfully processed as text");
+
+        // Convert text response to JSON
         let results: serde_json::Value = match serde_json::from_str(&text) {
             Ok(x) => x,
             Err(_) => {
@@ -271,6 +297,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             }
         };
 
+        // Extract the array of posts from the JSON
         let results = match results.get("data") {
             Some(x) => match x.get("children") {
                 Some(x) => match x.as_array() {
@@ -302,6 +329,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             break;
         }
 
+        // Store last post so we can resume from it next iteration
         after = match results[results.len() -1 ]["data"]["id"].as_str() {
             Some(x) => Some(x.to_string()),
             None => {
@@ -309,184 +337,148 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             }
         };
 
-        let mut posts = Vec::new();
+        let mut posts: Vec<Result<(usize, serde_json::Map<String, serde_json::Value>), anyhow::Error>> = Vec::new();
+
+        let mut count = 0;
         for post in results {
-            // If removed_by_category is present then post is removed, so skip it
-            // For imgur, get url, and replace extension with .mp4 (might not have any extension), if url has gallery in it, get url from media/oembed/thumbnail_url and replace with .mp4 again
-            // For i.redd.it just take the L and use the url
-            let post = post["data"].clone();
-            debug!("{:?} - {:?}", post["title"], post["url"]);
-            let mut url = post["url"].clone().to_string();
+            posts.push(Ok((count, post["data"].as_object().ok_or(anyhow!("Reddit response json not object"))?.to_owned())));
+            count += 1;
+        }
 
-            if post.get("removed_by_category").unwrap_or(&Null) != &Null {
-                debug!("Post removed by moderator");
-                continue;
-            }
+        let stream = futures::stream::iter(posts);
 
-            if post["author"].to_string().replace('"', "") == "[deleted]" {
-                debug!("Post removed by author");
-                continue;
-            }
+        let posts: Arc<Mutex<HashMap<usize, String>>> = Arc::new(Mutex::new(HashMap::new()));
 
-            if post["title"].to_string() == "Flipping a pancake" { // For some reason pinned images aren't marked as pinned on the api, and this one post is pinned but doesn't embed.
-                continue;
-            }
+        let ok = stream.try_for_each_concurrent(5, |result| {
+            // Clone Arcs so they can be moved into the async block and each thread gets its own reference
+            let posts = Arc::clone(&posts);
+            let existing_posts = Arc::clone(&existing_posts);
+            let con = Arc::clone(&con);
+            let subreddit = Arc::clone(&subreddit);
 
-            if !existing_posts.contains(&format!("subreddit:{}:post:{}", subreddit.clone(), &post["id"].to_string().replace('"', ""))) {
-                debug!("{}", format!("subreddit:{}:post:{}", subreddit.clone(), &post["id"].to_string().replace('"', "")));
-                url = url.replace(".gifv", ".gif");
+            async move {
+                let (i, post) = result;
+                debug!("{:?} - {:?}", post["title"], post["url"]);
 
-                if url.contains("imgur") && !url.contains(".gif") && !url.contains(".png") && !url.contains(".jpg") && !url.contains(".jpeg") {
-                    let auth = format!("Client-ID {}", imgur_client);
-                    let id = match url.split("/").last() {
-                        Some(x) => match x.split(".").next() {
-                            Some(x) => match x.split("?").next() {
-                                Some(x) => x.replace('"', ""),
-                                None => {
-                                    let txt = format!("Failed to get id from imgur url: {}", url);
-                                    warn!("{}", txt);
-                                    sentry::capture_message(&txt, sentry::Level::Warning);
-                                    continue;
-                                }
-                            }
-                            None => {
-                                let txt = format!("Failed to get id from imgur url: {}", url);
-                                warn!("{}", txt);
-                                sentry::capture_message(&txt, sentry::Level::Warning);
-                                continue;
-                            }
-                        },
-                        None => {
-                            let txt = format!("Failed to get id from imgur url: {}", url);
-                            warn!("{}", txt);
-                            sentry::capture_message(&txt, sentry::Level::Warning);
-                            continue;
-                        }
-                    };
-
-                    let res = match web_client
-                        .get(format!("https://api.imgur.com/3/image/{}", id))
-                        .header("Authorization", auth)
-                        .send()
-                        .await {
-                            Ok(x) => x,
-                            Err(y) => {
-                                let txt = format!("Failed to request from imgur: {}", y);
-                                error!("{}", txt);
-                                sentry::capture_message(&txt, sentry::Level::Error);
-                                continue;
-                            }
-                    };
-
-                    if res.status() != 200 {
-                        debug!("{} while fetching from imgur", res.status());
-                        continue
-                    }
-                    let results: serde_json::Value = res.json().await.unwrap();
-                    url = match results.get("data") {
-                        Some(x) => match x.get("link") {
-                            Some(x) => x.to_string(),
-                            None => {
-                                let txt = format!("Failed to get field `link` from imgur response: {}", results);
-                                warn!("{}", txt);
-                                sentry::capture_message(&txt, sentry::Level::Warning);
-                                continue;
-                            }
-                        },
-                        None => {
-                            let txt = format!("Failed to get field `data` from imgur response: {}", results);
-                            warn!("{}", txt);
-                            sentry::capture_message(&txt, sentry::Level::Warning);
-                            continue;
-                        }
-                    };
-                } else if url.contains("i.redd.it") == false  && url.contains(".gif") == false  && url.contains(".jpg") == false  && url.contains(".png") == false  && url.contains("redgif") == false{
-                    // URL is not embeddable, and we do not have the ability to turn it into one.
-                    debug!("{} is not embeddable", url);
-                    continue;
+                // If the post has been removed by a moderator, skip it
+                if post.get("removed_by_category").unwrap_or(&Null) != &Null {
+                    debug!("Post removed by moderator");
+                    return Ok(());
+                }
+    
+                // If the post has been removed by the author, skip it
+                if post["author"].to_string().replace('"', "") == "[deleted]" {
+                    debug!("Post removed by author");
+                    return Ok(());
+                }
+    
+                if post["title"].to_string() == "Flipping a pancake" { // For some reason pinned images aren't marked as pinned on the api, and this one post is pinned but doesn't embed.
+                    return Ok(());
                 }
 
-            } else {
-                debug!("Post is in cache, not fetching URL");
-                continue;
-            }
+                // Redis key for this post
+                let key: String = format!("subreddit:{}:post:{}", post["subreddit"], &post["id"].to_string().replace('"', ""));
 
-            url = url.replace('"', "");
-            match web_client
-                .head(&url)
-                .send()
-                .await {
-                Ok(x) => {
-                    let length = x.content_length().unwrap_or(0);
-                    if length > 15000000 {
-                        debug!("Content bigger than 15MB, skipping."); // Otherwise Discord takes too long to load the content
-                        continue;
+                let exists = existing_posts.contains(&key);
+
+                // Fetch URL if this is a new post
+                let url = if exists {
+                    None
+                } else {
+                    let url = post["url"].to_string().replace('"', "");
+
+                    // If URL is already embeddable, no further processing is needed
+                    if url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg") {
+                        Some(url)
+                    } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") {
+                        Some(downloaders_client.request(&url).await?)
+                    } else {
+                        debug!("URL is not embeddable, and we do not have the ability to turn it into one.");
+                        return Ok(());
                     }
-                },
-                Err(y) => {
-                    warn!("{}", y);
-                    continue;
+                };
+
+                let timestamp = post["created_utc"].as_f64().unwrap() as u64;
+                let mut title = post["title"].to_string().replace('"', "");
+                // Truncate title length to 256 chars (Discord embed title limit)
+                title = (*title.as_str()).truncate_to_boundary(256).to_string();
+
+
+                let post_object = Post {
+                    score: post["score"].as_i64().unwrap_or(0),
+                    url: format!("https://reddit.com{}", post["permalink"].to_string().replace('"', "")),
+                    title: title,
+                    embed_url: url,
+                    author: post["author"].to_string().replace('"', ""),
+                    id: post["id"].to_string().replace('"', ""),
+                    timestamp: timestamp,
+                };
+
+                // Push post to Redis
+                let value = Vec::from(post_object);
+
+                let mut con = con.lock().await;
+                con.hset_multiple(&key, &value).await?;
+
+                // Subreddit has not been downloaded before, meaning we should try get posts into Redis ASAP to minimise the time before the user gets a response
+                if existing_posts.len() == 0 {
+                    // Push post to list of posts
+                    con.rpush(format!("subreddit:{}:posts", subreddit), &key).await?;
                 }
+                
+                // Push post to thread-safe hashmap
+                let mut posts = posts.lock().await;
+                posts.insert(i, key);
+
+                Ok(())
             }
-
-
-
-            debug!("Post Score: {:?}", post["score"]);
-
-            let timestamp = post["created_utc"].as_f64().unwrap() as u64;
-
-            let mut post_object = Post {
-                score: post["score"].as_i64().unwrap_or(0),
-                url: format!("https://reddit.com{}", post["permalink"].to_string().replace('"', "")),
-                title: post["title"].to_string().replace('"', ""),
-                embed_url: url.to_string().replace('"', ""),
-                author: post["author"].to_string().replace('"', ""),
-                id: post["id"].to_string().replace('"', ""),
-                timestamp: timestamp,
-            };
-
-            post_object.title = (*post_object.title.as_str()).truncate_to_boundary(256).to_string();
-            posts.push(post_object);
         }
+        ).await;
 
-        let mut new_post_count = 0;
-        for post in posts.clone() {
-            let key = format!("subreddit:{}:post:{}", subreddit.clone(), post.id.replace('"', ""));
-            keys.push(key.clone());
-            let value = Vec::from(post);
-            con.hset_multiple(key, &value).await?;
-            new_post_count += 1;
-        }
-
-        let mut old_posts = Vec::new();
-        for post in existing_posts.clone() {
-            if keys.contains(&post) {
-                continue;
-            } else {
-                old_posts.push(post);
+        // Report any errors that happeend while processing posts
+        match ok {
+            Ok(_) => {},
+            Err(x) => {
+                let txt = format!("Error occurred while processing posts: {}\nProcessed posts: {:?}\n All posts: {:?}", x, posts, results);
+                warn!("{}", txt);
+                sentry::capture_message(&txt, sentry::Level::Warning);
             }
         }
 
-        debug!("Old Posts Keys Length: {:?}", old_posts.len());
-        debug!("New Posts Keys Length: {:?}", keys.len());
-        debug!("New Posts Found: {:?}", new_post_count);
-        old_posts.append(&mut keys);
-
-        let keys = old_posts;
-        existing_posts = keys.clone();
-
-        debug!("Total Keys Length: {}", keys.len());
-        if keys.len() != 0 {
-            con.del(format!("subreddit:{}:posts", subreddit)).await?;
-            con.lpush(format!("subreddit:{}:posts", subreddit), keys.clone()).await?;
+        // Create new list of all posts in 
+        let mut keys = Vec::new();
+        let posts = match Arc::try_unwrap(posts) {
+            Ok(x) => x,
+            Err(_) => {
+                let txt = format!("Failed to unwrap Arc");
+                warn!("{}", txt);
+                sentry::capture_message(&txt, sentry::Level::Warning);
+                return Ok(after);
+            }
+        }.into_inner();
+        for index in posts.keys().sorted() {
+            keys.push(posts[index].clone());
         }
+
+
+        // Push existing posts to the end of the list so they are not removed from the cache
+        for key in &*existing_posts {
+            if !keys.contains(&key) {
+                keys.push(key.to_string());
+            }
+        }
+
+        let mut con = con.lock().await;
+
+        con.del(format!("subreddit:{}:posts", subreddit)).await?;
+        con.rpush(format!("subreddit:{}:posts", subreddit), keys.clone()).await?;
 
         let time_since_request = get_epoch_ms()? - last_requested;
         if time_since_request < 2000 {
             debug!("Waiting {:?}ms", 2000 - time_since_request);
             sleep(Duration::from_millis(2000 - time_since_request)).await; // Reddit rate limit is 30 requests per minute, so must wait at least 2 seconds between requests
         }
-    }
+    }   
 
     return Ok(after);
 }
@@ -578,7 +570,7 @@ impl OauthToken {
 /// # Arguments
 /// ## data
 /// A thread-safe wrapper of the [Config](ConfigStruct)
-async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result<(), anyhow::Error>{
+async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Result<(), anyhow::Error>{
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     let mut con = db_client.get_async_connection().await.expect("Can't connect to redis");
 
@@ -616,6 +608,11 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
     client_options.app_name = Some("Downloader".to_string());
 
     let mongodb_client = mongodb::Client::with_options(client_options).expect("failed to connect to mongodb");
+
+    let imgur_client_id = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
+
+    // TODO - Create a client for downloader
+    let downloaders_client = downloaders::client::Client::new("/data/media", Some(imgur_client_id), None, "https://rslash.b-cdn.net/gifs/");
 
     if do_custom == "true".to_string() {
         let mut subreddits: HashMap<String, SubredditState> = HashMap::new();
@@ -694,7 +691,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
                 let fetched_up_to = &subreddit_state.fetched_up_to;
                 subreddit_state.fetched_up_to = get_subreddit(
                     subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(),
-                    None, &mut gfycat_token, imgur_client.clone(), fetched_up_to.clone(), Some(1)).await?;
+                    None, &mut gfycat_token, imgur_client.clone(), fetched_up_to.clone(), Some(1), &downloaders_client).await?;
 
                 subreddit_state.last_fetched = Some(get_epoch_ms()?);
                 subreddit_state.pages_left -= 1;
@@ -747,7 +744,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
             let last_updated = con.get(&subreddit).await.unwrap_or(0u64);
             debug!("{:?} was last updated at {:?}", &subreddit, last_updated);
 
-            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone(), None, None).await?;
+            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone(), None, None, &downloaders_client).await?;
             let _:() = con.set(&subreddit, get_epoch_ms()?).await.unwrap();
             if !index_exists(&mut con, format!("idx:{}", subreddit)).await {
                 create_index(&mut con, format!("idx:{}", subreddit), format!("subreddit:{}:post:", subreddit)).await?;
