@@ -221,7 +221,7 @@ async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: Strin
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
 #[tracing::instrument(skip(con, web_client, downloaders_client))]
-async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, gfycat_token: &mut OauthToken, imgur_client: String, mut after: Option<String>, pages: Option<u8>, downloaders_client: &downloaders::client::Client<'_>) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
+async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, imgur_client: String, mut after: Option<String>, pages: Option<u8>, downloaders_client: &downloaders::client::Client<'_>) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
     debug!("Fetching subreddit: {:?}", subreddit);
 
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await?;
@@ -519,51 +519,6 @@ async fn create_index(con: &mut redis::aio::Connection, index: String, prefix: S
         .query_async(con).await?)
 }
 
-#[derive(Debug)]
-struct OauthToken {
-    token: String,
-    expires_at: u64,
-    client_id: String,
-    client_secret: String,
-    url: String,
-}
-
-impl OauthToken {
-    #[tracing::instrument]
-    async fn new(client_id: String, client_secret: String, url: String) -> Result<OauthToken, Box<dyn std::error::Error>> {
-        let web_client = reqwest::Client::new();
-
-        let mut post_data = HashMap::new();
-        post_data.insert("client_id", client_id.clone());
-        post_data.insert("client_secret", client_secret.clone());
-        post_data.insert("grant_type", "client_credentials".to_string());
-
-        let res = web_client
-        .post(&url)
-        .json(&post_data)
-        .send()
-        .await?;
-
-        let results: serde_json::Value = res.json().await?;
-
-        Ok(OauthToken {
-            token: results["access_token"].to_string(),
-            expires_at: results["expires_in"].as_u64().unwrap() + get_epoch_ms()?,
-            client_id,
-            client_secret,
-            url,
-        })
-    }
-
-    #[tracing::instrument]
-    async fn refresh(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let new = OauthToken::new(self.client_id.clone(), self.client_secret.clone(), self.url.clone()).await?;
-        self.token = new.token;
-        self.expires_at = new.expires_at;
-
-        Ok(())
-    }
-}
 
 /// Start the downloading loop
 ///
@@ -595,15 +550,6 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
     let imgur_client = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
     let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
 
-    // GFYCAT is dead so no longer needed, but still need to provide a token for the rest of the code.
-    let mut gfycat_token = OauthToken {
-        token: "".to_string(),
-        expires_at: 0,
-        client_id: gfycat_client.clone(),
-        client_secret: gfycat_secret.clone(),
-        url: "https://api.gfycat.com/v1/oauth/token".to_string(),
-    }; //{OauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await.expect("Failed to get gfycat token");
-
     let mut client_options = mongodb::options::ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.expect("Failed to parse client options");
     client_options.app_name = Some("Downloader".to_string());
 
@@ -611,7 +557,6 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
 
     let imgur_client_id = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
 
-    // TODO - Create a client for downloader
     let downloaders_client = downloaders::client::Client::new("/data/media", Some(imgur_client_id), None, "https://rslash.b-cdn.net/gifs/");
 
     if do_custom == "true".to_string() {
@@ -687,11 +632,11 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
                 }
 
                 // Fetch a page and update state
-                let mut subreddit_state = subreddits.get_mut(&subreddit).unwrap();
+                let subreddit_state = subreddits.get_mut(&subreddit).unwrap();
                 let fetched_up_to = &subreddit_state.fetched_up_to;
                 subreddit_state.fetched_up_to = get_subreddit(
                     subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(),
-                    None, &mut gfycat_token, imgur_client.clone(), fetched_up_to.clone(), Some(1), &downloaders_client).await?;
+                    None, imgur_client.clone(), fetched_up_to.clone(), Some(1), &downloaders_client).await?;
 
                 subreddit_state.last_fetched = Some(get_epoch_ms()?);
                 subreddit_state.pages_left -= 1;
@@ -744,7 +689,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
             let last_updated = con.get(&subreddit).await.unwrap_or(0u64);
             debug!("{:?} was last updated at {:?}", &subreddit, last_updated);
 
-            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, &mut gfycat_token, imgur_client.clone(), None, None, &downloaders_client).await?;
+            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, imgur_client.clone(), None, None, &downloaders_client).await?;
             let _:() = con.set(&subreddit, get_epoch_ms()?).await.unwrap();
             if !index_exists(&mut con, format!("idx:{}", subreddit)).await {
                 create_index(&mut con, format!("idx:{}", subreddit), format!("subreddit:{}:post:", subreddit)).await?;
