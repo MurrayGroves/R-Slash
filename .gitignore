@@ -28,3 +28,11 @@ discord-roles/target/
 shard/target/
 
 Kubernetes/
+<<<<<<< Updated upstream
+=======
+
+reddit-downloader/src/downloaders/secrets.txt
+reddit-downloader/test-data
+
+.vscode/
+>>>>>>> Stashed changes

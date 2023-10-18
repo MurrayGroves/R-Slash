@@ -1372,7 +1372,16 @@ async fn main() {
 
     let thread = tokio::spawn(async move {
         tracing_subscriber::Registry::default()
-        .with(sentry::integrations::tracing::layer().event_filter(|md| {
+        .with(sentry::integrations::tracing::layer().span_filter(
+            |md| {
+                if md.name().contains("recv") || md.name().contains("recv_event") || md.name().contains("dispatch") {
+                    return false
+                } else {
+                    return true;
+                }
+    
+            }
+        ).event_filter(|md| {
             let level_filter = match md.level() {
                 &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
                 &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
@@ -1397,23 +1406,15 @@ async fn main() {
     
         let bot_name: std::borrow::Cow<str>  = match &application_id {
             278550142356029441 => "booty-bot".into(),
+            291255986742624256 => "testing".into(),
             _ => "r-slash".into()
         };
 
         let _guard = sentry::init(("http://9ebbf7835f99405ebfca243cf5263782@100.67.30.19:9000/3", sentry::ClientOptions {
             release: sentry::release_name!(),
             traces_sample_rate: 1.0,
-            before_send: Some(Arc::new(move |mut event| {
-                if let Some(msg) = &event.transaction {
-                    if msg.contains("serenity") {
-                        return None;
-                    }
-                };
-
-                event.environment = Some(bot_name.clone());
-                event.server_name = Some(shard_id.to_string().into());
-                Some(event)
-            })),
+            environment: Some(bot_name.clone()),
+            server_name: Some(shard_id.to_string().into()),
             ..Default::default()
         }));
     
