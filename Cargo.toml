@@ -9,7 +9,8 @@ members = [
     "discord-roles",
     "k8s-interface",
     "posthog",
-    "rslash_types"
+    "rslash_types",
+    "badge-server"
 ]
 
 [profile.release]
