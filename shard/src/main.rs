@@ -1,3 +1,4 @@
+use tokio::runtime::Handle;
 use tracing::{debug, info, warn, error};
 use rand::Rng;
 use serde_json::json;
@@ -46,6 +47,7 @@ use anyhow::anyhow;
 
 use memberships::*;
 use rslash_types::*;
+use connection_pooler::ResourceManager;
 
 
 #[derive(Debug, Clone)]
@@ -1369,6 +1371,13 @@ async fn main() {
     {
         let mut data = client.data.write().await;
         data.insert::<ConfigStruct>(contents);
+        data.insert::<ResourceManager<mongodb::Client>>(ResourceManager::<mongodb::Client>::new(|| {
+            let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
+            let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
+            let mut client_options = Handle::current().block_on(ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false")).unwrap();
+            client_options.app_name = Some(format!("Shard {}", shard_id));
+            mongodb::Client::with_options(client_options).unwrap()
+        }));
     }
 
     let shard_manager = client.shard_manager.clone();

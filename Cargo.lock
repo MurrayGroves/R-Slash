@@ -330,8 +330,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "connection-pooler"
+name = "connection_pooler"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serenity 0.11.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tracing",
+]
 
 [[package]]
 name = "convert_case"
@@ -658,6 +663,7 @@ name = "discord-shard"
 version = "1.0.3"
 dependencies = [
  "anyhow",
+ "connection_pooler",
  "env_logger",
  "futures",
  "futures-util",

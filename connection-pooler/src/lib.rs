@@ -1,11 +1,10 @@
+use tracing::warn;
 use std::sync::{Arc, Mutex};
-use std::cell::RefCell;
 use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 struct LockedResource<T> {
-    lock: Arc<Mutex<()>>,
     last_accessed: Arc<Mutex<Instant>>,
     data: Arc<Mutex<T>>,
 }
@@ -13,43 +12,48 @@ struct LockedResource<T> {
 impl <T> LockedResource<T> {
     fn new<M: Fn() -> T + ?Sized>(maker: Arc<Box<M>>) -> Self {
         Self {
-            lock: Arc::new(Mutex::new(())),
             last_accessed: Arc::new(Mutex::new(Instant::now())),
             data: Arc::new(Mutex::new(maker())),
         }
     }
 }
 
-struct ResourceManager<T> {
+#[derive(Clone)]
+pub struct ResourceManager<T> {
     resources: Arc<Mutex<Vec<Arc<LockedResource<T>>>>>,
     maker: Arc<Box<dyn Fn() -> T + Send + Sync>>,
 }
 
+
 impl <T> ResourceManager<T> where T: Send + Sync + 'static {
-    fn new<M : Fn() -> T + Send + Sync + 'static>(maker: M) -> Arc<Self> {
+    pub fn clone(&self) -> Self {
+        Self {
+            resources: self.resources.clone(),
+            maker: self.maker.clone(),
+        }
+    }
+
+    pub fn new<M : Fn() -> T + Send + Sync + 'static>(maker: M) -> Self {
         let new = Self {
             resources: Arc::new(Mutex::new(Vec::new())),
             maker: Arc::new(Box::new(maker)),
         };
 
         // Spawn a background thread for cleanup
-        let resource_manager = Arc::new(new);
-        let to_return = resource_manager.clone();
+        let resource_manager = new.clone();
         thread::spawn(move || {
             loop {
-                thread::sleep(Duration::from_secs(5)); // Adjust the interval as needed
+                thread::sleep(Duration::from_secs(60)); // Adjust the interval as needed
 
                 // Remove locks that have been held for too long
                 resource_manager.remove_unavailable();
-                let lock = resource_manager.resources.lock().expect("Failed to lock");
-                println!("Removed deadlocks, new resources length: {}", lock.len());
             }
         });
 
-        to_return
+        new
     }
 
-    fn get_available_resource(&self) -> Arc<LockedResource<T>> {
+    pub fn get_available_resource(&self) -> Arc<Mutex<T>> {
         self.remove_unavailable();
 
         let resources = self.resources.lock().expect("Failed to lock resources");
@@ -75,15 +79,18 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static {
             }
         };
 
-        available
+        *available.last_accessed.lock().unwrap() = Instant::now();
+
+        available.data.clone()
 
     }
 
     fn remove_unavailable(&self) {
         let mut resources = self.resources.lock().unwrap();
         resources.retain(|resource| {
-            if resource.last_accessed.lock().unwrap().elapsed() > Duration::from_secs(10) {
-                println!("Removing lock");
+            let locked = resource.data.try_lock().is_err();
+            if resource.last_accessed.lock().unwrap().elapsed() > Duration::from_secs(120)  && locked{
+                warn!("Removing unavailable resource");
                 false // Don't retain the lock
             } else {
                 true // Retain the lock
@@ -96,4 +103,8 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static {
         resources.push(resource);
     }
 
+}
+
+impl <T: 'static + Send + Sync> serenity::prelude::TypeMapKey for ResourceManager<T> {
+    type Value = ResourceManager<T>;
 }
