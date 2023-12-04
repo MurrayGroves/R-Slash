@@ -10,7 +10,8 @@ members = [
     "k8s-interface",
     "posthog",
     "rslash_types",
-    "badge-server"
+    "badge-server",
+    "connection-pooler",
 ]
 
 [profile.release]

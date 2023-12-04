@@ -23,7 +23,7 @@ use serenity::model::application::interaction::application_command::ApplicationC
 use serenity::model::application::interaction::InteractionResponseType;
 use serenity::model::application::interaction::Interaction;
 
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, timeout};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use std::fs::File;
@@ -1187,14 +1187,20 @@ impl EventHandler for Handler {
             let fake_embed = match search_enabled {
                 true => {
                     let search = custom_id["search"].to_string().replace('"', "");
-                    get_subreddit_search(subreddit, search, &mut con, command.channel_id, Some(&component_tx)).await
+                    match timeout(Duration::from_secs(30), get_subreddit_search(subreddit, search, &mut con, command.channel_id, Some(&component_tx))).await {
+                        Ok(x) => x,
+                        Err(x) => Err(anyhow!("Timeout getting search results: {:?}", x))
+                    }
                 },
                 false => {
-                    get_subreddit(subreddit, &mut con, command.channel_id, Some(&component_tx)).await
+                    match timeout(Duration::from_secs(30), get_subreddit(subreddit, &mut con, command.channel_id, Some(&component_tx))).await {
+                        Ok(x) => x,
+                        Err(x) => Err(anyhow!("Timeout getting subreddit: {:?}", x))
+                    }
                 }
             };
 
-            drop(data_mut);
+            drop(data);
             let fake_embed = match fake_embed {
                 Ok(embed) => embed,
                 Err(error) => {
@@ -1202,6 +1208,7 @@ impl EventHandler for Handler {
                     let code = rand::thread_rng().gen_range(0..10000);
                     error!("Error code {} getting command response: {:?}", code, why);
 
+                    let mut data = ctx.data.write().await;
                     let data_mut = data.get_mut::<ConfigStruct>().expect("Couldn't get config struct");
 
                     capture_event(data_mut, "command_error", Some(&component_tx), Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
