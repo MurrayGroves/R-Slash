@@ -84,7 +84,7 @@ fn get_epoch_ms() -> u64 {
 }
 
 #[instrument(skip(data, parent_tx))]
-async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, parent_tx: Option<&sentry::TransactionOrSpan>, properties: Option<HashMap<&str, String>>, distinct_id: &str) {
+async fn capture_event(data: Arc<RwLock<TypeMap>>, event: &str, parent_tx: Option<&sentry::TransactionOrSpan>, properties: Option<HashMap<&str, String>>, distinct_id: &str) {
     let span: sentry::TransactionOrSpan = match parent_tx {
         Some(parent) => parent.start_child("analytics", "capture_event").into(),
         None => {
@@ -93,10 +93,9 @@ async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, par
         }
     };
 
-    let posthog_client = match data.get_mut("posthog_client").unwrap() {
-        ConfigValue::PosthogClient(client) => Ok(client),
-        _ => Err("posthog_client is not a PosthogClient"),
-    }.unwrap();
+    let posthog_manager = data.read().await.get::<ResourceManager<posthog::Client>>().unwrap().clone();
+    let client_mutex = posthog_manager.get_available_resource();
+    let client = client_mutex.lock().unwrap();
 
     let mut properties_map = serde_json::Map::new();
     if properties.is_some() {
@@ -105,14 +104,16 @@ async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, par
         }
     }
 
-    debug!("{:?}", posthog_client.capture(event, properties_map, distinct_id).await.unwrap().text().await.unwrap());
+    debug!("{:?}", client.capture(event, properties_map, distinct_id).await.unwrap().text().await.unwrap());
     span.finish();
 }
 
 
 #[instrument(skip(command, data, ctx, tx))]
-async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockReadGuard<'_, TypeMap>, ctx: &Context, tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
-    let config = data.get::<ConfigStruct>().unwrap();
+async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: Arc<RwLock<TypeMap>>, ctx: &Context, tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+    let data_read = data.read().await;
+
+    let config = data_read.get::<ConfigStruct>().unwrap();
 
     let options = &command.data.options;
     debug!("Command Options: {:?}", options);
@@ -122,14 +123,10 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
     let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
 
     let search_enabled = options.len() > 1;
-    capture_event(data_mut, "subreddit_cmd", Some(tx),
+    capture_event(data.clone(), "subreddit_cmd", Some(tx),
                     Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "false".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())
                 ).await;
 
-    let mut con = match data_mut.get_mut("redis_connection").unwrap() {
-        ConfigValue::REDIS(db) => Ok(db),
-        _ => Err(anyhow!("redis_connection is not a redis connection")),
-    }?;
 
     if config.nsfw_subreddits.contains(&subreddit) {
         if let Some(channel) = command.channel_id.to_channel_cached(&ctx.cache) {
@@ -150,6 +147,10 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
             }
         }
     }
+
+    let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
+    let con_mutex = redis_manager.get_available_resource();
+    let mut con = con_mutex.lock().unwrap();
 
     if options.len() > 1 {
         let search = options[1].value.as_ref().unwrap().as_str().unwrap().to_string();
@@ -392,106 +393,6 @@ fn error_embed(code: &str) -> FakeEmbed {
 }
 
 
-async fn update_guild_commands(guild_id: GuildId, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) {
-    let mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
-        ConfigValue::MONGODB(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
-
-    let db = mongodb_client.database("config");
-    let coll = db.collection::<Document>("settings");
-
-    let filter = doc! {"id": "subreddit_list".to_string()};
-    let find_options = FindOptions::builder().build();
-    let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
-
-    let doc = cursor.try_next().await.unwrap().unwrap();
-    let sfw_subreddits: Vec<&str> = doc.get_array("sfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
-    let nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
-
-
-    let guild_config = fetch_guild_config(guild_id, data).await;
-    let nsfw = guild_config.get_str("nsfw").unwrap();
-
-    let _ = guild_id.create_application_command(&ctx.http, |command| {
-    command
-        .name("get")
-        .description("Get a post from a specified subreddit");
-
-    command.create_option(|option| {
-        option.name("subreddit")
-            .description("The subreddit to get a post from")
-            .required(true)
-            .kind(CommandOptionType::String);
-
-        if nsfw == "nsfw" || nsfw == "both" {
-            for subreddit in &nsfw_subreddits {
-                option.add_string_choice(subreddit, subreddit);
-            }
-        }
-        if nsfw == "non-nsfw" || nsfw == "both" {
-            for subreddit in &sfw_subreddits {
-                option.add_string_choice(subreddit, subreddit);
-            }
-        }
-
-        return option;
-    });
-
-    return command;
-    }).await.expect("Failed to register slash commands");
-
-}
-
-
-/// Fetches a guild's configuration, creating it if it doesn't exist.
-async fn fetch_guild_config(guild_id: GuildId, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>) -> Document {
-    let mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
-        ConfigValue::MONGODB(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
-
-    let db = mongodb_client.database("config");
-    let coll = db.collection::<Document>("servers");
-
-    let filter = doc! {"id": guild_id.0.to_string()};
-    let find_options = FindOptions::builder().build();
-    let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
-
-    return match cursor.try_next().await.unwrap() {
-        Some(doc) => doc, // If guild configuration does exist
-        None => { // If guild configuration doesn't exist
-            let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
-
-            // Check if booty bot or r slash
-            let nsfw = match application_id {
-                278550142356029441 => "nsfw",
-                _ => "non-nsfw"
-            };
-
-            let server = doc! {
-                "id": guild_id.0.to_string(),
-                "nsfw": nsfw,
-            };
-
-            coll.insert_one(server, None).await.unwrap();
-            let mut cursor = coll.find(filter, find_options).await.unwrap();
-            cursor.try_next().await.unwrap().unwrap()
-        }
-    };
-}
-
-async fn set_guild_config(old_config: Document, config: Document, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>) {
-    let mongodb_client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
-        ConfigValue::MONGODB(db) => Ok(db),
-        _ => Err(0),
-    }.unwrap();
-
-    let db = mongodb_client.database("config");
-    let coll = db.collection::<Document>("servers");
-    coll.replace_one(old_config, config, None).await.unwrap();
-}
-
 #[instrument(skip(command, data, _ctx, parent_tx))]
 async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, _ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
     let data_mut = data.get_mut::<ConfigStruct>().unwrap();
@@ -718,56 +619,6 @@ async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::R
     })
 }
 
-
-async fn configure_server(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context) -> Result<FakeEmbed, anyhow::Error> {
-    debug!("{:?}", command.data.options);
-
-    let mut embed = FakeEmbed {
-        title: None,
-        description: None,
-        author: None,
-        url: None,
-        color: None,
-        footer: None,
-        image: None,
-        thumbnail: None,
-        timestamp: None,
-        fields: None,
-        buttons: None
-    };
-
-    match command.data.options[0].name.as_str() {
-        "commands" => {
-            match command.data.options[0].options[0].name.as_str() {
-                "nsfw" => {
-                    let mut guild = fetch_guild_config(command.guild_id.unwrap(), data).await;
-                    let old_config = guild.clone();
-                    let nsfw = command.data.options[0].options[0].options[0].value.clone().unwrap().to_string().replace('"', "");
-                    guild.insert("nsfw", &nsfw);
-
-                    set_guild_config(old_config, guild, data).await;
-
-
-                    embed.title = Some("Server Configuration Changed".to_string());
-                    embed.description = Some(format!("The server's nsfw configuration has been changed to {}", &nsfw));
-                    embed.color = Some(Colour::from_rgb(0, 255, 0));
-
-                    update_guild_commands(command.guild_id.unwrap(), data, ctx).await;
-                },
-                _ => {
-                    embed = error_embed("11615");
-                }
-
-            };
-        },
-        _ => {
-            embed = error_embed("171651");
-        }
-    }
-
-
-    return Ok(embed);
-}
 
 macro_rules! fake_embed_to_embed {
     ($a:expr) => {
