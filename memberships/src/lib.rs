@@ -23,17 +23,6 @@ pub struct Client<'a> {
     client: &'a mut mongodb::Client,
 }
 
-impl <'a> From<&'a mut tokio::sync::RwLockWriteGuard<'_, serenity::prelude::TypeMap>> for Client<'a> {
-    fn from(data: &'a mut tokio::sync::RwLockWriteGuard<'_, serenity::prelude::TypeMap>) -> Client<'a> {
-        let mongodb_client: &mut mongodb::Client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
-            ConfigValue::MONGODB(db) => Ok(db),
-            _ => Err(0),
-        }.unwrap();
-        Client {
-            client: mongodb_client,
-        }
-    }
-}
 
 impl <'a> From<&'a mut mongodb::Client> for Client<'a> {
     fn from(client: &'a mut mongodb::Client) -> Client<'a> {

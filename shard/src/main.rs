@@ -111,15 +111,8 @@ async fn capture_event(data: &mut HashMap<String, ConfigValue>, event: &str, par
 
 
 #[instrument(skip(command, data, ctx, tx))]
-async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context, tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
-    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-
-    let nsfw_subreddits = match data_mut.get_mut("nsfw_subreddits").unwrap() {
-        ConfigValue::SubredditList(list) => Ok(list),
-        _ => Err(anyhow!("nsfw_subreddits is not a list")),
-    }?;
-
-    let nsfw_subreddits = nsfw_subreddits.clone();
+async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockReadGuard<'_, TypeMap>, ctx: &Context, tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+    let config = data.get::<ConfigStruct>().unwrap();
 
     let options = &command.data.options;
     debug!("Command Options: {:?}", options);
@@ -138,7 +131,7 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: &mut t
         _ => Err(anyhow!("redis_connection is not a redis connection")),
     }?;
 
-    if nsfw_subreddits.contains(&subreddit) {
+    if config.nsfw_subreddits.contains(&subreddit) {
         if let Some(channel) = command.channel_id.to_channel_cached(&ctx.cache) {
             if !channel.is_nsfw() {
                 return Ok(FakeEmbed {
@@ -619,7 +612,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
         _ => Err(anyhow!("redis_connection is not a redis connection")),
     }?;
 
-    let already_queued = list_contains(&subreddit, "custom_subreddits_queue", con, Some(parent_tx)).await?;
+    let already_queued = list_contains(&subreddit, "custom_subreddits_queue", &mut con, Some(parent_tx)).await?;
 
     let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
 
@@ -650,7 +643,7 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
                 _ => Err(anyhow!("redis_connection is not a redis connection")),
             }?;
 
-            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(con).await {
+            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(&mut con).await {
                 Ok(posts) => {
                     posts
                 },
@@ -1358,26 +1351,39 @@ async fn main() {
         .await
         .expect("Error creating client");
 
-    let posthog_client = posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
-
-    let contents:HashMap<String, ConfigValue> = HashMap::from_iter([
-        ("shard_id".to_string(), ConfigValue::U64(shard_id as u64)),
-        ("redis_connection".to_string(), ConfigValue::REDIS(con)),
-        ("mongodb_connection".to_string(), ConfigValue::MONGODB(mongodb_client)),
-        ("nsfw_subreddits".to_string(), ConfigValue::SubredditList(nsfw_subreddits)),
-        ("posthog_client".to_string(), ConfigValue::PosthogClient(posthog_client)),
-    ]);
 
     {
         let mut data = client.data.write().await;
-        data.insert::<ConfigStruct>(contents);
-        data.insert::<ResourceManager<mongodb::Client>>(ResourceManager::<mongodb::Client>::new(|| {
+
+        let mongodb_manager = ResourceManager::<mongodb::Client>::new(|| {
             let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
             let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
             let mut client_options = Handle::current().block_on(ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false")).unwrap();
             client_options.app_name = Some(format!("Shard {}", shard_id));
             mongodb::Client::with_options(client_options).unwrap()
-        }));
+        });
+
+        let redis_manager = ResourceManager::<redis::aio::Connection>::new(|| {
+            let redis_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
+            let con = Handle::current().block_on(
+                redis_client.get_async_connection()
+            )
+            .expect("Can't connect to redis");
+            con
+        });
+
+        let posthog_manager = ResourceManager::<posthog::Client>::new(|| {
+            let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
+            posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string())
+        });
+
+        data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
+        data.insert::<ResourceManager<redis::aio::Connection>>(redis_manager);
+        data.insert::<ResourceManager<posthog::Client>>(posthog_manager);
+        data.insert::<ConfigStruct>(ConfigStruct {
+            shard_id: shard_id as u64,
+            nsfw_subreddits: nsfw_subreddits,
+        });
     }
 
     let shard_manager = client.shard_manager.clone();
