@@ -1,6 +1,8 @@
 use serenity::futures::{stream, StreamExt};
 use tracing::{warn, info};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use std::thread;
@@ -12,8 +14,10 @@ struct LockedResource<T> {
     data: Arc<Mutex<T>>,
 }
 
-impl <T> LockedResource<T> {
-    fn new<M: Fn() -> T + ?Sized>(maker: Arc<Box<M>>) -> Self {
+impl<T> LockedResource<T> {
+    async fn new(maker: Arc<Box<dyn Fn() -> T + Send + Sync>>) -> Self
+
+    {
         Self {
             last_accessed: Arc::new(Mutex::new(Instant::now())),
             data: Arc::new(Mutex::new(maker())),
@@ -22,13 +26,13 @@ impl <T> LockedResource<T> {
 }
 
 #[derive(Clone)]
-pub struct ResourceManager<T: Send + Sync> {
+pub struct ResourceManager<T: Send + Sync > {
     resources: Arc<Mutex<Vec<Arc<LockedResource<T>>>>>,
     maker: Arc<Box<dyn Fn() -> T + Send + Sync>>,
 }
 
 
-impl <T> ResourceManager<T> where T: Send + Sync + 'static {
+impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
     pub fn clone(&self) -> Self {
         Self {
             resources: self.resources.clone(),
@@ -36,10 +40,10 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static {
         }
     }
 
-    pub fn new<M : Fn() -> T + Send + Sync + 'static>(maker: M) -> Self {
+    pub fn new(maker: Arc<Box<dyn Fn() -> T + Send + Sync + 'static>>) -> Self {
         let new = Self {
             resources: Arc::new(Mutex::new(Vec::new())),
-            maker: Arc::new(Box::new(maker)),
+            maker,
         };
 
         // Spawn a background thread for cleanup
@@ -57,9 +61,11 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static {
     }
 
     pub async fn get_available_resource(&self) -> Arc<Mutex<T>> {
+        println!("Getting available resource");
         self.remove_unavailable().await;
 
         let resources = self.resources.lock().await;
+        println!("Locked resources");
         let mut available = Option::None;
         for resource in &*resources {
             match resource.data.try_lock() {
@@ -72,19 +78,23 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static {
                 }
             }
         }
+        drop(resources);
 
         let available = match available {
             Some(resource) => resource,
             None => {
-                info!("Creating new resource");
-                let resource = Arc::new(LockedResource::new(self.maker.clone()));
+                println!("Creating new resource");
+                let resource: Arc<LockedResource<T>> = Arc::new(LockedResource::new(self.maker.clone()).await);
+                println!("Adding resource");
                 self.add(resource.clone()).await;
+                println!("Added resource");
                 resource
             }
         };
 
         *available.last_accessed.lock().await = Instant::now();
 
+        println!("Returning available resource");
         available.data.clone()
 
     }
@@ -93,19 +103,23 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static {
     async fn remove_unavailable(&self) {
         let mut resources_lock: tokio::sync::MutexGuard<'_, Vec<Arc<LockedResource<T>>>> = self.resources.lock().await;
 
-        let mut to_remove = 0;
+        let mut to_remove = None;
         for (i, resource) in resources_lock.iter().enumerate() {
             let _ = resource.data.try_lock();
             let locked = resource.data.try_lock().is_err();
             if resource.last_accessed.lock().await.elapsed() > Duration::from_secs(120)  && locked{
                 warn!("Removing unavailable resource");
-                to_remove = i;
+                to_remove = Some(i);
                 break
             }
         }
-        let resources = &mut *resources_lock;
-        resources.swap_remove(to_remove);
-
+        match to_remove {
+            None => return,
+            Some(to_remove) => {
+                let resources = &mut *resources_lock;
+                resources.swap_remove(to_remove);
+            },
+        }
     }
 
     async fn add(&self, resource: Arc<LockedResource<T>>) {
