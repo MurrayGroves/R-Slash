@@ -9,3 +9,4 @@ edition = "2021"
 tracing = "*"
 anyhow = "*"
 serenity = {version = "*", features = ["client"]}
+tokio = {version = "*", features = ["sync"]}

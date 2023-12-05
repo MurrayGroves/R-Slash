@@ -9,11 +9,10 @@ use tracing_subscriber::util::SubscriberInitExt;
 use std::fs;
 use std::io::Write;
 use std::collections::HashMap;
-use std::iter::FromIterator;
 use std::env;
 
 use serenity::builder::CreateEmbed;
-use serenity::model::id::{ChannelId, GuildId};
+use serenity::model::id::ChannelId;
 use serenity::model::gateway::GatewayIntents;
 use serenity::{
     async_trait,
@@ -38,7 +37,6 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 
 use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
-use serenity::model::application::command::CommandOptionType;
 use serenity::model::application::component::ButtonStyle;
 use serenity::model::guild::{Guild, UnavailableGuild};
 use serenity::utils::Colour;
@@ -94,8 +92,8 @@ async fn capture_event(data: Arc<RwLock<TypeMap>>, event: &str, parent_tx: Optio
     };
 
     let posthog_manager = data.read().await.get::<ResourceManager<posthog::Client>>().unwrap().clone();
-    let client_mutex = posthog_manager.get_available_resource();
-    let client = client_mutex.lock().unwrap();
+    let client_mutex = posthog_manager.get_available_resource().await;
+    let client = client_mutex.lock().await;
 
     let mut properties_map = serde_json::Map::new();
     if properties.is_some() {
@@ -109,9 +107,9 @@ async fn capture_event(data: Arc<RwLock<TypeMap>>, event: &str, parent_tx: Optio
 }
 
 
-#[instrument(skip(command, data, ctx, tx))]
-async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: Arc<RwLock<TypeMap>>, ctx: &Context, tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
-    let data_read = data.read().await;
+#[instrument(skip(command, ctx, tx))]
+async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, ctx: &Context, tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+    let data_read = ctx.data.read().await;
 
     let config = data_read.get::<ConfigStruct>().unwrap();
 
@@ -123,7 +121,7 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: Arc<Rw
     let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
 
     let search_enabled = options.len() > 1;
-    capture_event(data.clone(), "subreddit_cmd", Some(tx),
+    capture_event(ctx.data.clone(), "subreddit_cmd", Some(tx),
                     Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "false".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())
                 ).await;
 
@@ -149,8 +147,8 @@ async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, data: Arc<Rw
     }
 
     let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-    let con_mutex = redis_manager.get_available_resource();
-    let mut con = con_mutex.lock().unwrap();
+    let con_mutex = redis_manager.get_available_resource().await;
+    let mut con = con_mutex.lock().await;
 
     if options.len() > 1 {
         let search = options[1].value.as_ref().unwrap().as_str().unwrap().to_string();
@@ -393,15 +391,14 @@ fn error_embed(code: &str) -> FakeEmbed {
 }
 
 
-#[instrument(skip(command, data, _ctx, parent_tx))]
-async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, _ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
-    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-    let mongodb_client = match data_mut.get_mut("mongodb_connection").unwrap() {
-        ConfigValue::MONGODB(db) => Ok(db),
-        _ => Err(anyhow!("Failed to get mongodb connection")),
-    }?;
+#[instrument(skip(command, ctx, parent_tx))]
+async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+    let data_lock = ctx.data.read().await;
+    let mongodb_manager = data_lock.get::<ResourceManager<mongodb::Client>>().ok_or(anyhow!("Mongodb client manager not found"))?.clone();
+    let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
+    let mut mongodb_client = mongodb_client_mutex.lock().await;
 
-    let tiers = get_user_tiers(command.user.id.0.to_string(), mongodb_client, Some(parent_tx)).await;
+    let tiers = get_user_tiers(command.user.id.0.to_string(), &mut *mongodb_client, Some(parent_tx)).await;
     debug!("Tiers: {:?}", tiers);
 
     let bronze = match tiers.bronze.active {
@@ -410,7 +407,7 @@ async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, data: &mut 
     }.to_string();
 
 
-    capture_event(data_mut, "cmd_get_user_tiers", Some(parent_tx), Some(HashMap::from([("bronze_active", bronze.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
+    capture_event(ctx.data.clone(), "cmd_get_user_tiers", Some(parent_tx), Some(HashMap::from([("bronze_active", bronze.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
 
     return Ok(FakeEmbed {
         title: Some("Your membership tiers".to_string()),
@@ -452,9 +449,13 @@ async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connecti
 
 #[instrument(skip(command, ctx, parent_tx))]
 async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
-    let mut data = ctx.data.write().await;
+    let data_lock = ctx.data.read().await;
+    let mongodb_manager = data_lock.get::<ResourceManager<mongodb::Client>>().ok_or(anyhow!("Mongodb client manager not found"))?.clone();
+    let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
+    let mut mongodb_client = mongodb_client_mutex.lock().await;
 
-    let membership = get_user_tiers(command.user.id.0.to_string(), &mut data, Some(parent_tx)).await;
+
+    let membership = get_user_tiers(command.user.id.0.to_string(), &mut *mongodb_client, Some(parent_tx)).await;
     if !membership.bronze.active {
         return Ok(FakeEmbed {
             title: Some("Premium Feature".to_string()),
@@ -471,8 +472,6 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
             buttons: None
         })
     }
-
-    drop(data); // Release lock while performing web request
 
     let options = &command.data.options;
     let subreddit = options[0].value.clone();
@@ -505,46 +504,26 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
         })
     }
 
-    let mut data = ctx.data.write().await;
-    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-
-    let con = match data_mut.get_mut("redis_connection").unwrap() {
-        ConfigValue::REDIS(db) => Ok(db),
-        _ => Err(anyhow!("redis_connection is not a redis connection")),
-    }?;
+    let redis_manager = data_lock.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
+    let redis_client_mutex = redis_manager.get_available_resource().await;
+    let mut con = redis_client_mutex.lock().await;
 
     let already_queued = list_contains(&subreddit, "custom_subreddits_queue", &mut con, Some(parent_tx)).await?;
 
     let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
 
-    drop(data);
     if last_cached == 0 {
         debug!("Subreddit last cached more than an hour ago, updating...");
         command.defer(&ctx.http).await.unwrap_or_else(|e| {
             warn!("Failed to defer response: {}", e);
         });
         if !already_queued {
-            let mut data = ctx.data.write().await;
-            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-        
-            let con = match data_mut.get_mut("redis_connection").unwrap() {
-                ConfigValue::REDIS(db) => Ok(db),
-                _ => Err(anyhow!("redis_connection is not a redis connection")),
-            }?;
-        
-            let _:() = con.rpush("custom_subreddits_queue", &subreddit).await?;
+            con.rpush("custom_subreddits_queue", &subreddit).await?;
         }
         loop {
             sleep(Duration::from_millis(1000)).await;
-            let mut data = ctx.data.write().await;
-            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
 
-            let con = match data_mut.get_mut("redis_connection").unwrap() {
-                ConfigValue::REDIS(db) => Ok(db),
-                _ => Err(anyhow!("redis_connection is not a redis connection")),
-            }?;
-
-            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(&mut con).await {
+            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(&mut *con).await {
                 Ok(posts) => {
                     posts
                 },
@@ -559,35 +538,23 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
     } else if last_cached +  3600000 < get_epoch_ms() as i64 {
         // Tell downloader to update the subreddit, but use outdated posts for now.
         if !already_queued {
-            let mut data = ctx.data.write().await;
-            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-        
-            let con = match data_mut.get_mut("redis_connection").unwrap() {
-                ConfigValue::REDIS(db) => Ok(db),
-                _ => Err(anyhow!("redis_connection is not a redis connection")),
-            }?;
-        
-            let _:() = con.rpush("custom_subreddits_queue", &subreddit).await?;
+            con.rpush("custom_subreddits_queue", &subreddit).await?;
         }
     }
 
-    let mut data = ctx.data.write().await;
-
-    return get_subreddit_cmd(command, &mut data, ctx, parent_tx).await;
+    return get_subreddit_cmd(command, ctx, parent_tx).await;
 }
 
-#[instrument(skip(command, data, ctx, parent_tx))]
-async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
-    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+#[instrument(skip(command, ctx, parent_tx))]
+async fn info(command: &ApplicationCommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+    let data_read = ctx.data.read().await;    
+    let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
+    let redis_client_mutex = redis_manager.get_available_resource().await;
+    let mut con = redis_client_mutex.lock().await;
 
-    capture_event(data_mut, "cmd_info", Some(parent_tx), None, &format!("user_{}", command.user.id.0.to_string())).await;
+    capture_event(ctx.data.clone(), "cmd_info", Some(parent_tx), None, &format!("user_{}", command.user.id.0.to_string())).await;
 
-    let con = match data_mut.get_mut("redis_connection").unwrap() {
-        ConfigValue::REDIS(db) => Ok(db),
-        _ => Err(anyhow!("redis_connection is not a redis connection")),
-    }?;
-
-    let guild_counts: HashMap<String, redis::Value> = con.hgetall(format!("shard_guild_counts_{}", get_namespace().await)).await?;
+    let guild_counts: HashMap<String, redis::Value> = con.hgetall(format!("shard_guild_counts_{}", get_namespace())).await?;
     let mut guild_count = 0;
     for (_, count) in guild_counts {
         guild_count += from_redis_value::<u64>(&count)?;
@@ -764,26 +731,16 @@ async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Con
 
         "get" => {
             let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_get_subreddit_cmd"));
-            let mut data = ctx.data.write().await;
-            debug!("Got lock");
-            let resp = get_subreddit_cmd(&command, &mut data, &ctx, &cmd_tx).await;
+            let resp = get_subreddit_cmd(&command, &ctx, &cmd_tx).await;
             cmd_tx.finish();
             resp
         },
 
         "membership" => {
             let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_get_user_tiers"));
-            let mut data = ctx.data.write().await;
-            debug!("Got lock");
-            let resp = cmd_get_user_tiers(&command, &mut data, &ctx, &cmd_tx).await;
+            let resp = cmd_get_user_tiers(&command, &ctx, &cmd_tx).await;
             cmd_tx.finish();
             resp
-        },
-
-        "configure-server" => {
-            let mut data = ctx.data.write().await;
-            debug!("Got lock");
-            configure_server(&command, &mut data, &ctx).await
         },
 
         "custom" => {
@@ -795,9 +752,7 @@ async fn get_command_response(command: &ApplicationCommandInteraction, ctx: &Con
 
         "info" => {
             let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_info"));
-            let mut data = ctx.data.write().await;
-            debug!("Got lock");
-            let resp = info(&command, &mut data, &ctx, &cmd_tx).await;
+            let resp = info(&command, &ctx, &cmd_tx).await;
             cmd_tx.finish();
             resp
         },
@@ -816,41 +771,34 @@ struct Handler;
 impl EventHandler for Handler {
     /// Fires when the client receives new data about a guild
     async fn guild_create(&self, ctx: Context, guild: Guild, is_new: bool) {
-        let mut data = ctx.data.write().await;
-        let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-
-        let con = match data_mut.get_mut("redis_connection").unwrap() {
-            ConfigValue::REDIS(db) => Ok(db),
-            _ => Err(0),
-        }.unwrap();
-
-        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).await.unwrap();
+        let data_read = ctx.data.read().await;
+        let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
+        let redis_client_mutex = redis_manager.get_available_resource().await;
+        let mut con = redis_client_mutex.lock().await;
+        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace()), ctx.shard_id, ctx.cache.guild_count()).await.unwrap();
 
         if is_new { // First time client has seen the guild
-            capture_event(data_mut, "guild_join", None, None, &format!("guild_{}", guild.id.0.to_string())).await;
+            capture_event(ctx.data.clone(), "guild_join", None, None, &format!("guild_{}", guild.id.0.to_string())).await;
             //update_guild_commands(guild.id, &mut data, &ctx).await;
         }
     }
 
     async fn guild_delete(&self, ctx: Context, incomplete: UnavailableGuild, _full: Option<Guild>) {
-        let mut data = ctx.data.write().await;
-        let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+        {
+            let data_read = ctx.data.read().await;    
+            let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
+            let redis_client_mutex = redis_manager.get_available_resource().await;
+            let mut con = redis_client_mutex.lock().await;
+            let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace()), ctx.shard_id, ctx.cache.guild_count()).await.unwrap();
+        }
+    
 
-        capture_event(data_mut, "guild_leave", None, None, &format!("guild_{}", incomplete.id.0.to_string())).await;
-
-        let con = match data_mut.get_mut("redis_connection").unwrap() {
-            ConfigValue::REDIS(db) => Ok(db),
-            _ => Err(0),
-        }.unwrap();
-
-        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace().await), ctx.shard_id, ctx.cache.guild_count()).await.unwrap();
+        capture_event(ctx.data.clone(), "guild_leave", None, None, &format!("guild_{}", incomplete.id.0.to_string())).await;
     }
 
     /// Fires when the client is connected to the gateway
     async fn ready(&self, ctx: Context, ready: Ready) {
-        let mut data = ctx.data.write().await;
-        let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-        capture_event(data_mut, "on_ready", None, None, &format!("shard_{}", ready.shard.unwrap()[0].to_string())).await;
+        capture_event(ctx.data, "on_ready", None, None, &format!("shard_{}", ready.shard.unwrap()[0].to_string())).await;
 
         info!("Shard {} connected as {}, on {} servers!", ready.shard.unwrap()[0], ready.user.name, ready.guilds.len());
 
@@ -918,10 +866,7 @@ impl EventHandler for Handler {
 
                     info!("Error code {} getting command response: {:?}", code, why);
 
-                    let mut data = ctx.data.write().await;
-                    let data_mut = data.get_mut::<ConfigStruct>().expect("Couldn't get config struct");
-
-                    capture_event(data_mut, "command_error", None, Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
+                    capture_event(ctx.data.clone(), "command_error", None, Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
                     sentry::capture_message(&format!("Error getting command response: {:?}", why), sentry::Level::Error);
 
                     let map = HashMap::from([("content", format!("Error code {} getting command response: {:?}", code, why))]);
@@ -997,8 +942,6 @@ impl EventHandler for Handler {
 
         if let Interaction::MessageComponent(command) = interaction {
             let component_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.component", "handle component interaction"));
-            let mut data = ctx.data.write().await;
-            let data_mut = data.get_mut::<ConfigStruct>().expect("Couldn't get config struct");
 
             match command.guild_id {
                 Some(guild_id) => {
@@ -1023,12 +966,12 @@ impl EventHandler for Handler {
                 _ => false,
             };
 
-            capture_event(data_mut, "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
+            capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
             
-            let mut con = match data_mut.get_mut("redis_connection").expect("Couldn't get redis connection") {
-                ConfigValue::REDIS(db) => Ok(db),
-                _ => Err(0),
-            }.expect("Redis connection wasn't a redis connection");
+            let data_read = ctx.data.read().await;
+            let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
+            let redis_client_mutex = redis_manager.get_available_resource().await;
+            let mut con = redis_client_mutex.lock().await;
 
             let fake_embed = match search_enabled {
                 true => {
@@ -1046,7 +989,6 @@ impl EventHandler for Handler {
                 }
             };
 
-            drop(data);
             let fake_embed = match fake_embed {
                 Ok(embed) => embed,
                 Err(error) => {
@@ -1054,10 +996,7 @@ impl EventHandler for Handler {
                     let code = rand::thread_rng().gen_range(0..10000);
                     error!("Error code {} getting command response: {:?}", code, why);
 
-                    let mut data = ctx.data.write().await;
-                    let data_mut = data.get_mut::<ConfigStruct>().expect("Couldn't get config struct");
-
-                    capture_event(data_mut, "command_error", Some(&component_tx), Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
+                    capture_event(ctx.data.clone(), "command_error", Some(&component_tx), Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])), &format!("user_{}", command.user.id)).await;
                     sentry::integrations::anyhow::capture_anyhow(&error);
                     let map = HashMap::from([("content", format!("Error code {} getting command response: {:?}", code, why))]);
 
@@ -1142,7 +1081,7 @@ async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge:
     loop {
         let _ = sleep(Duration::from_secs(60)).await;
 
-        let db_total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace().await)).await;
+        let db_total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace())).await;
         let db_total_shards: u64 = db_total_shards.expect("Failed to get or convert total_shards from Redis");
 
         let mut shard_manager = shard_manager.lock().await;
@@ -1159,7 +1098,7 @@ async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge:
     }
 }
 
-async fn get_namespace() -> String {
+fn get_namespace() -> String {
     let namespace= fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
         .expect("Couldn't read /var/run/secrets/kubernetes.io/serviceaccount/namespace");
     return namespace;
@@ -1171,7 +1110,6 @@ async fn main() {
     let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
     let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
     let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
-    let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
 
     let redis_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
     let mut con = redis_client.get_async_connection().await.expect("Can't connect to redis");
@@ -1191,7 +1129,7 @@ async fn main() {
 
     let nsfw_subreddits: Vec<String> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap().to_string()).collect();
 
-    let total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace().await)).await;
+    let total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace())).await;
     let total_shards: u64 = total_shards.expect("Failed to get or convert total_shards");
 
     debug!("Booting with {:?} total shards", total_shards);

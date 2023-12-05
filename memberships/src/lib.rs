@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use rslash_types::*;
 use mongodb::bson::{doc, Document};
@@ -8,6 +9,8 @@ use log::*;
 use serenity::futures::TryStreamExt;
 
 use serde_derive::{Deserialize, Serialize};
+use serenity::prelude::TypeMap;
+use tokio::sync::RwLock;
 
 #[cfg(test)]
 mod tests {
@@ -31,6 +34,7 @@ impl <'a> From<&'a mut mongodb::Client> for Client<'a> {
         }
     }
 }
+
 
 #[derive(Debug)]
 pub struct MembershipTier {
