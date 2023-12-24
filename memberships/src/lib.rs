@@ -1,9 +1,16 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use rslash_types::*;
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 use log::*;
 
 use serenity::futures::TryStreamExt;
+
+use serde_derive::{Deserialize, Serialize};
+use serenity::prelude::TypeMap;
+use tokio::sync::RwLock;
 
 #[cfg(test)]
 mod tests {
@@ -19,17 +26,6 @@ pub struct Client<'a> {
     client: &'a mut mongodb::Client,
 }
 
-impl <'a> From<&'a mut tokio::sync::RwLockWriteGuard<'_, serenity::prelude::TypeMap>> for Client<'a> {
-    fn from(data: &'a mut tokio::sync::RwLockWriteGuard<'_, serenity::prelude::TypeMap>) -> Client<'a> {
-        let mongodb_client: &mut mongodb::Client = match data.get_mut::<ConfigStruct>().unwrap().get_mut("mongodb_connection").unwrap() {
-            ConfigValue::MONGODB(db) => Ok(db),
-            _ => Err(0),
-        }.unwrap();
-        Client {
-            client: mongodb_client,
-        }
-    }
-}
 
 impl <'a> From<&'a mut mongodb::Client> for Client<'a> {
     fn from(client: &'a mut mongodb::Client) -> Client<'a> {
@@ -39,15 +35,25 @@ impl <'a> From<&'a mut mongodb::Client> for Client<'a> {
     }
 }
 
+
 #[derive(Debug)]
 pub struct MembershipTier {
     pub _name: String,
     pub active: bool,
+    pub manual: bool,
 }
 
 #[derive(Debug)]
 pub struct MembershipTiers {
     pub bronze: MembershipTier,
+}
+
+
+#[derive(Deserialize, Serialize)]
+struct MembershipDuration {
+    start: u64,
+    end: Option<u64>,
+    manual: Option<bool>,
 }
 
 
@@ -84,13 +90,46 @@ pub async fn get_user_tiers<'a>(user: impl Into<String>, data: impl Into<Client<
 
     debug!("User document: {:?}", doc);
 
-    let bronze = doc.get_array("active").unwrap().contains(&mongodb::bson::Bson::from("bronze"));
+    let mut manual = false;
+    let bronze_active = match doc.get("tiers") {
+        Some(tiers) => {
+            let tiers = mongodb::bson::from_bson::<HashMap<String, Vec<MembershipDuration>>>(tiers.into()).unwrap();
+            let bronze = tiers.get("bronze").unwrap();
+            let current_time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+            match bronze.last() {
+                Some(tier) => {
+                    manual = tier.manual.unwrap_or(false);
+                    match tier.end {
+                        Some(end) => {
+                            if end > current_time && tier.start < current_time {
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                        None => {
+                            if tier.start < current_time {
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    }
+                },
+                None => false,
+            }
+        },
+        None => false,
+    };
+    
 
     span.finish();
     return MembershipTiers {
         bronze: MembershipTier {
             _name: "bronze".to_string(),
-            active: bronze,
+            active: bronze_active,
+            manual
         },
     };
 }

@@ -1,4 +1,5 @@
 use tracing::{debug, info, warn, error};
+use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use std::io::Write;
@@ -112,7 +113,26 @@ async fn request_access_token(reddit_client: String, reddit_secret: String, web_
         .send()
         .await?;
 
-    let results: serde_json::Value = res.json().await?;
+    let text = match res.text().await {
+        Ok(x) => x,
+        Err(x) => {
+            let txt = format!("Failed to get text from reddit: {}", x);
+            warn!("{}", txt);
+            sentry::capture_message(&txt, sentry::Level::Warning);
+            return Err(x)?;
+        }
+    };
+    debug!("Matched text");
+    let results: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(x) => x,
+        Err(x) => {
+            let txt = format!("Failed to parse JSON from Reddit: {}", text);
+            warn!("{}", txt);
+            sentry::capture_message(&txt, sentry::Level::Warning);
+            return Err(x)?;
+        }
+    };
+
     debug!("Reddit access token response: {:?}", results);
     let token = results.get("access_token").expect("Reddit did not return access token").to_string();
     let expires_in:u64 = results.get("expires_in").expect("Reddit did not provide expires_in").as_u64().unwrap();
@@ -315,7 +335,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                 debug!("{}", format!("subreddit:{}:post:{}", subreddit.clone(), &post["id"].to_string().replace('"', "")));
                 url = url.replace(".gifv", ".gif");
 
-                if url.contains("gfycat") {
+                /*if url.contains("gfycat") {
                     let id = match url.split("/").last() {
                         Some(x) => match x.split(".").next() {
                             Some(x) => x.replace('"', ""),
@@ -380,7 +400,8 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                         None => {continue},
                     };
 
-                } else if url.contains("imgur") && !url.contains(".gif") && !url.contains(".png") && !url.contains(".jpg") && !url.contains(".jpeg") {
+                } else*/
+                if url.contains("imgur") && !url.contains(".gif") && !url.contains(".png") && !url.contains(".jpg") && !url.contains(".jpeg") {
                     let auth = format!("Client-ID {}", imgur_client);
                     let id = match url.split("/").last() {
                         Some(x) => match x.split(".").next() {
@@ -628,6 +649,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
 
     let web_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .user_agent("Discord:RSlash:v1.0.1 (by /u/murrax2)")
         .build().expect("Failed to build client");
 
     let data_lock = data.lock().await;
@@ -645,7 +667,15 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
     let gfycat_secret = env::var("GFYCAT_SECRET").expect("GFYCAT_SECRET not set");
     let imgur_client = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
     let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
-    let mut gfycat_token = OauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await.expect("Failed to get gfycat token");
+
+    // GFYCAT is dead so no longer needed, but still need to provide a token for the rest of the code.
+    let mut gfycat_token = OauthToken {
+        token: "".to_string(),
+        expires_at: 0,
+        client_id: gfycat_client.clone(),
+        client_secret: gfycat_secret.clone(),
+        url: "https://api.gfycat.com/v1/oauth/token".to_string(),
+    }; //{OauthToken::new(gfycat_client, gfycat_secret, "https://api.gfycat.com/v1/oauth/token".to_string()).await.expect("Failed to get gfycat token");
 
     let mut client_options = mongodb::options::ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.expect("Failed to parse client options");
     client_options.app_name = Some("Downloader".to_string());
@@ -799,16 +829,28 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result
 #[tokio::main]
 async fn main() {
     tracing_subscriber::Registry::default()
-    .with(sentry::integrations::tracing::layer().event_filter(|md| match md.level() {
-        &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
-        &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
-        &tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
-        _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
+    .with(sentry::integrations::tracing::layer().event_filter(|md| {
+        let level_filter = match md.level() {
+            &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
+            &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
+            &tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
+            _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
+        };
+        if md.target().contains("reddit_downloader") {
+            return level_filter;
+        } else {
+            return sentry::integrations::tracing::EventFilter::Ignore;
+        }
     }))
-    .with(tracing_subscriber::fmt::layer().compact().with_ansi(false))
+    .with(tracing_subscriber::fmt::layer().compact().with_ansi(false).with_filter(tracing_subscriber::filter::LevelFilter::DEBUG).with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
+        if !meta.target().contains("reddit_downloader") {
+            return false;
+        };
+        true
+    })))
     .init();
 
-    println!("Initialised tracing");
+    println!("Initialised tracing!");
 
     let _guard = sentry::init(("http://623a0a9dd73f41d19553fe485514664c@100.67.30.19:9000/2", sentry::ClientOptions {
         release: sentry::release_name!(),

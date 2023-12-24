@@ -34,7 +34,18 @@ reddit-downloader/test-data/
 shard/target/
 
 discord-interface/target/
-
 reddit-downloader/target/
+discord-roles/target/
+*/target/
+
 
 shard/target/
+
+Kubernetes/
+
+reddit-downloader/src/downloaders/secrets.txt
+reddit-downloader/test-data
+
+.vscode/
+
+badge-server/
