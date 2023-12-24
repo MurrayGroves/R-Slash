@@ -1,4 +1,4 @@
-![Badge showing current number of guilds the bot is in](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fr-slash.b-cdn.net%2Fapi%2Fguild_count&query=%24.guild_count&logo=discord&label=Guild%20Count&labelColor=hex(5865F2a)) [![wakatime](https://wakatime.com/badge/github/MurrayGroves/R-Slash.svg)](https://wakatime.com/badge/github/MurrayGroves/R-Slash)
+![Badge showing current number of guilds the bot is in](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fqwhwdauhdasht.ddns.net%2Fapi%2Fguild_count&query=%24.guild_count&logo=discord&label=Guild%20Count&labelColor=hex(5865F2a)) [![wakatime](https://wakatime.com/badge/github/MurrayGroves/R-Slash.svg)](https://wakatime.com/badge/github/MurrayGroves/R-Slash)
 
 # R Slash
 R Slash is a [Discord bot](https://discord.com) that allows users to get [Reddit](https://reddit.com) posts from popular subreddits, or any subreddit if they are a premium subscriber.
