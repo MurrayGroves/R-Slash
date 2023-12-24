@@ -28,6 +28,7 @@ tracing-subscriber = { version = "*"}
 posthog = {path = "../posthog"}
 memberships = {path = "../memberships"}
 rslash_types = {path = "../rslash_types"}
+connection_pooler = {path = "../connection-pooler"}
 
 [[bin]]
 name = "discord-shard"
