@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::fs::File;
 use std::path::Path;
 use futures_util::TryStreamExt;
+use tokio::sync::Mutex;
 
 use redis;
 use redis::{AsyncCommands, from_redis_value};
@@ -778,6 +779,7 @@ struct Handler;
 impl EventHandler for Handler {
     /// Fires when the client receives new data about a guild
     async fn guild_create(&self, ctx: Context, guild: Guild, is_new: bool) {
+        debug!("Guild create event fired");
         let data_read = ctx.data.read().await;
         let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
         let redis_client_mutex = redis_manager.get_available_resource().await;
@@ -1152,32 +1154,30 @@ async fn main() {
     {
         let mut data: tokio::sync::RwLockWriteGuard<'_, TypeMap> = client.data.write().await;
 
-        let mongodb_manager = ResourceManager::<mongodb::Client>::new(Arc::new(Box::new(|| {
+        let mongodb_manager = ResourceManager::<mongodb::Client>::new(|| Arc::new(Mutex::new(Box::pin(async {
             let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
             let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
-            //let handle = tokio::task::spawn(ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false"));
-            //let mut client_options = std::thread::spawn(|| {tokio::runtime::Runtime::new().unwrap().block_on(handle).unwrap().unwrap()}).join().unwrap();
-            let handle = Handle::current();
-            let _guard = handle.enter();
-            let mut client_options = futures::executor::block_on(ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false")).unwrap();
+
+            let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
             client_options.app_name = Some(format!("Shard {}", shard_id));
             mongodb::Client::with_options(client_options).unwrap()
-        })));
+        })))).await;
 
-        let redis_manager = ResourceManager::<redis::aio::Connection>::new(Arc::new(Box::new(|| {
+        let redis_manager = ResourceManager::<redis::aio::Connection>::new(|| Arc::new(Mutex::new(Box::pin(async {
+            println!("Creating new redis client");
             let redis_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
-            let handle = Handle::current();
-            let _guard = handle.enter();
-            let con = futures::executor::block_on(redis_client.get_async_connection()).unwrap();
+            println!("Entered tokio runtime");
+            let con = redis_client.get_async_connection().await.unwrap();
+            println!("Got connection");
             //let handle = tokio::task::spawn(async move {redis_client.get_async_connection().await});
             //let con = std::thread::spawn(|| {tokio::runtime::Runtime::new().unwrap().block_on(handle).unwrap().unwrap()}).join().unwrap();
             con
-        })));
+        })))).await;
 
-        let posthog_manager = ResourceManager::<posthog::Client>::new(Arc::new(Box::new(|| {
+        let posthog_manager = ResourceManager::<posthog::Client>::new(|| Arc::new(Mutex::new(Box::pin(async {
             let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
             posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string())
-        })));
+        })))).await;
 
         data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
         data.insert::<ResourceManager<redis::aio::Connection>>(redis_manager);

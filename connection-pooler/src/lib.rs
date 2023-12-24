@@ -1,5 +1,5 @@
 use serenity::futures::{stream, StreamExt};
-use tracing::{warn, info};
+use tracing::{warn, info, trace, debug};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -9,18 +9,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
-struct LockedResource<T> {
+struct LockedResource<T: Send + Sync> {
     last_accessed: Arc<Mutex<Instant>>,
     data: Arc<Mutex<T>>,
 }
 
-impl<T> LockedResource<T> {
-    async fn new(maker: Arc<Box<dyn Fn() -> T + Send + Sync>>) -> Self
-
+impl<T: Send + Sync> LockedResource<T> {
+    fn new(contents: T) -> Self
     {
         Self {
             last_accessed: Arc::new(Mutex::new(Instant::now())),
-            data: Arc::new(Mutex::new(maker())),
+            data: Arc::new(Mutex::new(contents)),
         }
     }
 }
@@ -28,7 +27,7 @@ impl<T> LockedResource<T> {
 #[derive(Clone)]
 pub struct ResourceManager<T: Send + Sync > {
     resources: Arc<Mutex<Vec<Arc<LockedResource<T>>>>>,
-    maker: Arc<Box<dyn Fn() -> T + Send + Sync>>,
+    maker: Arc<dyn Fn() -> Arc<Mutex<Pin<Box<dyn Future<Output = T> + Send>>>> + Send + Sync>,
 }
 
 
@@ -40,15 +39,15 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
         }
     }
 
-    pub fn new(maker: Arc<Box<dyn Fn() -> T + Send + Sync + 'static>>) -> Self {
+    pub async fn new(maker: impl Fn() -> Arc<Mutex<Pin<Box<dyn Future<Output = T> + Send>>>> + Send + Sync + 'static) -> Self {
         let new = Self {
             resources: Arc::new(Mutex::new(Vec::new())),
-            maker,
+            maker: Arc::new(maker),
         };
 
         // Spawn a background thread for cleanup
         let resource_manager = new.clone();
-        thread::spawn(move || async move {
+        tokio::spawn(async move {
             loop {
                 thread::sleep(Duration::from_secs(60)); // Adjust the interval as needed
 
@@ -84,7 +83,8 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
             Some(resource) => resource,
             None => {
                 println!("Creating new resource");
-                let resource: Arc<LockedResource<T>> = Arc::new(LockedResource::new(self.maker.clone()).await);
+                let new = Arc::<serenity::prelude::Mutex<std::pin::Pin<Box<(dyn std::future::Future<Output = T> + std::marker::Send + 'static)>>>>::try_unwrap(self.maker.clone()()).unwrap_or_else(|_| panic!("Failed to unwrap maker")).into_inner();
+                let resource: Arc<LockedResource<T>> = Arc::new(LockedResource::new(new.await));
                 println!("Adding resource");
                 self.add(resource.clone()).await;
                 println!("Added resource");
