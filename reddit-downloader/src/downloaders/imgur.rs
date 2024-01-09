@@ -30,7 +30,7 @@ impl <'a>Client<'a> {
             .send()
             .await?;
 
-        self.limiter.update_headers(response.headers());
+        self.limiter.update_headers(response.headers()).await?;
 
         let response = response
             .json::<serde_json::Value>()
@@ -47,7 +47,7 @@ impl <'a>Client<'a> {
             .send()
             .await?;
 
-        self.limiter.update_headers(response.headers());
+        self.limiter.update_headers(response.headers()).await?;
 
         let txt = response.text().await?;
         let json = serde_json::from_str::<serde_json::Value>(&txt).context(txt)?;
@@ -59,7 +59,7 @@ impl <'a>Client<'a> {
         self.limiter.wait().await;
         let gif = format!("https://i.imgur.com/{}.gif", id);
         let head = self.client.head(&gif).send().await?;
-        self.limiter.update_headers(head.headers());
+        self.limiter.update_headers(head.headers()).await?;
 
         if head.headers().get("Content-Type").ok_or(Error::msg("Failed to get content type"))?.to_str()? == "image/gif" {
             return Ok(gif);
@@ -77,7 +77,8 @@ impl <'a>Client<'a> {
 
     /// Download a single image from a url, and return the path to the image, or URL if no conversion is needed
     pub async fn request(&self, url: &str) -> Result<String, Error> {
-        let id = url.split("/").last().ok_or(Error::msg("Failed to extract imgur ID"))?;
+        let id = url.split("/").last().ok_or(Error::msg("Failed to extract imgur ID"))?
+        .split(".").next().ok_or(Error::msg("Failed to extract imgur ID"))?;
 
         let download_url = if url.contains("/gallery/") {
             self.request_gallery(id).await?

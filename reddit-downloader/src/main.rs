@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use truncrate::*;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context, Error};
 
 use redis::AsyncCommands;
 
@@ -229,7 +229,8 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
     let url_base = format!("https://oauth.reddit.com/r/{}/hot.json?limit=100", subreddit);
     let mut url = String::new();
 
-    let existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query_async(con).await?;
+    let existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query_async(con).await
+    .context("Getting existing posts")?;
     debug!("Existing posts: {:?}", existing_posts);
     
     // Wrap data that needs to be shared between threads in Arcs
@@ -377,7 +378,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                 }
 
                 // Redis key for this post
-                let key: String = format!("subreddit:{}:post:{}", post["subreddit"], &post["id"].to_string().replace('"', ""));
+                let key: String = format!("subreddit:{}:post:{}", post["subreddit"].to_string().replace("\"", ""), &post["id"].to_string().replace('"', ""));
 
                 let exists = existing_posts.contains(&key);
 
@@ -391,7 +392,15 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                     if url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg") {
                         Some(url)
                     } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") {
-                        let mut res = downloaders_client.request(&url).await?;
+                        let mut res = match downloaders_client.request(&url).await {
+                            Ok(x) => x,
+                            Err(x) => {
+                                let txt = format!("Failed to download media: {}", x.backtrace());
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                                return Err(x);
+                            }
+                        };
                         if !res.starts_with("http") {
                             res = format!("https://rslash.b-cdn.net/gifs/{}", res);
                         }
@@ -443,7 +452,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
         match ok {
             Ok(_) => {},
             Err(x) => {
-                let txt = format!("Error occurred while processing posts: {}\nProcessed posts: {:?}\n All posts: {:?}", x, posts, results);
+                let txt = format!("Error occurred while processing posts: {}", x.backtrace());
                 warn!("{}", txt);
                 sentry::capture_message(&txt, sentry::Level::Warning);
             }
@@ -549,8 +558,6 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
         _ => panic!("Failed to get reddit_client")
     }.clone();
 
-    let gfycat_client = env::var("GFYCAT_CLIENT").expect("GFYCAT_CLIENT not set");
-    let gfycat_secret = env::var("GFYCAT_SECRET").expect("GFYCAT_SECRET not set");
     let imgur_client = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
     let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
 

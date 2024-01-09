@@ -32,7 +32,7 @@ impl <'a>Client<'a> {
             .arg(url)
             .output().await?;
 
-        self.limiter.update();
+        self.limiter.update().await;
 
         if !output.status.success() {
             std::io::stderr().write_all(&output.stderr).unwrap();

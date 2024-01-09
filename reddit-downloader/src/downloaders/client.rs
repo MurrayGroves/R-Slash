@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Error, anyhow};
 use tracing::info;
 use tracing::warn;
+use tracing::debug;
 
 use super::imgur;
 use super::generic;
@@ -43,13 +44,17 @@ impl Limiter {
                 state.reset = chrono::Utc::now().timestamp() + 60;
             }
 
-            if headers.get("Retry-After").is_some() {
-                state.reset = chrono::Utc::now().timestamp() + headers.get("Retry-After").ok_or(anyhow!("No Retry-After header present"))?.to_str()?.parse::<i64>()?;
+            if let Some(remaining) = headers.get("Retry-After") {
+                state.reset = chrono::Utc::now().timestamp() + remaining.to_str()?.parse::<i64>()?;
                 state.remaining = 0;
             }
         } else {
-            state.remaining = headers.get("X-RateLimit-UserRemaining").ok_or(anyhow!("No X-RateLimit-UserRemaining header present"))?.to_str()?.parse()?;
-            state.reset = headers.get("X-RateLimit-UserRest").ok_or(anyhow!("No X-RateLimit-UserReset header present"))?.to_str()?.parse()?;
+            if let Some(remaining) = headers.get("X-RateLimit-UserRemaining") {
+                state.remaining = remaining.to_str()?.parse()?;
+            }
+            if let Some(reset) = headers.get("X-RateLimit-UserReset") {
+                state.reset = reset.to_str()?.parse()?;
+            }
         }
 
         Ok(())
@@ -73,7 +78,7 @@ impl Limiter {
             let wait = state.reset - chrono::Utc::now().timestamp();
             drop(state);
             info!("Waiting {} seconds for rate limit", wait);
-            tokio::time::sleep(std::time::Duration::from_secs(wait as u64));
+            tokio::time::sleep(std::time::Duration::from_secs(wait as u64)).await;
         }
     }
 }
@@ -146,6 +151,7 @@ impl <'a>Client<'a> {
 
         if !output.status.success() {
             std::io::stderr().write_all(&output.stderr).unwrap();
+            warn!("Failed to convert mp4 to gif: {}", String::from_utf8_lossy(&output.stderr));
             Err(Error::msg(format!("ffmpeg failed: {}\n{}", output.status.to_string(), output.status))).with_context(|| format!("path: {}", full_path))?;
         }
 
