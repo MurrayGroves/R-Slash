@@ -10,6 +10,7 @@ use std::io::Write;
 use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::env;
+use chrono::{DateTime, Utc, TimeZone};
 
 use serenity::builder::{CreateEmbed, CreateComponents};
 use serenity::model::id::{ChannelId};
@@ -255,8 +256,8 @@ async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut r
     let title = from_redis_value::<String>(&post.get("title").unwrap().clone())?;
     let url = from_redis_value::<String>(&post.get("url").unwrap().clone())?;
     let embed_url = from_redis_value::<String>(&post.get("embed_url").unwrap().clone())?;
-    let timestamp = from_redis_value::<String>(&post.get("timestamp").unwrap().clone())?;
-
+    let timestamp = from_redis_value::<i64>(&post.get("timestamp").unwrap().clone())?;
+    
     let to_return = InteractionResponse {
         embed: Some(CreateEmbed::default()
             .title(title)
@@ -268,7 +269,7 @@ async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut r
             .url(url)
             .color(0x00ff00)
             .image(embed_url)
-            .timestamp(timestamp)
+            .timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(timestamp)?)
             .to_owned()
         ),
 

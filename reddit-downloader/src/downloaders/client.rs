@@ -162,7 +162,9 @@ impl <'a>Client<'a> {
 
     /// Download a single mp4 from a url, and return the path to the gif
     pub async fn request(&self, url: &str) -> Result<String, Error> {
-        let mut path = if url.contains("redgifs.com") {
+        let mut path = if url.ends_with(".mp4") {
+            self.generic.request(url).await?
+        } else if url.contains("redgifs.com") {
             let id = url.split("/").last().ok_or(anyhow!("No ID in url"))?;
             self.generic.request(&format!("https://api.redgifs.com/v2/gifs/{}/files/{}.mp4", id, id)).await.context("Requesting from redgifs")?
         } else if url.contains("imgur.com") {
