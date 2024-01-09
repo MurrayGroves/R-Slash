@@ -33,3 +33,5 @@ Kubernetes/
 
 reddit-downloader/src/downloaders/secrets.txt
 reddit-downloader/test-data/
+
+reddit-downloader/redgifs_browser.py

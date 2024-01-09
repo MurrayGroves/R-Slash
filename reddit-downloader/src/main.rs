@@ -391,7 +391,11 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                     if url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg") {
                         Some(url)
                     } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") {
-                        Some(downloaders_client.request(&url).await?)
+                        let mut res = downloaders_client.request(&url).await?;
+                        if !res.starts_with("http") {
+                            res = format!("https://rslash.b-cdn.net/gifs/{}", res);
+                        }
+                        Some(res)
                     } else {
                         debug!("URL is not embeddable, and we do not have the ability to turn it into one.");
                         return Ok(());
@@ -557,7 +561,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
 
     let imgur_client_id = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
 
-    let downloaders_client = downloaders::client::Client::new("/data/media", Some(imgur_client_id), None, "https://rslash.b-cdn.net/gifs/");
+    let downloaders_client = downloaders::client::Client::new("/data/media", Some(imgur_client_id), None);
 
     if do_custom == "true".to_string() {
         let mut subreddits: HashMap<String, SubredditState> = HashMap::new();
