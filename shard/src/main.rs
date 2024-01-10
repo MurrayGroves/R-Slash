@@ -214,6 +214,8 @@ async fn get_post_at_search_index(search_index: String, search: &str, index: u16
 // Returns the post ID at the given index in the list
 #[instrument(skip(con, parent_tx))]
 async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
+    debug!("Getting post at index {} in list {}", index, list);
+
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "get_post_at_list_index").into(),
         None => {

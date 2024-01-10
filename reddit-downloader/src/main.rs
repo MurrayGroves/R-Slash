@@ -387,11 +387,16 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                     None
                 } else {
                     let url = post["url"].to_string().replace('"', "");
+                    let url = if url.contains("v.redd.it") {
+                        post["media"]["reddit_video"]["dash_url"].to_string().replace('"', "")
+                    } else {
+                        url
+                    };
 
                     // If URL is already embeddable, no further processing is needed
                     if url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg") {
                         Some(url)
-                    } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") {
+                    } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") || url.contains(".mpd") {
                         let mut res = match downloaders_client.request(&url).await {
                             Ok(x) => x,
                             Err(x) => {
@@ -402,7 +407,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                             }
                         };
                         if !res.starts_with("http") {
-                            res = format!("https://rslash.b-cdn.net/gifs/{}", res);
+                            res = format!("https://r-slash.b-cdn.net/gifs/{}", res);
                         }
                         Some(res)
                     } else {

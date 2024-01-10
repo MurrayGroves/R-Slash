@@ -8,6 +8,7 @@ use tracing::info;
 use tracing::warn;
 use tracing::debug;
 
+use super::dash;
 use super::imgur;
 use super::generic;
 
@@ -87,6 +88,7 @@ impl Limiter {
 pub struct Client<'a> {
     imgur: Option<imgur::Client<'a>>,
     generic: generic::Client<'a>,
+    dash: Option<dash::Client<'a>>,
     posthog: Option<posthog::Client>,
     path: &'a str,
 }
@@ -105,6 +107,7 @@ impl <'a>Client<'a> {
             generic: generic::Client::new(&path, Limiter::new(Some(60))),
             path: &path,
             posthog: posthog_client,
+            dash: Some(dash::Client::new(&path, Limiter::new(Some(60)))),
         }
     }
 
@@ -116,8 +119,15 @@ impl <'a>Client<'a> {
 
         let f = std::fs::File::open(&full_path).with_context(|| format!("Opening mp4 path {}", &full_path))?;
         let size = f.metadata()?.len();
-        let reader = std::io::BufReader::new(f);
-        let mp4 = mp4::Mp4Reader::read_header(reader, size).with_context(|| format!("reading mp4 header {}", full_path))?;
+        let reader: std::io::BufReader<std::fs::File> = std::io::BufReader::new(f);
+        let mp4 = match mp4::Mp4Reader::read_header(reader, size).context(format!("reading mp4 header {}", full_path)) {
+            Ok(mp4) => mp4,
+            Err(e) => {
+                warn!("Failed to read mp4 header: {}", e);
+                return Err(e);
+            }
+        
+        };
         let track = mp4.tracks().iter().next().ok_or(Error::msg("no mp4 tracks"))?.1;
         let width = track.width();
         let height = track.height();
@@ -177,6 +187,11 @@ impl <'a>Client<'a> {
             match &self.imgur {
                 Some(imgur) => imgur.request(url).await.context("Requesting from imgur")?,
                 None => Err(Error::msg("Imgur client ID not set"))?,
+            }
+        } else if url.contains(".mpd") {
+            match &self.dash {
+                Some(dash) => dash.request(url).await.context("Requesting from dash")?,
+                None => Err(Error::msg("Dash client not set"))?,
             }
         } else {
             self.generic.request(url).await?
