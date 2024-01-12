@@ -49,3 +49,4 @@ reddit-downloader/test-data
 .vscode/
 
 badge-server/
+reddit-downloader/redgifs_browser.py
