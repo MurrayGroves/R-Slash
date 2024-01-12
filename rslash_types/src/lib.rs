@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::RwLock};
 
 #[cfg(test)]
 mod tests {
@@ -20,11 +20,12 @@ pub enum ConfigValue {
     PosthogClient(posthog::Client),
 }
 
-/// Stores config values required for operation of the downloader
+/// Stores config values required for operation of the shard
 pub struct ConfigStruct {
-    _value: HashMap<String, ConfigValue>
+    pub shard_id: u64,
+    pub nsfw_subreddits: Vec<String>,
 }
 
 impl serenity::prelude::TypeMapKey for ConfigStruct {
-    type Value = HashMap<String, ConfigValue>;
+    type Value = ConfigStruct;
 }

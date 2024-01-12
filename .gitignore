@@ -29,9 +29,10 @@ shard/target/
 
 Kubernetes/
 
+reddit-downloader/src/downloaders/secrets.txt
+reddit-downloader/test-data
+
 .vscode/
 
-reddit-downloader/src/downloaders/secrets.txt
-reddit-downloader/test-data/
-
+badge-server/
 reddit-downloader/redgifs_browser.py
