@@ -24,6 +24,8 @@ anyhow = { version = "*", features = ["backtrace"] }
 sentry = { version = "0.29.3", features = ["tracing", "anyhow", "debug-images"] }
 tracing = "*"
 tracing-subscriber = { version = "*"}
+compile-time = "*"
+chrono = "0.4.*"
 
 posthog = {path = "../posthog"}
 memberships = {path = "../memberships"}
@@ -33,3 +35,7 @@ connection_pooler = {path = "../connection-pooler"}
 [[bin]]
 name = "discord-shard"
 path = "src/main.rs"
+
+[profile.release]
+debug = 2
+split-debuginfo = "packed"

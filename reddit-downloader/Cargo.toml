@@ -1,13 +1,13 @@
 [package]
 name = "reddit-downloader"
-version = "1.0.0"
+version = "1.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time", "full", "tracing"]}
-reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"]}
+reqwest = { version = "*", features = ["json", "rustls-tls", "cookies", "stream"]}
 redis = { version = "*", features = ["aio", "tokio-comp", "connection-manager"] }
 serde_json = "1.0"
 mongodb = "2.3"
@@ -18,3 +18,9 @@ sentry = { version = "0.29.3", features = ["tracing", "anyhow", "debug-images"] 
 tracing = "*"
 tracing-subscriber = { version = "*"}
 anyhow = { version = "*", features = ["backtrace"] }
+chrono = "*"
+console-subscriber = "*"
+itertools = "*"
+posthog = {path = "../posthog"}
+dash-mpd = "*"
+metascraper = "*"
