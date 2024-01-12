@@ -34,7 +34,7 @@ impl <'a>Client<'a> {
         self.limiter.update().await;
 
         let path = c.to_str().ok_or(Error::msg("Failed to extract image link from Imgur response"))?.to_string();
-        let path = path.replace(self.path, "");
+        let path = path.replace(&format!("{}/", self.path), "");
         Ok(path)
     }
 }

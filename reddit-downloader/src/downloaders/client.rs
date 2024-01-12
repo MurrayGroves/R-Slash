@@ -11,6 +11,7 @@ use tracing::debug;
 use super::dash;
 use super::imgur;
 use super::generic;
+use super::redgifs;
 
 
 struct LimitState {
@@ -90,6 +91,7 @@ pub struct Client<'a> {
     generic: generic::Client<'a>,
     dash: Option<dash::Client<'a>>,
     posthog: Option<posthog::Client>,
+    redgifs: Option<redgifs::Client<'a>>,
     path: &'a str,
 }
 
@@ -108,6 +110,7 @@ impl <'a>Client<'a> {
             path: &path,
             posthog: posthog_client,
             dash: Some(dash::Client::new(&path, Limiter::new(Some(60)))),
+            redgifs: Some(redgifs::Client::new(&path, Limiter::new(Some(60)))),
         }
     }
 
@@ -117,22 +120,16 @@ impl <'a>Client<'a> {
         let full_path = format!("{}/{}", self.path, path);
         let new_full_path = format!("{}/{}", self.path, new_path);
 
-        let f = std::fs::File::open(&full_path).with_context(|| format!("Opening mp4 path {}", &full_path))?;
-        let size = f.metadata()?.len();
-        let reader: std::io::BufReader<std::fs::File> = std::io::BufReader::new(f);
-        let mp4 = match mp4::Mp4Reader::read_header(reader, size).context(format!("reading mp4 header {}", full_path)) {
-            Ok(mp4) => mp4,
-            Err(e) => {
-                warn!("Failed to read mp4 header: {}", e);
-                return Err(e);
-            }
-        
-        };
-        let track = mp4.tracks().iter().next().ok_or(Error::msg("no mp4 tracks"))?.1;
-        let width = track.width();
-        let height = track.height();
+        let output = Command::new("mediainfo")
+            .arg("--output=JSON")
+            .arg(&full_path)
+            .output()?;
 
-
+        let output = String::from_utf8_lossy(&output.stdout);
+        let output: serde_json::Value = serde_json::from_str(&output).context("Parsing mediainfo output")?;
+        // First track is used for general metadata, second track contains video metadata
+        let width = output["media"]["track"][1]["Width"].as_str().ok_or(Error::msg("Failed to parse mediainfo output"))?.parse::<u32>()?;
+        let height = output["media"]["track"][1]["Height"].as_str().ok_or(Error::msg("Failed to parse mediainfo output"))?.parse::<u32>()?;
 
         // If the video is too big, scale it down
         let scale = if width > height {
@@ -181,8 +178,10 @@ impl <'a>Client<'a> {
         let mut path = if url.ends_with(".mp4") {
             self.generic.request(url).await?
         } else if url.contains("redgifs.com") {
-            let id = url.split("/").last().ok_or(anyhow!("No ID in url"))?;
-            self.generic.request(&format!("https://api.redgifs.com/v2/gifs/{}/files/{}.mp4", id, id)).await.context("Requesting from redgifs")?
+            match &self.redgifs {
+                Some(redgifs) => redgifs.request(url).await.context("Requesting from redgifs")?,
+                None => Err(Error::msg("Redgifs client not set"))?,
+            }
         } else if url.contains("imgur.com") {
             match &self.imgur {
                 Some(imgur) => imgur.request(url).await.context("Requesting from imgur")?,

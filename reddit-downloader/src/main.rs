@@ -158,7 +158,7 @@ async fn request_access_token(reddit_client: String, reddit_secret: String, web_
 ///
 /// # Arguments
 /// ## con
-/// The [connection](redis::aio::Connection) to the redis DB.
+/// The [connection](redis::aio::MultiplexedConnection) to the redis DB.
 /// ## reddit_client
 /// The bot's Reddit client_id
 /// ## reddit_secret
@@ -166,7 +166,7 @@ async fn request_access_token(reddit_client: String, reddit_secret: String, web_
 /// ## device_id
 /// If specified, will request an [installed_client](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token instead of a [client_credentials](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token.
 #[tracing::instrument(skip(con, web_client))]
-async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: String, reddit_secret: String, web_client: &reqwest::Client, device_id: Option<String>) -> Result<String, anyhow::Error> { // Return a reddit access token
+async fn get_access_token(con: &mut redis::aio::MultiplexedConnection, reddit_client: String, reddit_secret: String, web_client: &reqwest::Client, device_id: Option<String>) -> Result<String, anyhow::Error> { // Return a reddit access token
     let token_name = match device_id.clone() { // The key to grab from the DB
         Some(x) => x,
         _ => "default".to_string(),
@@ -211,7 +211,7 @@ async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: Strin
 /// ## subreddit
 /// A [String](String) representing the subreddit name, without the `r/`
 /// ## con
-/// A [Connection](redis::aio::Connection) to the Redis DB
+/// A [Connection](redis::aio::MultiplexedConnection) to the Redis DB
 /// ## web_client
 /// The Reqwest [Client](reqwest::Client)
 /// ## reddit_client
@@ -221,7 +221,7 @@ async fn get_access_token(con: &mut redis::aio::Connection, reddit_client: Strin
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
 #[tracing::instrument(skip(con, web_client, downloaders_client))]
-async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, imgur_client: String, mut after: Option<String>, pages: Option<u8>, downloaders_client: &downloaders::client::Client<'_>) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
+async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConnection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, imgur_client: String, mut after: Option<String>, pages: Option<u8>, downloaders_client: &downloaders::client::Client<'_>) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
     debug!("Fetching subreddit: {:?}", subreddit);
 
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await?;
@@ -235,7 +235,6 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
     
     // Wrap data that needs to be shared between threads in Arcs
     let existing_posts = Arc::new(existing_posts);
-    let con = Arc::new(Mutex::new(con));
     let subreddit = Arc::new(subreddit);
 
     // Fetch pages of posts
@@ -354,7 +353,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             // Clone Arcs so they can be moved into the async block and each thread gets its own reference
             let posts = Arc::clone(&posts);
             let existing_posts = Arc::clone(&existing_posts);
-            let con = Arc::clone(&con);
+            let mut con = con.clone();
             let subreddit = Arc::clone(&subreddit);
 
             async move {
@@ -435,7 +434,6 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
                 // Push post to Redis
                 let value = Vec::from(post_object);
 
-                let mut con = con.lock().await;
                 con.hset_multiple(&key, &value).await?;
 
                 // Subreddit has not been downloaded before, meaning we should try get posts into Redis ASAP to minimise the time before the user gets a response
@@ -486,8 +484,6 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
             }
         }
 
-        let mut con = con.lock().await;
-
         con.del(format!("subreddit:{}:posts", subreddit)).await?;
         con.rpush(format!("subreddit:{}:posts", subreddit), keys.clone()).await?;
 
@@ -504,8 +500,8 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::Connection, web_
 
 // Check if RediSearch index exists
 #[tracing::instrument(skip(con))]
-async fn index_exists(con: &mut redis::aio::Connection, index: String) -> bool {
-    match redis::cmd("FT.INFO").arg(index).query_async::<redis::aio::Connection, redis::Value>(con).await {
+async fn index_exists(con: &mut redis::aio::MultiplexedConnection, index: String) -> bool {
+    match redis::cmd("FT.INFO").arg(index).query_async::<redis::aio::MultiplexedConnection, redis::Value>(con).await {
         Ok(_) => true,
         Err(_) => false,
     }
@@ -514,7 +510,7 @@ async fn index_exists(con: &mut redis::aio::Connection, index: String) -> bool {
 
 // Create RediSearch index for subreddit
 #[tracing::instrument(skip(con))]
-async fn create_index(con: &mut redis::aio::Connection, index: String, prefix: String) -> Result<(), anyhow::Error>{
+async fn create_index(con: &mut redis::aio::MultiplexedConnection, index: String, prefix: String) -> Result<(), anyhow::Error>{
     Ok(redis::cmd("FT.CREATE")
         .arg(index)
         .arg("PREFIX")
@@ -545,7 +541,7 @@ async fn create_index(con: &mut redis::aio::Connection, index: String, prefix: S
 /// A thread-safe wrapper of the [Config](ConfigStruct)
 async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Result<(), anyhow::Error>{
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
-    let mut con = db_client.get_async_connection().await.expect("Can't connect to redis");
+    let mut con = db_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
 
     let web_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))

@@ -19,8 +19,8 @@ tracing = "*"
 tracing-subscriber = { version = "*"}
 anyhow = { version = "*", features = ["backtrace"] }
 chrono = "*"
-mp4 = "0.14"
 console-subscriber = "*"
 itertools = "*"
 posthog = {path = "../posthog"}
 dash-mpd = "*"
+metascraper = "*"
