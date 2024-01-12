@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::env;
 use chrono::{DateTime, Utc, TimeZone};
 
-use serenity::builder::CreateEmbed;
+use serenity::builder::{CreateEmbed, CreateComponents};
 use serenity::model::id::ChannelId;
 use serenity::model::gateway::GatewayIntents;
 use serenity::{
@@ -90,7 +90,7 @@ async fn capture_event(data: Arc<RwLock<TypeMap>>, event: &str, parent_tx: Optio
 
 
 #[instrument(skip(command, ctx, tx))]
-async fn get_subreddit_cmd(command: &ApplicationCommandInteraction, ctx: &Context, tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+async fn get_subreddit_cmd<'a>(command: &'a ApplicationCommandInteraction, ctx: &'a Context, tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
     let data_read = ctx.data.read().await;
 
     let config = data_read.get::<ConfigStruct>().unwrap();
@@ -384,7 +384,7 @@ fn error_response(code: String) -> InteractionResponse<'static> {
 
 
 #[instrument(skip(command, ctx, parent_tx))]
-async fn cmd_get_user_tiers(command: &ApplicationCommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+async fn cmd_get_user_tiers<'a>(command: &'a ApplicationCommandInteraction, ctx: &'a Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
     let data_lock = ctx.data.read().await;
     let mongodb_manager = data_lock.get::<ResourceManager<mongodb::Client>>().ok_or(anyhow!("Mongodb client manager not found"))?.clone();
     let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
@@ -433,7 +433,7 @@ async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connecti
 }
 
 #[instrument(skip(command, ctx, parent_tx))]
-async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
+async fn get_custom_subreddit<'a>(command: &'a ApplicationCommandInteraction, ctx: &'a Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
     let data_lock = ctx.data.read().await;
     let mongodb_manager = data_lock.get::<ResourceManager<mongodb::Client>>().ok_or(anyhow!("Mongodb client manager not found"))?.clone();
     let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
@@ -520,9 +520,12 @@ async fn get_custom_subreddit(command: &ApplicationCommandInteraction, ctx: &Con
     return get_subreddit_cmd(command, ctx, parent_tx).await;
 }
 
-#[instrument(skip(command, data, ctx, parent_tx))]
-async fn info(command: &ApplicationCommandInteraction, data: &mut tokio::sync::RwLockWriteGuard<'_, TypeMap>, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<FakeEmbed, anyhow::Error> {
-    let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+#[instrument(skip(command, ctx, parent_tx))]
+async fn info<'a>(command: &'a ApplicationCommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
+    let data_read = ctx.data.read().await;    
+    let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
+    let redis_client_mutex = redis_manager.get_available_resource().await;
+    let mut con = redis_client_mutex.lock().await;
 
     capture_event(ctx.data.clone(), "cmd_info", Some(parent_tx), None, &format!("user_{}", command.user.id.0.to_string())).await;
 

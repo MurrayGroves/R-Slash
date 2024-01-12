@@ -262,6 +262,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "connection_pooler"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serenity 0.11.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cookie"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -465,12 +475,13 @@ dependencies = [
 
 [[package]]
 name = "discord-shard"
-version = "0.1.1"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "chrono",
  "compile-time",
- "env_logger 0.10.0",
+ "connection_pooler",
+ "env_logger 0.7.1",
  "futures",
  "futures-util",
  "log",
