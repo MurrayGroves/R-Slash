@@ -344,11 +344,12 @@ async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Connection, 
         }
     };
 
+    let subreddit = subreddit.to_lowercase();
+
     let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 1i16).await?;
     let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 60*60).await?;
     index -= 1;
     let length: u16 = con.llen(format!("subreddit:{}:posts", &subreddit)).await?;
-    index = length - (index + 1);
 
     if index >= length {
         let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 0i16).await?;
