@@ -164,6 +164,18 @@ impl <'a>Client<'a> {
             Err(Error::msg(format!("ffmpeg failed: {}\n{}", output.status.to_string(), output.status))).with_context(|| format!("path: {}", full_path))?;
         }
 
+        let output = Command::new("gifsicle")
+            .arg("-O3")
+            .arg("--lossy=30")
+            .arg("--colors=256")        
+            .arg("--batch")    
+            .arg(&new_full_path)
+            .output()?;
+
+        if !output.status.success() {
+            warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
+        }
+
         let output = Command::new("rm")
             .arg(&full_path)
             .output()?;
