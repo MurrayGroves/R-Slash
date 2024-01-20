@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stats-uploader
+  namespace: discord-bot-shared
+spec:
+  selector:
+    matchLabels:
+      app: stats-uploader
+  replicas: 1
+  template:
+    metadata:
+        labels:
+            app: stats-uploader
+    spec:
+      containers:
+        - name: stats-uploader
+          image: registry.murraygrov.es/stats-uploader:latest
+          imagePullPolicy: Always
+          tty: true
+          resources:
+            limits:
+              cpu: "0.25"
+              memory: "250Mi"
+          env:
+            - name: DISCORD_BOTS_GG_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: stats-credentials
+                  key: DISCORD_BOTS_GG_TOKEN
+            - name: TOP_GG_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: stats-credentials
+                  key: TOP_GG_TOKEN
+
+      imagePullSecrets:
+        - name: murraygroves-registry-secret
