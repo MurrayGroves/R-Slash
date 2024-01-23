@@ -120,7 +120,7 @@ impl <'a>Client<'a> {
         let full_path = format!("{}/{}", self.path, path);
         let new_full_path = format!("{}/{}", self.path, new_path);
 
-        let output = Command::new("mediainfo")
+        /*let output = Command::new("mediainfo")
             .arg("--output=JSON")
             .arg(&full_path)
             .output()?;
@@ -143,7 +143,9 @@ impl <'a>Client<'a> {
             ""
         } else {
             &scale
-        };
+        };*/
+
+        let scale = ",scale=-1:'min(360,ih)':flags=lanczos";
 
         let output = Command::new("ffmpeg")
             .arg("-y")
@@ -160,6 +162,18 @@ impl <'a>Client<'a> {
             std::io::stderr().write_all(&output.stderr).unwrap();
             warn!("Failed to convert mp4 to gif: {}", String::from_utf8_lossy(&output.stderr));
             Err(Error::msg(format!("ffmpeg failed: {}\n{}", output.status.to_string(), output.status))).with_context(|| format!("path: {}", full_path))?;
+        }
+
+        let output = Command::new("gifsicle")
+            .arg("-O3")
+            .arg("--lossy=30")
+            .arg("--colors=256")        
+            .arg("--batch")    
+            .arg(&new_full_path)
+            .output()?;
+
+        if !output.status.success() {
+            warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
         }
 
         let output = Command::new("rm")
