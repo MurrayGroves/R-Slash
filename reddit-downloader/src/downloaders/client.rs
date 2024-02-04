@@ -162,18 +162,48 @@ impl <'a>Client<'a> {
             std::io::stderr().write_all(&output.stderr).unwrap();
             warn!("Failed to convert mp4 to gif: {}", String::from_utf8_lossy(&output.stderr));
             Err(Error::msg(format!("ffmpeg failed: {}\n{}", output.status.to_string(), output.status))).with_context(|| format!("path: {}", full_path))?;
-        }
+        }   
 
-        let output = Command::new("gifsicle")
-            .arg("-O3")
-            .arg("--lossy=30")
-            .arg("--colors=256")        
-            .arg("--batch")    
+
+        let size = std::fs::metadata(&new_full_path)?.len();
+        let mut count = 0;
+        while count < 5 && size > 8 * 1024 * 1024 {
+            let output = Command::new("mv")
             .arg(&new_full_path)
+            .arg("temp.gif")
             .output()?;
+    
+            if !output.status.success() {
+                warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
+            }
+    
+            let output = Command::new("gifsicle")
+                .arg("-O3")
+                .arg("--lossy=80")
+                .arg("--colors=128")
+                .arg("--batch")
+                .arg("temp.gif")
+                .output()?;
 
-        if !output.status.success() {
-            warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
+            if !output.status.success() {
+                warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
+            }
+            
+            if size < std::fs::metadata("temp.gif")?.len() {
+                debug!("Size increased, breaking");
+                break;
+            }
+    
+            let output = Command::new("mv")
+                .arg("temp.gif")
+                .arg(&new_full_path)
+                .output()?;
+
+            if !output.status.success() {
+                warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
+            }
+
+            count += 1;
         }
 
         let output = Command::new("rm")

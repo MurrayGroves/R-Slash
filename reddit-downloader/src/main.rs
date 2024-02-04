@@ -1,5 +1,6 @@
 use itertools::Itertools;
 use tracing::{debug, info, warn, error};
+use tracing_subscriber::field::debug;
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -363,12 +364,22 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                 // If the post has been removed by a moderator, skip it
                 if post.get("removed_by_category").unwrap_or(&Null) != &Null {
                     debug!("Post removed by moderator");
+                    if existing_posts.contains(&format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))) {
+                        debug!("Removing post from DB");
+                        con.lrem(format!("subreddit:{}:posts", subreddit), 0, format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
+                        con.del(format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
+                    }
                     return Ok(());
                 }
     
                 // If the post has been removed by the author, skip it
                 if post["author"].to_string().replace('"', "") == "[deleted]" {
                     debug!("Post removed by author");
+                    if existing_posts.contains(&format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))) {
+                        debug!("Removing post from DB");
+                        con.lrem(format!("subreddit:{}:posts", subreddit), 0, format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
+                        con.del(format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
+                    }
                     return Ok(());
                 }
     
@@ -380,6 +391,10 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                 let key: String = format!("subreddit:{}:post:{}", post["subreddit"].to_string().replace("\"", ""), &post["id"].to_string().replace('"', ""));
 
                 let exists = existing_posts.contains(&key);
+
+                if exists {
+                    debug!("Post already exists in DB");
+                }
 
                 // Fetch URL if this is a new post
                 let url = if exists {
@@ -393,9 +408,10 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                     };
 
                     // If URL is already embeddable, no further processing is needed
-                    if url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg") {
+                    if (url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg")) && !url.contains("redgifs.com") {
                         Some(url)
                     } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") || url.contains(".mpd") {
+                        debug!("URL is not embeddable, but we have the ability to turn it into one");
                         let mut res = match downloaders_client.request(&url).await {
                             Ok(x) => x,
                             Err(x) => {
@@ -431,13 +447,16 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                     timestamp: timestamp,
                 };
 
+                debug!("Adding to redis {:?}", post_object);
+
                 // Push post to Redis
                 let value = Vec::from(post_object);
 
                 con.hset_multiple(&key, &value).await?;
 
+
                 // Subreddit has not been downloaded before, meaning we should try get posts into Redis ASAP to minimise the time before the user gets a response
-                if existing_posts.len() == 0 {
+                if existing_posts.len() < 30 {
                     // Push post to list of posts
                     con.rpush(format!("subreddit:{}:posts", subreddit), &key).await?;
                 }
