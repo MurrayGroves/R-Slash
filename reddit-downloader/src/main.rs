@@ -381,6 +381,10 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
 
                 let exists = existing_posts.contains(&key);
 
+                if exists {
+                    debug!("Post already exists in DB");
+                }
+
                 // Fetch URL if this is a new post
                 let url = if exists {
                     None
@@ -396,6 +400,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                     if url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg") {
                         Some(url)
                     } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") || url.contains(".mpd") {
+                        debug!("URL is not embeddable, but we have the ability to turn it into one");
                         let mut res = match downloaders_client.request(&url).await {
                             Ok(x) => x,
                             Err(x) => {
@@ -431,13 +436,16 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                     timestamp: timestamp,
                 };
 
+                debug!("Adding to redis {:?}", post_object);
+
                 // Push post to Redis
                 let value = Vec::from(post_object);
 
                 con.hset_multiple(&key, &value).await?;
 
+
                 // Subreddit has not been downloaded before, meaning we should try get posts into Redis ASAP to minimise the time before the user gets a response
-                if existing_posts.len() == 0 {
+                if existing_posts.len() < 30 {
                     // Push post to list of posts
                     con.rpush(format!("subreddit:{}:posts", subreddit), &key).await?;
                 }
