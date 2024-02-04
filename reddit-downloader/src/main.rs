@@ -1,5 +1,6 @@
 use itertools::Itertools;
 use tracing::{debug, info, warn, error};
+use tracing_subscriber::field::debug;
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -363,12 +364,22 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                 // If the post has been removed by a moderator, skip it
                 if post.get("removed_by_category").unwrap_or(&Null) != &Null {
                     debug!("Post removed by moderator");
+                    if existing_posts.contains(&format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))) {
+                        debug!("Removing post from DB");
+                        con.lrem(format!("subreddit:{}:posts", subreddit), 0, format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
+                        con.del(format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
+                    }
                     return Ok(());
                 }
     
                 // If the post has been removed by the author, skip it
                 if post["author"].to_string().replace('"', "") == "[deleted]" {
                     debug!("Post removed by author");
+                    if existing_posts.contains(&format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))) {
+                        debug!("Removing post from DB");
+                        con.lrem(format!("subreddit:{}:posts", subreddit), 0, format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
+                        con.del(format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
+                    }
                     return Ok(());
                 }
     
