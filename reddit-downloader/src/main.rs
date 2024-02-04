@@ -408,7 +408,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                     };
 
                     // If URL is already embeddable, no further processing is needed
-                    if url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg") {
+                    if (url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg")) && !url.contains("redgifs.com") {
                         Some(url)
                     } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") || url.contains(".mpd") {
                         debug!("URL is not embeddable, but we have the ability to turn it into one");

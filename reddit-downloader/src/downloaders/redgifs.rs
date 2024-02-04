@@ -49,6 +49,23 @@ impl <'a>Client<'a> {
                     Err(Error::msg(format!("wget failed: {}\n{}", output.status.to_string(), output.status))).with_context(|| format!("path: {}", path))?;
                 }
                 return Ok(path.replace(&format!("{}/", self.path), ""));
+            } else if tag.name == "og:image:url" {
+                let path = format!("{}/{}.jpg", self.path, id);
+                self.limiter.wait().await;
+                let output = tokio::process::Command::new("wget")
+                .arg("-r")
+                .arg("-O")
+                .arg(&path)
+                .arg(tag.content)
+                .output().await?;
+
+                self.limiter.update().await;
+
+                if !output.status.success() {
+                    std::io::stderr().write_all(&output.stderr).unwrap();
+                    Err(Error::msg(format!("wget failed: {}\n{}", output.status.to_string(), output.status))).with_context(|| format!("path: {}", path))?;
+                }
+                return Ok(path.replace(&format!("{}/", self.path), ""));
             }
         }
 
