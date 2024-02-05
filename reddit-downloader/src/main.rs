@@ -590,7 +590,9 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
 
     let downloaders_client = downloaders::client::Client::new("/data/media", Some(imgur_client_id), None);
 
+    debug!("Entering loop");
     if do_custom == "true".to_string() {
+        debug!("Starting custom subreddit loop");
         let mut subreddits: HashMap<String, SubredditState> = HashMap::new();
         loop {
             // Populate subreddits with any new subreddit requests
