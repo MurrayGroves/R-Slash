@@ -28,7 +28,7 @@ pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<Type
     let mut requests = HashMap::new();
 
     loop {
-        sleep(Duration::from_secs(5)).await;
+        sleep(Duration::from_secs(1)).await;
 
         // Insert any available requests into the hashmap
         while match rx.try_recv() {

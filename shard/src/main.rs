@@ -494,6 +494,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
             warn!("Failed to defer response: {}", e);
         });
         if !already_queued {
+            debug!("Queueing subreddit for download");
             con.rpush("custom_subreddits_queue", &subreddit).await?;
         }
         loop {
@@ -900,7 +901,7 @@ impl EventHandler for Handler {
             };
 
             let button_command = match custom_id.get("command") {
-                Some(command) => command.to_string(),
+                Some(command) => command.to_string().replace('"', ""),
                 None => {
                     "again".to_string()
                 }
@@ -941,8 +942,15 @@ impl EventHandler for Handler {
                     Some(component_response)
                 },
 
-                "autopost" => {
-                    CreateInteractionResponse::Modal(
+                "auto-post" => {
+                    if let Some(member) = &command.member {
+                        if !member.permissions(&ctx).unwrap().manage_messages() {
+                            command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap();
+                            return;
+                        }
+                    }
+
+                    let resp = CreateInteractionResponse::Modal(
                         CreateModal::new(serde_json::to_string(&json!({
                             "subreddit": custom_id["subreddit"],
                             "command": "autopost",
@@ -951,7 +959,7 @@ impl EventHandler for Handler {
                         .components(vec![
                             CreateActionRow::InputText(
                                 CreateInputText::new(InputTextStyle::Short, "Delay", "delay")
-                                .label("Delay e.g. 5s, 3m, 5h, 1d (seconds, minutes, hours, days)")
+                                .label("Delay e.g. 5s, 3m, 5h, 1d")
                                 .placeholder("5s")
                                 .min_length(2)
                                 .max_length(6)
@@ -966,6 +974,13 @@ impl EventHandler for Handler {
                             ),
                         ])
                     );
+                    match command.create_response(&ctx.http, resp).await {
+                        Ok(_) => {},
+                        Err(x) => {
+                            warn!("Error sending modal: {:?}", x);
+                        }
+                        
+                    };
                     None
                 },
 
@@ -974,6 +989,7 @@ impl EventHandler for Handler {
                     let config = lock.get::<ConfigStruct>().unwrap();
                     let chan = config.auto_post_chan.clone();
                     chan.send(AutoPostCommand::Stop(command.channel_id)).await.unwrap();
+                    command.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap();
                     None
                 }
 
@@ -1117,7 +1133,7 @@ impl EventHandler for Handler {
             };
 
             let modal_command = match custom_id.get("command") {
-                Some(command) => command.to_string(),
+                Some(command) => command.as_str().unwrap(),
                 None => {
                     warn!("Unknown modal command: {:?}", custom_id);
                     modal_tx.finish();
@@ -1125,44 +1141,54 @@ impl EventHandler for Handler {
                 }
             };
 
-            match modal_command.as_str() {
+            match modal_command {
                 "autopost" => {
                     let lock = ctx.data.read().await;
                     let config = lock.get::<ConfigStruct>().unwrap();
                     let chan = config.auto_post_chan.clone();
 
-                    let search = if custom_id["search"] == "" {
-                        None
-                    } else {
-                        Some(custom_id["search"].to_string().replace('"', ""))
+                    let search = match &custom_id["search"] {
+                        serde_json::value::Value::Null => {
+                            None
+                        },
+                        serde_json::value::Value::String(x) => {
+                            Some(x.clone())
+                        },
+                        _ => {
+                            warn!("Invalid search: {:?}", custom_id["search"]);
+                            None
+                        }
                     };
 
                     let mut interval = String::new();
                     let mut limit = String::new();
 
-                    for comp in &modal.data.components[0].components {
-                        match comp {
-                            ActionRowComponent::InputText(input) => {
-                                if input.custom_id == "delay" {
-                                    interval = match input.value.clone() {
-                                        Some(x) => x,
-                                        _ => {
-                                            "5s".to_string()
-                                        }
-                                    
-                                    };
-                                } else if input.custom_id == "limit" {
-                                    limit = match input.value.clone() {
-                                        Some(x) => x,
-                                        _ => {
-                                            "10".to_string()
-                                        }
-                                    };
-                                }
-                            },
-                            _ => {}
+                    for row in &modal.data.components {
+                        for comp in &row.components {
+                            match comp {
+                                ActionRowComponent::InputText(input) => {
+                                    if input.custom_id == "delay" {
+                                        interval = match input.value.clone() {
+                                            Some(x) => x,
+                                            _ => {
+                                                "5s".to_string()
+                                            }
+                                        
+                                        };
+                                    } else if input.custom_id == "limit" {
+                                        limit = match input.value.clone() {
+                                            Some(x) => x,
+                                            _ => {
+                                                "10".to_string()
+                                            }
+                                        };
+                                    }
+                                },
+                                _ => {}
+                            }
                         }
                     }
+                    
                     
                     let interval = if interval.ends_with("s") {
                         interval.replace("s", "").parse::<u64>().unwrap()
@@ -1181,7 +1207,7 @@ impl EventHandler for Handler {
                     let limit = match limit.parse::<u32>() {
                         Ok(x) => x,
                         Err(_) => {
-                            debug!("Invalid limit: {:?}", custom_id["limit"]);
+                            debug!("Invalid limit: {:?}", limit);
                             return;
                         }
                     };
@@ -1190,13 +1216,14 @@ impl EventHandler for Handler {
                         subreddit: custom_id["subreddit"].to_string().replace('"', ""),
                         interval,
                         search,
-                        last_post: Instant::now(),
+                        last_post: Instant::now() - interval,
                         current: 0,
                         limit,
                         channel: modal.channel_id,
                     };
 
                     chan.send(AutoPostCommand::Start(post_request)).await.unwrap();
+                    modal.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap();
                 },
 
                 _ => {
