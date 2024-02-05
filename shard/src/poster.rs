@@ -1,8 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use connection_pooler::ResourceManager;
+use serde_json::json;
 use tokio::sync::{mpsc::Receiver, RwLock};
-use serenity::{model::id::ChannelId, prelude::TypeMap};
+use serenity::{all::ButtonStyle, builder::{CreateActionRow, CreateButton, CreateMessage}, model::id::ChannelId, prelude::TypeMap};
 use tokio::time::{Duration, sleep};
 
 use super::{get_subreddit, get_subreddit_search};
@@ -18,7 +19,12 @@ pub struct PostRequest {
     pub last_post: u64,
 }
 
-pub async fn start_loop(rx: &mut Receiver<PostRequest>, data: Arc<RwLock<TypeMap>>, http: Arc<serenity::http::Http>) {
+pub enum AutoPostCommand {
+    Start(PostRequest),
+    Stop(ChannelId),
+}
+
+pub async fn start_loop(rx: &mut Receiver<AutoPostCommand>, data: Arc<RwLock<TypeMap>>, http: Arc<serenity::http::Http>) {
     let mut requests = HashMap::new();
 
     loop {
@@ -27,7 +33,14 @@ pub async fn start_loop(rx: &mut Receiver<PostRequest>, data: Arc<RwLock<TypeMap
         // Insert any available requests into the hashmap
         while match rx.try_recv() {
             Ok(request) => {
-                requests.insert(request.channel, request);
+                match request {
+                    AutoPostCommand::Start(req) => {
+                        requests.insert(req.channel, req);
+                    }
+                    AutoPostCommand::Stop(channel) => {
+                        requests.remove(&channel);
+                    }
+                }
                 true
             }
             Err(_) => false,
@@ -59,31 +72,29 @@ pub async fn start_loop(rx: &mut Receiver<PostRequest>, data: Arc<RwLock<TypeMap
                     get_subreddit(subreddit, &mut con, channel, None).await
                 }.unwrap();
 
-                channel.send_message(http.clone(), |m| {
-                    if let Some(em) = post.embed {
-                        m.set_embed(em);
-                    }
+                let mut resp = CreateMessage::default();
+                if let Some(em) = post.embed {
+                    resp = resp.embed(em);
+                }
 
-                    if let Some(content) = post.content {
-                        m.content(content);
-                    }
+                if let Some(content) = post.content {
+                    resp = resp.content(content);
+                }
 
-                    if let Some(attachment) = post.file {
-                        m.add_file(attachment);
-                    }
+                if let Some(attachment) = post.file {
+                    resp = resp.add_file(attachment);
+                }
 
-                    m.components(|c| {
-                        c.create_action_row(|a| {
-                            a.create_button(|b| {
-                                b.style(serenity::all::ButtonStyle::Danger)
-                                    .label("Stop")
-                                    .custom_id("cancel_autopost")
-                            })
-                        })
-                    });
+                resp = resp.components(vec![
+                    CreateActionRow::Buttons(vec![
+                        CreateButton::new(json!({
+                            "command": "cancel_autopost",
+                        }).to_string())
+                            .label("Stop")
+                            .style(ButtonStyle::Danger)
+                            ])]);
 
-                    m
-                }).await.unwrap();
+                channel.send_message(http.clone(),  resp).await.unwrap();
                 
                 // Update the last post time
                 request.last_post = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();

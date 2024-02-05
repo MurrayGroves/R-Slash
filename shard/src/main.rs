@@ -1,8 +1,7 @@
 use log::trace;
-use serenity::all::ActionRow;
+use serenity::all::InputTextStyle;
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
-use tokio::runtime::Handle;
 use tracing::{debug, info, warn, error};
 use rand::Rng;
 use serde_json::json;
@@ -14,9 +13,8 @@ use std::fs;
 use std::io::Write;
 use std::collections::HashMap;
 use std::env;
-use chrono::{DateTime, Utc, TimeZone};
 
-use serenity::builder::{CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse};
+use serenity::builder::{Builder, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateModal, EditInteractionResponse};
 use serenity::model::id::{ChannelId, ShardId};
 use serenity::model::gateway::GatewayIntents;
 use serenity::{
@@ -42,7 +40,7 @@ use mongodb::options::FindOptions;
 use serenity::model::guild::{Guild, UnavailableGuild};
 use serenity::model::application::{Interaction, CommandInteraction, ButtonStyle};
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Error};
 
 use memberships::*;
 use connection_pooler::ResourceManager;
@@ -252,11 +250,6 @@ async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut r
 
     let subreddit = post_id.split(":").collect::<Vec<&str>>()[1].to_string();
 
-    let custom_data = json!({
-        "subreddit": subreddit,
-        "search": search,
-    }).to_string();
-
     let author = from_redis_value::<String>(&post.get("author").unwrap().clone())?;
     let title = from_redis_value::<String>(&post.get("title").unwrap().clone())?;
     let url = from_redis_value::<String>(&post.get("url").unwrap().clone())?;
@@ -278,9 +271,21 @@ async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut r
         ),
 
         components: Some(vec![CreateActionRow::Buttons(vec![
-            CreateButton::new(custom_data)
-            .label("🔁")
-            .style(ButtonStyle::Primary)
+            CreateButton::new(json!({
+                "subreddit": subreddit,
+                "search": search,
+                "command": "again"
+            }).to_string())
+                .label("🔁")
+                .style(ButtonStyle::Primary),
+
+            CreateButton::new(json!({
+                "subreddit": subreddit,
+                "search": search,
+                "command": "auto-post"
+            }).to_string())
+                .label("Auto-Post")
+                .style(ButtonStyle::Primary),
         ])]),
 
         fallback: ResponseFallbackMethod::Edit,
@@ -661,6 +666,7 @@ impl Default for InteractionResponse {
     }
 }
 
+
 /// Discord event handler
 struct Handler;
 
@@ -892,33 +898,74 @@ impl EventHandler for Handler {
                 return;
             };
 
-            let subreddit = custom_id["subreddit"].to_string().replace('"', "");
-            debug!("Search, {:?}", custom_id["search"]);
-            let search_enabled = match custom_id["search"] {
-                serde_json::Value::String(_) => true,
-                _ => false,
+            let button_command = match custom_id.get("command") {
+                Some(command) => command.to_string(),
+                None => {
+                    "again".to_string()
+                }
             };
 
-            capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())).await;
-            
-            let data_read = ctx.data.read().await;
-            let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-            let redis_client_mutex = redis_manager.get_available_resource().await;
-            let mut con = redis_client_mutex.lock().await;
+            let component_response: Option<Result<InteractionResponse, Error>> = match button_command.as_str() {
+                "again" => {
+                    let subreddit = custom_id["subreddit"].to_string().replace('"', "");
+                    debug!("Search, {:?}", custom_id["search"]);
+                    let search_enabled = match custom_id["search"] {
+                        serde_json::Value::String(_) => true,
+                        _ => false,
+                    };
+        
+                    capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())).await;
+                    
+                    let data_read = ctx.data.read().await;
+                    let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
+                    let redis_client_mutex = redis_manager.get_available_resource().await;
+                    let mut con = redis_client_mutex.lock().await;
+        
+                    let component_response = match search_enabled {
+                        true => {
+                            let search = custom_id["search"].to_string().replace('"', "");
+                            match timeout(Duration::from_secs(30), get_subreddit_search(subreddit, search, &mut con, command.channel_id, Some(&component_tx))).await {
+                                Ok(x) => x,
+                                Err(x) => Err(anyhow!("Timeout getting search results: {:?}", x))
+                            }
+                        },
+                        false => {
+                            match timeout(Duration::from_secs(30), get_subreddit(subreddit, &mut con, command.channel_id, Some(&component_tx))).await {
+                                Ok(x) => x,
+                                Err(x) => Err(anyhow!("Timeout getting subreddit: {:?}", x))
+                            }
+                        }
+                    };
 
-            let component_response = match search_enabled {
-                true => {
-                    let search = custom_id["search"].to_string().replace('"', "");
-                    match timeout(Duration::from_secs(30), get_subreddit_search(subreddit, search, &mut con, command.channel_id, Some(&component_tx))).await {
-                        Ok(x) => x,
-                        Err(x) => Err(anyhow!("Timeout getting search results: {:?}", x))
-                    }
+                    Some(component_response)
                 },
-                false => {
-                    match timeout(Duration::from_secs(30), get_subreddit(subreddit, &mut con, command.channel_id, Some(&component_tx))).await {
-                        Ok(x) => x,
-                        Err(x) => Err(anyhow!("Timeout getting subreddit: {:?}", x))
-                    }
+
+                "autopost" => {
+                    CreateInteractionResponse::Modal(
+                        CreateModal::new(serde_json::to_string(&custom_id).unwrap(), "Autopost Delay")
+                        .components(vec![
+                            CreateActionRow::InputText(
+                                CreateInputText::new(InputTextStyle::Short, "delay", serde_json::to_string(&custom_id).unwrap())
+                                .label("Delay e.g. 5s, 3m, 5h, 1d (seconds, minutes, hours, days)")
+                                .placeholder("5s")
+                                .min_length(2)
+                                .max_length(6)
+                            )
+                        ])
+                    );
+                    None
+                },
+
+                _ => {
+                    warn!("Unknown button command: {}", button_command);
+                    return;
+                }
+            };
+
+            let component_response = match component_response {
+                Some(component_response) => component_response,
+                None => {
+                    return;
                 }
             };
 
@@ -945,6 +992,7 @@ impl EventHandler for Handler {
 
             if let Err(why) = {
                 let api_span = component_tx.start_child("discord.api", "send button response");
+
                 let mut resp = CreateInteractionResponseMessage::new();
                 if let Some(embed) = component_response.embed {
                     resp = resp.embed(embed);
