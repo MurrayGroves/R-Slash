@@ -1,6 +1,6 @@
 [package]
 name = "discord-shard"
-version = "1.0.3"
+version = "1.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -14,7 +14,7 @@ env_logger = "*"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time", "full"]}
 reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"]}
-serenity = { version = "0.11.5", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
+serenity = { version = "0.12", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
 redis = { version = "*", features = ["aio", "tokio-comp", "connection-manager"] }
 rand = { version = "*", features = ["alloc"]}
 mongodb = "2.3"
@@ -25,7 +25,7 @@ sentry = { version = "0.29.3", features = ["tracing", "anyhow", "debug-images"] 
 tracing = "*"
 tracing-subscriber = { version = "*"}
 compile-time = "*"
-chrono = "0.4.*"
+chrono = "*"
 
 posthog = {path = "../posthog"}
 memberships = {path = "../memberships"}

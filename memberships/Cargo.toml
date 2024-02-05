@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 mongodb = "2.3"
 tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time", "full"]}
-serenity = { version = "0.11.5", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
+serenity = { version = "0.12", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
 rslash_types = {path = "../rslash_types"}
 log = "0.4"
 sentry = "0.29.3"

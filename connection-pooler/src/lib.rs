@@ -60,11 +60,9 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
     }
 
     pub async fn get_available_resource(&self) -> Arc<Mutex<T>> {
-        println!("Getting available resource");
         self.remove_unavailable().await;
 
         let resources = self.resources.lock().await;
-        println!("Locked resources");
         let mut available = Option::None;
         for resource in &*resources {
             match resource.data.try_lock() {
@@ -82,19 +80,15 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
         let available = match available {
             Some(resource) => resource,
             None => {
-                println!("Creating new resource");
                 let new = Arc::<serenity::prelude::Mutex<std::pin::Pin<Box<(dyn std::future::Future<Output = T> + std::marker::Send + 'static)>>>>::try_unwrap(self.maker.clone()()).unwrap_or_else(|_| panic!("Failed to unwrap maker")).into_inner();
                 let resource: Arc<LockedResource<T>> = Arc::new(LockedResource::new(new.await));
-                println!("Adding resource");
                 self.add(resource.clone()).await;
-                println!("Added resource");
                 resource
             }
         };
 
         *available.last_accessed.lock().await = Instant::now();
 
-        println!("Returning available resource");
         available.data.clone()
 
     }
@@ -108,7 +102,6 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
             let _ = resource.data.try_lock();
             let locked = resource.data.try_lock().is_err();
             if resource.last_accessed.lock().await.elapsed() > Duration::from_secs(120)  && locked{
-                warn!("Removing unavailable resource");
                 to_remove = Some(i);
                 break
             }
