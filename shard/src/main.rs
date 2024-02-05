@@ -985,11 +985,20 @@ impl EventHandler for Handler {
                 },
 
                 "cancel_autopost" => {
+                    if let Some(member) = &command.member {
+                        if !member.permissions(&ctx).unwrap().manage_messages() {
+                            command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap();
+                            return;
+                        }
+                    }
+
+
                     let lock = ctx.data.read().await;
                     let config = lock.get::<ConfigStruct>().unwrap();
                     let chan = config.auto_post_chan.clone();
                     chan.send(AutoPostCommand::Stop(command.channel_id)).await.unwrap();
                     command.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap();
+                    capture_event(ctx.data.clone(), "autopost_cancel", Some(&component_tx), None, &format!("channel_{}", &command.channel.clone().unwrap().id.get().to_string())).await;
                     None
                 }
 
@@ -1143,6 +1152,8 @@ impl EventHandler for Handler {
 
             match modal_command {
                 "autopost" => {
+                    capture_event(ctx.data.clone(), "autopost_start", Some(&modal_tx), None, &format!("channel_{}", modal.channel.clone().unwrap().id.get().to_string())).await;
+
                     let lock = ctx.data.read().await;
                     let config = lock.get::<ConfigStruct>().unwrap();
                     let chan = config.auto_post_chan.clone();
