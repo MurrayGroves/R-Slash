@@ -1,4 +1,7 @@
 use log::trace;
+use serenity::all::ActionRow;
+use serenity::gateway::ShardStageUpdateEvent;
+use serenity::model::Colour;
 use tokio::runtime::Handle;
 use tracing::{debug, info, warn, error};
 use rand::Rng;
@@ -13,17 +16,14 @@ use std::collections::HashMap;
 use std::env;
 use chrono::{DateTime, Utc, TimeZone};
 
-use serenity::builder::{CreateEmbed, CreateComponents};
-use serenity::model::id::ChannelId;
+use serenity::builder::{CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse};
+use serenity::model::id::{ChannelId, ShardId};
 use serenity::model::gateway::GatewayIntents;
 use serenity::{
     async_trait,
     model::gateway::Ready,
     prelude::*,
 };
-use serenity::model::application::interaction::application_command::ApplicationCommandInteraction;
-use serenity::model::application::interaction::InteractionResponseType;
-use serenity::model::application::interaction::Interaction;
 
 use tokio::time::{sleep, Duration, timeout};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,16 +39,18 @@ use mongodb::options::ClientOptions;
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 
-use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
-use serenity::model::application::component::ButtonStyle;
 use serenity::model::guild::{Guild, UnavailableGuild};
-use serenity::utils::Colour;
+use serenity::model::application::{Interaction, CommandInteraction, ButtonStyle};
 
 use anyhow::anyhow;
 
 use memberships::*;
-use rslash_types::*;
 use connection_pooler::ResourceManager;
+
+mod poster;
+mod types;
+
+use crate::types::ConfigStruct;
 
 
 /// Returns current milliseconds since the Epoch
@@ -90,7 +92,7 @@ async fn capture_event(data: Arc<RwLock<TypeMap>>, event: &str, parent_tx: Optio
 
 
 #[instrument(skip(command, ctx, tx))]
-async fn get_subreddit_cmd<'a>(command: &'a ApplicationCommandInteraction, ctx: &'a Context, tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
+async fn get_subreddit_cmd<'a>(command: &'a CommandInteraction, ctx: &'a Context, tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
     let data_read = ctx.data.read().await;
 
     let config = data_read.get::<ConfigStruct>().unwrap();
@@ -99,12 +101,11 @@ async fn get_subreddit_cmd<'a>(command: &'a ApplicationCommandInteraction, ctx: 
     debug!("Command Options: {:?}", options);
 
     let subreddit = options[0].value.clone();
-    let subreddit = subreddit.unwrap();
     let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
 
     let search_enabled = options.len() > 1;
     capture_event(ctx.data.clone(), "subreddit_cmd", Some(tx),
-                    Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "false".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())
+                    Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "false".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())
                 ).await;
 
 
@@ -130,7 +131,7 @@ async fn get_subreddit_cmd<'a>(command: &'a ApplicationCommandInteraction, ctx: 
     let mut con = con_mutex.lock().await;
     debug!("Got redis client");
     if options.len() > 1 {
-        let search = options[1].value.as_ref().unwrap().as_str().unwrap().to_string();
+        let search = options[1].value.as_str().unwrap().to_string();
         return get_subreddit_search(subreddit, search, &mut con, command.channel_id, Some(tx)).await
     }
     else {
@@ -238,7 +239,7 @@ async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::
 
 
 #[instrument(skip(con, parent_tx))]
-async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse<'a>, anyhow::Error> {
+async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "get_post_by_id").into(),
         None => {
@@ -266,8 +267,7 @@ async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut r
         embed: Some(CreateEmbed::default()
             .title(title)
             .description(format!("r/{}", subreddit))
-            .author(|a|
-                a.name(format!("u/{}", author))
+            .author(CreateEmbedAuthor::new(format!("u/{}", author))
                 .url(format!("https://reddit.com/u/{}", author))
             )
             .url(url)
@@ -277,15 +277,11 @@ async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut r
             .to_owned()
         ),
 
-        components: Some(CreateComponents::default()
-            .create_action_row(|a|
-                a.create_button(|b|
-                    b.label("🔁")
-                    .style(ButtonStyle::Primary)
-                    .custom_id(custom_data)
-                )
-            ).to_owned()
-        ),
+        components: Some(vec![CreateActionRow::Buttons(vec![
+            CreateButton::new(custom_data)
+            .label("🔁")
+            .style(ButtonStyle::Primary)
+        ])]),
 
         fallback: ResponseFallbackMethod::Edit,
         ..Default::default()
@@ -297,7 +293,7 @@ async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut r
 
 
 #[instrument(skip(con, parent_tx))]
-async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse<'a>, anyhow::Error> {
+pub async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("subreddit.search", "get_subreddit_search").into(),
         None => {
@@ -337,7 +333,7 @@ async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &mut r
 
 
 #[instrument(skip(con, parent_tx))]
-async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse<'a>, anyhow::Error> {
+pub async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("subreddit.get", "get_subreddit").into(),
         None => {
@@ -366,7 +362,7 @@ async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Connection, 
 }
 
 
-fn error_response(code: String) -> InteractionResponse<'static> {
+fn error_response(code: String) -> InteractionResponse {
     let embed = CreateEmbed::default()
         .title("An Error Occurred")
         .description(format!("Please report this in the support server.\n Error: {}", code))
@@ -384,13 +380,13 @@ fn error_response(code: String) -> InteractionResponse<'static> {
 
 
 #[instrument(skip(command, ctx, parent_tx))]
-async fn cmd_get_user_tiers<'a>(command: &'a ApplicationCommandInteraction, ctx: &'a Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
+async fn cmd_get_user_tiers<'a>(command: &'a CommandInteraction, ctx: &'a Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
     let data_lock = ctx.data.read().await;
     let mongodb_manager = data_lock.get::<ResourceManager<mongodb::Client>>().ok_or(anyhow!("Mongodb client manager not found"))?.clone();
     let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
     let mut mongodb_client = mongodb_client_mutex.lock().await;
 
-    let tiers = get_user_tiers(command.user.id.0.to_string(), &mut *mongodb_client, Some(parent_tx)).await;
+    let tiers = get_user_tiers(command.user.id.get().to_string(), &mut *mongodb_client, Some(parent_tx)).await;
     debug!("Tiers: {:?}", tiers);
 
     let bronze = match tiers.bronze.active {
@@ -399,7 +395,7 @@ async fn cmd_get_user_tiers<'a>(command: &'a ApplicationCommandInteraction, ctx:
     }.to_string();
 
 
-    capture_event(ctx.data.clone(), "cmd_get_user_tiers", Some(parent_tx), Some(HashMap::from([("bronze_active", bronze.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
+    capture_event(ctx.data.clone(), "cmd_get_user_tiers", Some(parent_tx), Some(HashMap::from([("bronze_active", bronze.to_string())])), &format!("user_{}", command.user.id.get().to_string())).await;
 
     return Ok(InteractionResponse {
         embed: Some(CreateEmbed::default()
@@ -433,14 +429,14 @@ async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connecti
 }
 
 #[instrument(skip(command, ctx, parent_tx))]
-async fn get_custom_subreddit<'a>(command: &'a ApplicationCommandInteraction, ctx: &'a Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
+async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
     let data_lock = ctx.data.read().await;
     let mongodb_manager = data_lock.get::<ResourceManager<mongodb::Client>>().ok_or(anyhow!("Mongodb client manager not found"))?.clone();
     let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
     let mut mongodb_client = mongodb_client_mutex.lock().await;
 
 
-    let membership = get_user_tiers(command.user.id.0.to_string(), &mut *mongodb_client, Some(parent_tx)).await;
+    let membership = get_user_tiers(command.user.id.get().to_string(), &mut *mongodb_client, Some(parent_tx)).await;
     if !membership.bronze.active {
         return Ok(InteractionResponse {
             embed: Some(CreateEmbed::default()
@@ -455,7 +451,6 @@ async fn get_custom_subreddit<'a>(command: &'a ApplicationCommandInteraction, ct
 
     let options = &command.data.options;
     let subreddit = options[0].value.clone();
-    let subreddit = subreddit.unwrap();
     let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
 
     let web_client = reqwest::Client::builder()
@@ -521,13 +516,13 @@ async fn get_custom_subreddit<'a>(command: &'a ApplicationCommandInteraction, ct
 }
 
 #[instrument(skip(command, ctx, parent_tx))]
-async fn info<'a>(command: &'a ApplicationCommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse<'a>, anyhow::Error> {
+async fn info<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
     let data_read = ctx.data.read().await;    
     let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
     let redis_client_mutex = redis_manager.get_available_resource().await;
     let mut con = redis_client_mutex.lock().await;
 
-    capture_event(ctx.data.clone(), "cmd_info", Some(parent_tx), None, &format!("user_{}", command.user.id.0.to_string())).await;
+    capture_event(ctx.data.clone(), "cmd_info", Some(parent_tx), None, &format!("user_{}", command.user.id.get().to_string())).await;
 
     let guild_counts: HashMap<String, redis::Value> = con.hgetall(format!("shard_guild_counts_{}", get_namespace())).await?;
     let mut guild_count = 0;
@@ -535,7 +530,7 @@ async fn info<'a>(command: &'a ApplicationCommandInteraction, ctx: &Context, par
         guild_count += from_redis_value::<u64>(&count)?;
     }
 
-    let id = ctx.cache.current_user_id().0;
+    let id = ctx.cache.current_user().id.get();
 
     return Ok(InteractionResponse {
         embed: Some(CreateEmbed::default()
@@ -547,7 +542,9 @@ async fn info<'a>(command: &'a ApplicationCommandInteraction, ctx: &Context, par
             [Privacy Policy](https://pastebin.com/DtZvJJhG)
             [Terms & Conditions](https://pastebin.com/6c4z3uM5)", id))
             .color(0x00ff00).to_owned()
-            .footer(|f| f.text(format!("v{} compiled at {}", env!("CARGO_PKG_VERSION"), compile_time::datetime_str!())))
+            .footer(CreateEmbedFooter::new(
+                format!("v{} compiled at {}", env!("CARGO_PKG_VERSION"), compile_time::datetime_str!())
+            ))
             .fields(vec![
                 ("Servers".to_string(), guild_count.to_string(), true),
                 ("Shard ID".to_string(), ctx.shard_id.to_string(), true),
@@ -560,7 +557,7 @@ async fn info<'a>(command: &'a ApplicationCommandInteraction, ctx: &Context, par
 
 
 #[instrument(skip(command, ctx, tx))]
-async fn get_command_response<'a>(command: &'a ApplicationCommandInteraction, ctx: &'a Context, tx: &'a sentry::Transaction) -> Result<InteractionResponse<'a>, anyhow::Error> {
+async fn get_command_response<'a>(command: &'a CommandInteraction, ctx: &'a Context, tx: &'a sentry::Transaction) -> Result<InteractionResponse, anyhow::Error> {
     match command.data.name.as_str() {
         "ping" => {
             Ok(InteractionResponse {
@@ -642,16 +639,16 @@ enum ResponseFallbackMethod {
 }
 
 #[derive(Debug, Clone)]
-struct InteractionResponse<'a> {
-    file: Option<serenity::model::channel::AttachmentType<'a>>,
+struct InteractionResponse {
+    file: Option<serenity::builder::CreateAttachment>,
     embed: Option<serenity::builder::CreateEmbed>,
     content: Option<String>,
     ephemeral: bool,
-    components: Option<serenity::builder::CreateComponents>,
-    fallback: ResponseFallbackMethod
+    components: Option<Vec<CreateActionRow>>,
+    fallback: ResponseFallbackMethod,
 }
 
-impl Default for InteractionResponse<'_> {
+impl Default for InteractionResponse {
     fn default() -> Self {
         InteractionResponse {
             file: None,
@@ -670,17 +667,18 @@ struct Handler;
 #[async_trait]
 impl EventHandler for Handler {
     /// Fires when the client receives new data about a guild
-    async fn guild_create(&self, ctx: Context, guild: Guild, is_new: bool) {
+    async fn guild_create(&self, ctx: Context, guild: Guild, is_new: Option<bool>) {
         debug!("Guild create event fired");
         let data_read = ctx.data.read().await;
         let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
         let redis_client_mutex = redis_manager.get_available_resource().await;
         let mut con = redis_client_mutex.lock().await;
-        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace()), ctx.shard_id, ctx.cache.guild_count()).await.unwrap();
+        let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace()), ctx.shard_id.0, ctx.cache.guild_count()).await.unwrap();
 
-        if is_new { // First time client has seen the guild
-            capture_event(ctx.data.clone(), "guild_join", None, None, &format!("guild_{}", guild.id.0.to_string())).await;
-            //update_guild_commands(guild.id, &mut data, &ctx).await;
+        if let Some(x) = is_new { // First time client has seen the guild
+            if x {
+                capture_event(ctx.data.clone(), "guild_join", None, None, &format!("guild_{}", guild.id.get().to_string())).await;
+            }
         }
     }
 
@@ -690,18 +688,18 @@ impl EventHandler for Handler {
             let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
             let redis_client_mutex = redis_manager.get_available_resource().await;
             let mut con = redis_client_mutex.lock().await;
-            let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace()), ctx.shard_id, ctx.cache.guild_count()).await.unwrap();
+            let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace()), ctx.shard_id.0, ctx.cache.guild_count()).await.unwrap();
         }
     
 
-        capture_event(ctx.data.clone(), "guild_leave", None, None, &format!("guild_{}", incomplete.id.0.to_string())).await;
+        capture_event(ctx.data.clone(), "guild_leave", None, None, &format!("guild_{}", incomplete.id.get().to_string())).await;
     }
 
     /// Fires when the client is connected to the gateway
     async fn ready(&self, ctx: Context, ready: Ready) {
-        capture_event(ctx.data, "on_ready", None, None, &format!("shard_{}", ready.shard.unwrap()[0].to_string())).await;
+        capture_event(ctx.data, "on_ready", None, None, &format!("shard_{}", ready.shard.unwrap().id.0.to_string())).await;
 
-        info!("Shard {} connected as {}, on {} servers!", ready.shard.unwrap()[0], ready.user.name, ready.guilds.len());
+        info!("Shard {} connected as {}, on {} servers!", ready.shard.unwrap().id.0, ready.user.name, ready.guilds.len());
 
         if !Path::new("/etc/probes").is_dir() {
             fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
@@ -748,14 +746,14 @@ impl EventHandler for Handler {
             }
         }
 
-        if let Interaction::ApplicationCommand(command) = interaction.clone() {
+        if let Interaction::Command(command) = interaction.clone() {
             let slash_command_tx = tx.start_child("interaction.slash_command", "handle slash command");
             match command.guild_id {
                 Some(guild_id) => {
-                    info!("{:?} ({:?}) > {:?} ({:?}) : /{} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
+                    info!("{:?} ({:?}) > {:?} ({:?}) : /{} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.get(), command.user.name, command.user.id.get(), command.data.name, command.data.options);
                 },
                 None => {
-                    info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.as_u64(), command.data.name, command.data.options);
+                    info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.get(), command.data.name, command.data.options);
                 }
             }
             let command_response = get_command_response(&command, &ctx, &tx).await;
@@ -786,35 +784,24 @@ impl EventHandler for Handler {
             // Try to send response
             if let Err(why) = {
                 let api_span = slash_command_tx.start_child("discord.api", "create slash command response");
+
+                let mut resp = CreateInteractionResponseMessage::new();
+                if let Some(embed) = command_response.embed {
+                    resp = resp.embed(embed);
+                };
+
+                if let Some(components) = command_response.components {
+                    resp = resp.components(components);
+                };
+
+                if let Some(content) = command_response.content {
+                    resp = resp.content(content);
+                };
+
+                resp = resp.ephemeral(command_response.ephemeral);
                 let to_return = command
-                .create_interaction_response(&ctx.http, |response| {
-                    let span = slash_command_tx.start_child("discord.prepare_response", "create slash command response");
-                    let to_return = response
-                        .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|mut message| {
-                            // Clone component_response so we can use it in the closure without moving the original data
-                            let command_response = command_response.clone();
-                            if command_response.embed.is_some() {
-                                message = message.set_embed(command_response.embed.unwrap());
-                            };
-
-                            if command_response.components.is_some() {
-                                message = message.set_components(command_response.components.unwrap());
-                            };
-
-                            if command_response.content.is_some() {
-                                message = message.content(command_response.content.unwrap());
-                            };
-
-                            message = message.ephemeral(command_response.ephemeral);
-
-                            message
-                        });
-
-                    span.finish();
-                    to_return
-                })
-                .await;
+                .create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await;
+                
                 api_span.finish();
                 to_return
             }
@@ -829,27 +816,20 @@ impl EventHandler for Handler {
                             match command_response.fallback {
                                 ResponseFallbackMethod::Edit => {
                                     let api_span = slash_command_tx.start_child("discord.api", "edit slash command response");
-                                    if let Err(why) = command.edit_original_interaction_response(&ctx.http, |mut message| {
-                                        // Clone component_response so we can use it in the closure without moving the original data
-                                        let command_response = command_response.clone();
-                                        if command_response.embed.is_some() {
-                                            message = message.set_embed(command_response.embed.unwrap());
-                                        };
-            
-                                        if command_response.components.is_some() {
-                                            message = message.components(|msg| {
-                                                // Copy properties across, need to do this because for some reason edit_original_interaction_response doesn't provide set_components
-                                                msg.0 = command_response.components.unwrap().0;
-                                                msg
-                                            });
-                                        };
-            
-                                        if command_response.content.is_some() {
-                                            message = message.content(command_response.content.unwrap());
-                                        };
-                        
-                                        message
-                                    }).await {
+                                    let mut resp = EditInteractionResponse::new();
+                                    if let Some(embed) = command_response.embed {
+                                        resp = resp.embed(embed);
+                                    };
+                    
+                                    if let Some(components) = command_response.components {
+                                        resp = resp.components(components);
+                                    };
+                    
+                                    if let Some(content) = command_response.content {
+                                        resp = resp.content(content);
+                                    };
+                    
+                                    if let Err(why) = command.edit_response(&ctx.http, resp).await {
                                         warn!("Cannot edit slash command response: {}", why);
                                     };
                                     api_span.finish();
@@ -857,26 +837,20 @@ impl EventHandler for Handler {
 
                                 ResponseFallbackMethod::Followup => {
                                     let followup_span = slash_command_tx.start_child("discord.api", "send followup");
-                                    if let Err(why) = command.channel_id.send_message(&ctx.http, |mut message| {
-                                        // Clone component_response so we can use it in the closure without moving the original data
-                                        let command_response = command_response.clone();
-                                        if command_response.embed.is_some() {
-                                            message = message.set_embed(command_response.embed.unwrap());
-                                        };
-            
-                                        if command_response.components.is_some() {
-                                            message = message.components(|msg| {
-                                                msg.0 = command_response.components.unwrap().0;
-                                                msg
-                                            });
-                                        };
-            
-                                        if command_response.content.is_some() {
-                                            message = message.content(command_response.content.unwrap());
-                                        };
-                        
-                                        message
-                                    }).await {
+                                    let mut resp = CreateMessage::new();
+                                    if let Some(embed) = command_response.embed {
+                                        resp = resp.embed(embed);
+                                    };
+                    
+                                    if let Some(components) = command_response.components {
+                                        resp = resp.components(components);
+                                    };
+                    
+                                    if let Some(content) = command_response.content {
+                                        resp = resp.content(content);
+                                    };
+                    
+                                    if let Err(why) = command.channel_id.send_message(&ctx.http, resp).await {
                                         warn!("Cannot send followup to slash command: {}", why);
                                     }
                                     followup_span.finish();
@@ -899,15 +873,15 @@ impl EventHandler for Handler {
             }
         }
 
-        if let Interaction::MessageComponent(command) = interaction {
+        if let Interaction::Component(command) = interaction {
             let component_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.component", "handle component interaction"));
 
             match command.guild_id {
                 Some(guild_id) => {
-                    info!("{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.as_u64(), command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
+                    info!("{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.get(), command.user.name, command.user.id.get(), command.data.custom_id, command.data.kind);
                 },
                 None => {
-                    info!("{:?} ({:?}) : Button {} {:?}", command.user.name, command.user.id.as_u64(), command.data.custom_id, command.data.values);
+                    info!("{:?} ({:?}) : Button {} {:?}", command.user.name, command.user.id.get(), command.data.custom_id, command.data.kind);
                 }
             }
 
@@ -925,7 +899,7 @@ impl EventHandler for Handler {
                 _ => false,
             };
 
-            capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.0.to_string())).await;
+            capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())).await;
             
             let data_read = ctx.data.read().await;
             let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
@@ -971,32 +945,20 @@ impl EventHandler for Handler {
 
             if let Err(why) = {
                 let api_span = component_tx.start_child("discord.api", "send button response");
-                let to_return = command
-                .create_interaction_response(&ctx.http, |response| {
-                    response
-                        .kind(InteractionResponseType::ChannelMessageWithSource)
-                        .interaction_response_data(|mut message| {
-                            // Clone component_response so we can use it in the closure without moving the original data
-                            let component_response = component_response.clone();
-                            if component_response.embed.is_some() {
-                                message = message.set_embed(component_response.embed.unwrap());
-                            };
+                let mut resp = CreateInteractionResponseMessage::new();
+                if let Some(embed) = component_response.embed {
+                    resp = resp.embed(embed);
+                };
 
-                            if component_response.components.is_some() {
-                                message = message.set_components(component_response.components.unwrap());
-                            };
+                if let Some(components) = component_response.components {
+                    resp = resp.components(components);
+                };
 
-                            if component_response.content.is_some() {
-                                message = message.content(component_response.content.unwrap());
-                            };
+                if let Some(content) = component_response.content {
+                    resp = resp.content(content);
+                };
 
-                            message = message.ephemeral(component_response.ephemeral);
-
-                            message
-                        });
-                    response
-                })
-                .await;
+                let to_return = command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await;
                 api_span.finish();
                 to_return
             }
@@ -1011,26 +973,19 @@ impl EventHandler for Handler {
                             match component_response.fallback {
                                 ResponseFallbackMethod::Edit => {
                                     let api_span = component_tx.start_child("discord.api", "edit slash command response");
-                                    if let Err(why) = command.edit_original_interaction_response(&ctx.http, |mut message| {
-                                        // Clone component_response so we can use it in the closure without moving the original data
-                                        let component_response = component_response.clone();
-                                        if component_response.embed.is_some() {
-                                            message = message.set_embed(component_response.embed.unwrap());
-                                        };
-            
-                                        if component_response.components.is_some() {
-                                            message = message.components(|msg| {
-                                                msg.0 = component_response.components.unwrap().0;
-                                                msg
-                                            });
-                                        };
-            
-                                        if component_response.content.is_some() {
-                                            message = message.content(component_response.content.unwrap());
-                                        };
-                        
-                                        message
-                                    }).await {
+                                    let mut resp = EditInteractionResponse::new();
+                                    if let Some(embed) = component_response.embed {
+                                        resp = resp.embed(embed);
+                                    };
+
+                                    if let Some(components) = component_response.components {
+                                        resp = resp.components(components);
+                                    };
+
+                                    if let Some(content) = component_response.content {
+                                        resp = resp.content(content);
+                                    };
+                                    if let Err(why) = command.edit_response(&ctx.http, resp).await {
                                         warn!("Cannot edit slash command response: {}", why);
                                     };
                                     api_span.finish();
@@ -1038,26 +993,19 @@ impl EventHandler for Handler {
 
                                 ResponseFallbackMethod::Followup => {
                                     let followup_span = component_tx.start_child("discord.api", "send followup");
-                                    if let Err(why) = command.channel_id.send_message(&ctx.http, |mut message| {
-                                        // Clone component_response so we can use it in the closure without moving the original data
-                                        let component_response = component_response.clone();
-                                        if component_response.embed.is_some() {
-                                            message = message.set_embed(component_response.embed.unwrap());
-                                        };
-            
-                                        if component_response.components.is_some() {
-                                            message = message.components(|msg| {
-                                                msg.0 = component_response.components.unwrap().0;
-                                                msg
-                                            });
-                                        };
-            
-                                        if component_response.content.is_some() {
-                                            message = message.content(component_response.content.unwrap());
-                                        };
-                        
-                                        message
-                                    }).await {
+                                    let mut resp = CreateMessage::new();
+                                    if let Some(embed) = component_response.embed {
+                                        resp = resp.embed(embed);
+                                    };
+
+                                    if let Some(components) = component_response.components {
+                                        resp = resp.components(components);
+                                    };
+
+                                    if let Some(content) = component_response.content {
+                                        resp = resp.content(content);
+                                    };
+                                    if let Err(why) = command.channel_id.send_message(&ctx.http, resp).await {
                                         warn!("Cannot send followup to slash command: {}", why);
                                     }
                                     followup_span.finish();
@@ -1084,21 +1032,20 @@ impl EventHandler for Handler {
 }
 
 
-async fn monitor_total_shards(shard_manager: Arc<Mutex<serenity::client::bridge::gateway::ShardManager>>, total_shards: u64) {
+async fn monitor_total_shards(shard_manager: Arc<serenity::gateway::ShardManager>, total_shards: u32) {
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     let mut con = db_client.get_tokio_connection().await.expect("Can't connect to redis");
 
     let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
-    let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
+    let shard_id: u32 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u32");
 
     loop {
         let _ = sleep(Duration::from_secs(60)).await;
 
-        let db_total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace())).await;
-        let db_total_shards: u64 = db_total_shards.expect("Failed to get or convert total_shards from Redis");
+        let db_total_shards: redis::RedisResult<u32> = con.get(format!("total_shards_{}", get_namespace())).await;
+        let db_total_shards: u32 = db_total_shards.expect("Failed to get or convert total_shards from Redis");
 
-        let mut shard_manager = shard_manager.lock().await;
-        if !shard_manager.has(serenity::client::bridge::gateway::ShardId(shard_id)).await {
+        if !shard_manager.has(ShardId(shard_id)).await {
             debug!("Shard {} not found, marking self for termination.", shard_id);
             let _ = fs::remove_file("/etc/probes/live");
         }
@@ -1123,7 +1070,7 @@ async fn main() {
     let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
     let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
     let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
-    let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
+    let shard_id: u32 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u32");
 
     let redis_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
     let mut con = redis_client.get_async_connection().await.expect("Can't connect to redis");
@@ -1143,18 +1090,19 @@ async fn main() {
 
     let nsfw_subreddits: Vec<String> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap().to_string()).collect();
 
-    let total_shards: redis::RedisResult<u64> = con.get(format!("total_shards_{}", get_namespace())).await;
-    let total_shards: u64 = total_shards.expect("Failed to get or convert total_shards");
+    let total_shards: redis::RedisResult<u32> = con.get(format!("total_shards_{}", get_namespace())).await;
+    let total_shards: u32 = total_shards.expect("Failed to get or convert total_shards");
 
     debug!("Booting with {:?} total shards", total_shards);
 
     let mut client = serenity::Client::builder(token,  GatewayIntents::non_privileged())
         .event_handler(Handler)
-        .application_id(application_id)
+        .application_id(application_id.into())
         .await
         .expect("Error creating client");
 
 
+    let auto_post_chan = tokio::sync::mpsc::channel(100);
     {
         let mut data: tokio::sync::RwLockWriteGuard<'_, TypeMap> = client.data.write().await;
 
@@ -1187,8 +1135,9 @@ async fn main() {
         data.insert::<ResourceManager<redis::aio::Connection>>(redis_manager);
         data.insert::<ResourceManager<posthog::Client>>(posthog_manager);
         data.insert::<ConfigStruct>(ConfigStruct {
-            shard_id: shard_id as u64,
+            shard_id: shard_id,
             nsfw_subreddits: nsfw_subreddits,
+            auto_post_chan: auto_post_chan.0.clone()
         });
     }
 
@@ -1197,6 +1146,8 @@ async fn main() {
         debug!("Spawning shard monitor thread");
         monitor_total_shards(shard_manager, total_shards).await;
     });
+
+    tokio::spawn(poster::start_loop(&mut auto_post_chan.1, client.data.clone(), client.http.clone()));
 
     let thread = tokio::spawn(async move {
         tracing_subscriber::Registry::default()
@@ -1247,7 +1198,7 @@ async fn main() {
         }));
     
         debug!("Spawning client thread");
-        client.start_shard(shard_id, total_shards as u64).await.expect("Failed to start shard");
+        client.start_shard(shard_id, total_shards).await.expect("Failed to start shard");
     });
 
     // If client thread exits, shard has crashed, so mark self as unhealthy.
