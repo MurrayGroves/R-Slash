@@ -8,5 +8,5 @@ edition = "2021"
 [dependencies]
 tracing = "*"
 anyhow = "*"
-serenity = {version = "*", features = ["client"]}
+serenity = {version = "0.12", features = ["client"]}
 tokio = {version = "*", features = ["sync"]}
