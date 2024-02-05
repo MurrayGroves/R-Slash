@@ -24,7 +24,7 @@ pub enum ConfigValue {
 pub struct ConfigStruct {
     pub shard_id: u32,
     pub nsfw_subreddits: Vec<String>,
-    pub auto_post_chan: tokio::sync::mpsc::Sender<crate::poster::PostRequest>,
+    pub auto_post_chan: tokio::sync::mpsc::Sender<crate::poster::AutoPostCommand>,
 }
 
 impl serenity::prelude::TypeMapKey for ConfigStruct {

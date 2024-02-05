@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use connection_pooler::ResourceManager;
 use serde_json::json;
-use tokio::sync::{mpsc::Receiver, RwLock};
+use tokio::{sync::{mpsc::Receiver, RwLock}, time::Instant};
 use serenity::{all::ButtonStyle, builder::{CreateActionRow, CreateButton, CreateMessage}, model::id::ChannelId, prelude::TypeMap};
 use tokio::time::{Duration, sleep};
 
@@ -13,10 +13,10 @@ pub struct PostRequest {
     pub subreddit: String,
     pub search: Option<String>,
     // Interval between posts in seconds
-    pub interval: u16,
+    pub interval: Duration,
     pub limit: u32,
     pub current: u32,
-    pub last_post: u64,
+    pub last_post: Instant,
 }
 
 pub enum AutoPostCommand {
@@ -24,7 +24,7 @@ pub enum AutoPostCommand {
     Stop(ChannelId),
 }
 
-pub async fn start_loop(rx: &mut Receiver<AutoPostCommand>, data: Arc<RwLock<TypeMap>>, http: Arc<serenity::http::Http>) {
+pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<TypeMap>>, http: Arc<serenity::http::Http>) {
     let mut requests = HashMap::new();
 
     loop {
@@ -50,7 +50,7 @@ pub async fn start_loop(rx: &mut Receiver<AutoPostCommand>, data: Arc<RwLock<Typ
 
         // Iterate over the requests and post if the interval has passed
         for (channel, request) in requests.iter_mut() {
-            if request.last_post + (request.interval as u64) < std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() {
+            if request.last_post + request.interval < Instant::now() {
                 // Post the request
                 let data = data.read().await;
                 let client = data.get::<ResourceManager<redis::aio::Connection>>().unwrap();
@@ -97,7 +97,7 @@ pub async fn start_loop(rx: &mut Receiver<AutoPostCommand>, data: Arc<RwLock<Typ
                 channel.send_message(http.clone(),  resp).await.unwrap();
                 
                 // Update the last post time
-                request.last_post = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                request.last_post = Instant::now();
             }
         }
 

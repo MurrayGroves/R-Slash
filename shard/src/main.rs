@@ -1,5 +1,5 @@
 use log::trace;
-use serenity::all::InputTextStyle;
+use serenity::all::{ActionRowComponent, InputTextStyle};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
 use tracing::{debug, info, warn, error};
@@ -23,7 +23,7 @@ use serenity::{
     prelude::*,
 };
 
-use tokio::time::{sleep, Duration, timeout};
+use tokio::time::{sleep, timeout, Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use std::fs::File;
@@ -48,6 +48,7 @@ use connection_pooler::ResourceManager;
 mod poster;
 mod types;
 
+use crate::poster::{AutoPostCommand, PostRequest};
 use crate::types::ConfigStruct;
 
 
@@ -792,15 +793,15 @@ impl EventHandler for Handler {
                 let api_span = slash_command_tx.start_child("discord.api", "create slash command response");
 
                 let mut resp = CreateInteractionResponseMessage::new();
-                if let Some(embed) = command_response.embed {
+                if let Some(embed) = command_response.embed.clone() {
                     resp = resp.embed(embed);
                 };
 
-                if let Some(components) = command_response.components {
+                if let Some(components) = command_response.components.clone() {
                     resp = resp.components(components);
                 };
 
-                if let Some(content) = command_response.content {
+                if let Some(content) = command_response.content.clone() {
                     resp = resp.content(content);
                 };
 
@@ -823,15 +824,15 @@ impl EventHandler for Handler {
                                 ResponseFallbackMethod::Edit => {
                                     let api_span = slash_command_tx.start_child("discord.api", "edit slash command response");
                                     let mut resp = EditInteractionResponse::new();
-                                    if let Some(embed) = command_response.embed {
+                                    if let Some(embed) = command_response.embed.clone() {
                                         resp = resp.embed(embed);
                                     };
                     
-                                    if let Some(components) = command_response.components {
+                                    if let Some(components) = command_response.components.clone() {
                                         resp = resp.components(components);
                                     };
                     
-                                    if let Some(content) = command_response.content {
+                                    if let Some(content) = command_response.content.clone() {
                                         resp = resp.content(content);
                                     };
                     
@@ -844,15 +845,15 @@ impl EventHandler for Handler {
                                 ResponseFallbackMethod::Followup => {
                                     let followup_span = slash_command_tx.start_child("discord.api", "send followup");
                                     let mut resp = CreateMessage::new();
-                                    if let Some(embed) = command_response.embed {
+                                    if let Some(embed) = command_response.embed.clone() {
                                         resp = resp.embed(embed);
                                     };
                     
-                                    if let Some(components) = command_response.components {
+                                    if let Some(components) = command_response.components.clone() {
                                         resp = resp.components(components);
                                     };
                     
-                                    if let Some(content) = command_response.content {
+                                    if let Some(content) = command_response.content.clone() {
                                         resp = resp.content(content);
                                     };
                     
@@ -879,7 +880,7 @@ impl EventHandler for Handler {
             }
         }
 
-        if let Interaction::Component(command) = interaction {
+        if let Interaction::Component(command) = interaction.clone() {
             let component_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.component", "handle component interaction"));
 
             match command.guild_id {
@@ -942,19 +943,39 @@ impl EventHandler for Handler {
 
                 "autopost" => {
                     CreateInteractionResponse::Modal(
-                        CreateModal::new(serde_json::to_string(&custom_id).unwrap(), "Autopost Delay")
+                        CreateModal::new(serde_json::to_string(&json!({
+                            "subreddit": custom_id["subreddit"],
+                            "command": "autopost",
+                            "search": custom_id["search"]
+                        })).unwrap(), "Autopost Delay")
                         .components(vec![
                             CreateActionRow::InputText(
-                                CreateInputText::new(InputTextStyle::Short, "delay", serde_json::to_string(&custom_id).unwrap())
+                                CreateInputText::new(InputTextStyle::Short, "Delay", "delay")
                                 .label("Delay e.g. 5s, 3m, 5h, 1d (seconds, minutes, hours, days)")
                                 .placeholder("5s")
                                 .min_length(2)
                                 .max_length(6)
-                            )
+                            ),
+
+                            CreateActionRow::InputText(
+                                CreateInputText::new(InputTextStyle::Short, "Limit", "limit")
+                                .label("How many times to post in total")
+                                .placeholder("10")
+                                .min_length(1)
+                                .max_length(2)
+                            ),
                         ])
                     );
                     None
                 },
+
+                "cancel_autopost" => {
+                    let lock = ctx.data.read().await;
+                    let config = lock.get::<ConfigStruct>().unwrap();
+                    let chan = config.auto_post_chan.clone();
+                    chan.send(AutoPostCommand::Stop(command.channel_id)).await.unwrap();
+                    None
+                }
 
                 _ => {
                     warn!("Unknown button command: {}", button_command);
@@ -994,15 +1015,15 @@ impl EventHandler for Handler {
                 let api_span = component_tx.start_child("discord.api", "send button response");
 
                 let mut resp = CreateInteractionResponseMessage::new();
-                if let Some(embed) = component_response.embed {
+                if let Some(embed) = component_response.embed.clone() {
                     resp = resp.embed(embed);
                 };
 
-                if let Some(components) = component_response.components {
+                if let Some(components) = component_response.components.clone() {
                     resp = resp.components(components);
                 };
 
-                if let Some(content) = component_response.content {
+                if let Some(content) = component_response.content.clone() {
                     resp = resp.content(content);
                 };
 
@@ -1074,6 +1095,116 @@ impl EventHandler for Handler {
                 };
             }
             component_tx.finish();
+        };
+        
+        if let Interaction::Modal(modal) = interaction {
+            let modal_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.modal", "handle modal interaction"));
+
+            match modal.guild_id {
+                Some(guild_id) => {
+                    info!("{:?} ({:?}) > {:?} ({:?}) : Modal {} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.get(), modal.user.name, modal.user.id.get(), modal.data.custom_id, modal.data.components);
+                },
+                None => {
+                    info!("{:?} ({:?}) : Modal {} {:?}", modal.user.name, modal.user.id.get(), modal.data.custom_id, modal.data.components);
+                }
+            }
+
+            // If custom_id uses invalid data structure (old version of bot), ignore interaction
+            let custom_id: HashMap<String, serde_json::Value> = if let Ok(custom_id) = serde_json::from_str(&modal.data.custom_id) {
+                custom_id
+            } else {
+                return;
+            };
+
+            let modal_command = match custom_id.get("command") {
+                Some(command) => command.to_string(),
+                None => {
+                    warn!("Unknown modal command: {:?}", custom_id);
+                    modal_tx.finish();
+                    return;
+                }
+            };
+
+            match modal_command.as_str() {
+                "autopost" => {
+                    let lock = ctx.data.read().await;
+                    let config = lock.get::<ConfigStruct>().unwrap();
+                    let chan = config.auto_post_chan.clone();
+
+                    let search = if custom_id["search"] == "" {
+                        None
+                    } else {
+                        Some(custom_id["search"].to_string().replace('"', ""))
+                    };
+
+                    let mut interval = String::new();
+                    let mut limit = String::new();
+
+                    for comp in &modal.data.components[0].components {
+                        match comp {
+                            ActionRowComponent::InputText(input) => {
+                                if input.custom_id == "delay" {
+                                    interval = match input.value.clone() {
+                                        Some(x) => x,
+                                        _ => {
+                                            "5s".to_string()
+                                        }
+                                    
+                                    };
+                                } else if input.custom_id == "limit" {
+                                    limit = match input.value.clone() {
+                                        Some(x) => x,
+                                        _ => {
+                                            "10".to_string()
+                                        }
+                                    };
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+                    
+                    let interval = if interval.ends_with("s") {
+                        interval.replace("s", "").parse::<u64>().unwrap()
+                    } else if interval.ends_with("m") {
+                        interval.replace("m", "").parse::<u64>().unwrap() * 60
+                    } else if interval.ends_with("h") {
+                        interval.replace("h", "").parse::<u64>().unwrap() * 3600
+                    } else if interval.ends_with("d") {
+                        interval.replace("d", "").parse::<u64>().unwrap() * 86400
+                    } else {
+                        return;
+                    };
+
+                    let interval = Duration::from_secs(interval);
+
+                    let limit = match limit.parse::<u32>() {
+                        Ok(x) => x,
+                        Err(_) => {
+                            debug!("Invalid limit: {:?}", custom_id["limit"]);
+                            return;
+                        }
+                    };
+
+                    let post_request = poster::PostRequest {
+                        subreddit: custom_id["subreddit"].to_string().replace('"', ""),
+                        interval,
+                        search,
+                        last_post: Instant::now(),
+                        current: 0,
+                        limit,
+                        channel: modal.channel_id,
+                    };
+
+                    chan.send(AutoPostCommand::Start(post_request)).await.unwrap();
+                },
+
+                _ => {
+                    warn!("Unknown modal command: {}", modal_command);
+                }
+            }
+
+            modal_tx.finish();
         }
         tx.finish();
     }
@@ -1195,7 +1326,7 @@ async fn main() {
         monitor_total_shards(shard_manager, total_shards).await;
     });
 
-    tokio::spawn(poster::start_loop(&mut auto_post_chan.1, client.data.clone(), client.http.clone()));
+    tokio::spawn(poster::start_loop(auto_post_chan.1, client.data.clone(), client.http.clone()));
 
     let thread = tokio::spawn(async move {
         tracing_subscriber::Registry::default()
