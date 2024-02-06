@@ -37,3 +37,5 @@ reddit-downloader/test-data
 badge-server/
 reddit-downloader/redgifs_browser.py
 stats-uploader/secrets.yml
+
+*.env
