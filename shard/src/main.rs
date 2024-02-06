@@ -14,7 +14,7 @@ use std::io::Write;
 use std::collections::HashMap;
 use std::env;
 
-use serenity::builder::{Builder, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateModal, EditInteractionResponse};
+use serenity::builder::{CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateModal, EditInteractionResponse};
 use serenity::model::id::{ChannelId, ShardId};
 use serenity::model::gateway::GatewayIntents;
 use serenity::{
@@ -48,7 +48,7 @@ use connection_pooler::ResourceManager;
 mod poster;
 mod types;
 
-use crate::poster::{AutoPostCommand, PostRequest};
+use crate::poster::AutoPostCommand;
 use crate::types::ConfigStruct;
 
 
@@ -125,9 +125,8 @@ async fn get_subreddit_cmd<'a>(command: &'a CommandInteraction, ctx: &'a Context
     }
 
     debug!("Getting redis client");
-    let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-    let con_mutex = redis_manager.get_available_resource().await;
-    let mut con = con_mutex.lock().await;
+    let conf = data_read.get::<ConfigStruct>().unwrap();
+    let mut con = conf.redis.clone();
     debug!("Got redis client");
     if options.len() > 1 {
         let search = options[1].value.as_str().unwrap().to_string();
@@ -140,7 +139,7 @@ async fn get_subreddit_cmd<'a>(command: &'a CommandInteraction, ctx: &'a Context
 
 
 #[instrument(skip(con, parent_tx))]
-async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<u16, anyhow::Error> {
+async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<u16, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "get_length_of_search_results").into(),
         None => {
@@ -176,7 +175,7 @@ async fn get_length_of_search_results(search_index: String, search: String, con:
 
 // Returns the post ID at the given index in the search results
 #[instrument(skip(con, parent_span))]
-async fn get_post_at_search_index(search_index: String, search: &str, index: u16, con: &mut redis::aio::Connection, parent_span: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
+async fn get_post_at_search_index(search_index: String, search: &str, index: u16, con: &mut redis::aio::MultiplexedConnection, parent_span: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_span {
         Some(parent) => parent.start_child("db.query", "get_post_at_search_index").into(),
         None => {
@@ -215,7 +214,7 @@ async fn get_post_at_search_index(search_index: String, search: &str, index: u16
 
 // Returns the post ID at the given index in the list
 #[instrument(skip(con, parent_tx))]
-async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
+async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
     debug!("Getting post at index {} in list {}", index, list);
 
     let span: sentry::TransactionOrSpan = match &parent_tx {
@@ -238,7 +237,7 @@ async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::
 
 
 #[instrument(skip(con, parent_tx))]
-async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
+async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "get_post_by_id").into(),
         None => {
@@ -299,7 +298,7 @@ async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut r
 
 
 #[instrument(skip(con, parent_tx))]
-pub async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
+pub async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &mut redis::aio::MultiplexedConnection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("subreddit.search", "get_subreddit_search").into(),
         None => {
@@ -339,7 +338,7 @@ pub async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &m
 
 
 #[instrument(skip(con, parent_tx))]
-pub async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
+pub async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::MultiplexedConnection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("subreddit.get", "get_subreddit").into(),
         None => {
@@ -414,7 +413,7 @@ async fn cmd_get_user_tiers<'a>(command: &'a CommandInteraction, ctx: &'a Contex
 }
 
 #[instrument(skip(con, parent_tx))]
-async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<bool, anyhow::Error> {
+async fn list_contains(element: &str, list: &str, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<bool, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "list_contains").into(),
         None => {
@@ -480,9 +479,8 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
         });
     }
 
-    let redis_manager = data_lock.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-    let redis_client_mutex = redis_manager.get_available_resource().await;
-    let mut con = redis_client_mutex.lock().await;
+    let conf = data_lock.get::<ConfigStruct>().unwrap();
+    let mut con = conf.redis.clone();
 
     let already_queued = list_contains(&subreddit, "custom_subreddits_queue", &mut con, Some(parent_tx)).await?;
 
@@ -500,7 +498,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
         loop {
             sleep(Duration::from_millis(1000)).await;
 
-            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(&mut *con).await {
+            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(&mut con).await {
                 Ok(posts) => {
                     posts
                 },
@@ -525,9 +523,8 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
 #[instrument(skip(command, ctx, parent_tx))]
 async fn info<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
     let data_read = ctx.data.read().await;    
-    let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-    let redis_client_mutex = redis_manager.get_available_resource().await;
-    let mut con = redis_client_mutex.lock().await;
+    let conf = data_read.get::<ConfigStruct>().unwrap();
+    let mut con = conf.redis.clone();
 
     capture_event(ctx.data.clone(), "cmd_info", Some(parent_tx), None, &format!("user_{}", command.user.id.get().to_string())).await;
 
@@ -678,9 +675,8 @@ impl EventHandler for Handler {
     async fn guild_create(&self, ctx: Context, guild: Guild, is_new: Option<bool>) {
         debug!("Guild create event fired");
         let data_read = ctx.data.read().await;
-        let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-        let redis_client_mutex = redis_manager.get_available_resource().await;
-        let mut con = redis_client_mutex.lock().await;
+        let conf = data_read.get::<ConfigStruct>().unwrap();
+        let mut con = conf.redis.clone();
         let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace()), ctx.shard_id.0, ctx.cache.guild_count()).await.unwrap();
 
         if let Some(x) = is_new { // First time client has seen the guild
@@ -693,9 +689,8 @@ impl EventHandler for Handler {
     async fn guild_delete(&self, ctx: Context, incomplete: UnavailableGuild, _full: Option<Guild>) {
         {
             let data_read = ctx.data.read().await;    
-            let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-            let redis_client_mutex = redis_manager.get_available_resource().await;
-            let mut con = redis_client_mutex.lock().await;
+            let conf = data_read.get::<ConfigStruct>().unwrap();
+            let mut con = conf.redis.clone();
             let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace()), ctx.shard_id.0, ctx.cache.guild_count()).await.unwrap();
         }
     
@@ -743,25 +738,17 @@ impl EventHandler for Handler {
         let tx_ctx = sentry::TransactionContext::new("interaction_create", "interaction");
         let tx = sentry::start_transaction(tx_ctx);
         sentry::configure_scope(|scope| scope.set_span(Some(tx.clone().into())));
-        
-        // Check if there is a deadlock
-        {
-            let try_write = ctx.data.try_write();
-            if try_write.is_err() {
-                debug!("Couldn't get data lock immediately");
-            } else {
-                debug!("Got data lock");
-            }
-        }
 
         if let Interaction::Command(command) = interaction.clone() {
             let slash_command_tx = tx.start_child("interaction.slash_command", "handle slash command");
             match command.guild_id {
                 Some(guild_id) => {
                     info!("{:?} ({:?}) > {:?} ({:?}) : /{} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.get(), command.user.name, command.user.id.get(), command.data.name, command.data.options);
+                    info!("Sent at {:?}", command.id.created_at());
                 },
                 None => {
                     info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.get(), command.data.name, command.data.options);
+                    info!("Sent at {:?}", command.id.created_at());
                 }
             }
             let command_response = get_command_response(&command, &ctx, &tx).await;
@@ -887,9 +874,11 @@ impl EventHandler for Handler {
             match command.guild_id {
                 Some(guild_id) => {
                     info!("{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.get(), command.user.name, command.user.id.get(), command.data.custom_id, command.data.kind);
+                    info!("Sent at {:?}", command.id.created_at());
                 },
                 None => {
                     info!("{:?} ({:?}) : Button {} {:?}", command.user.name, command.user.id.get(), command.data.custom_id, command.data.kind);
+                    info!("Sent at {:?}", command.id.created_at());
                 }
             }
 
@@ -919,9 +908,8 @@ impl EventHandler for Handler {
                     capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())).await;
                     
                     let data_read = ctx.data.read().await;
-                    let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-                    let redis_client_mutex = redis_manager.get_available_resource().await;
-                    let mut con = redis_client_mutex.lock().await;
+                    let conf = data_read.get::<ConfigStruct>().unwrap();
+                    let mut con = conf.redis.clone();
         
                     let component_response = match search_enabled {
                         true => {
@@ -1128,9 +1116,11 @@ impl EventHandler for Handler {
             match modal.guild_id {
                 Some(guild_id) => {
                     info!("{:?} ({:?}) > {:?} ({:?}) : Modal {} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.get(), modal.user.name, modal.user.id.get(), modal.data.custom_id, modal.data.components);
+                    info!("Sent at {:?}", modal.id.created_at());
                 },
                 None => {
                     info!("{:?} ({:?}) : Modal {} {:?}", modal.user.name, modal.user.id.get(), modal.data.custom_id, modal.data.components);
+                    info!("Sent at {:?}", modal.id.created_at());
                 }
             }
 
@@ -1251,7 +1241,7 @@ impl EventHandler for Handler {
 
 async fn monitor_total_shards(shard_manager: Arc<serenity::gateway::ShardManager>, total_shards: u32) {
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
-    let mut con = db_client.get_tokio_connection().await.expect("Can't connect to redis");
+    let mut con = db_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
 
     let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
     let shard_id: u32 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u32");
@@ -1291,7 +1281,7 @@ async fn main() {
     let shard_id: u32 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u32");
 
     let redis_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
-    let mut con = redis_client.get_async_connection().await.expect("Can't connect to redis");
+    let mut con = redis_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
 
     let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
     client_options.app_name = Some(format!("Shard {}", shard_id));
@@ -1333,29 +1323,18 @@ async fn main() {
             mongodb::Client::with_options(client_options).unwrap()
         })))).await;
 
-        let redis_manager = ResourceManager::<redis::aio::Connection>::new(|| Arc::new(Mutex::new(Box::pin(async {
-            println!("Creating new redis client");
-            let redis_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
-            println!("Entered tokio runtime");
-            let con = redis_client.get_async_connection().await.unwrap();
-            println!("Got connection");
-            //let handle = tokio::task::spawn(async move {redis_client.get_async_connection().await});
-            //let con = std::thread::spawn(|| {tokio::runtime::Runtime::new().unwrap().block_on(handle).unwrap().unwrap()}).join().unwrap();
-            con
-        })))).await;
-
         let posthog_manager = ResourceManager::<posthog::Client>::new(|| Arc::new(Mutex::new(Box::pin(async {
             let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
             posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string())
         })))).await;
 
         data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
-        data.insert::<ResourceManager<redis::aio::Connection>>(redis_manager);
         data.insert::<ResourceManager<posthog::Client>>(posthog_manager);
         data.insert::<ConfigStruct>(ConfigStruct {
             shard_id: shard_id,
             nsfw_subreddits: nsfw_subreddits,
-            auto_post_chan: auto_post_chan.0.clone()
+            auto_post_chan: auto_post_chan.0.clone(),
+            redis: con,
         });
     }
 

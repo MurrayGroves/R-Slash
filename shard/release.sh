@@ -1,7 +1,7 @@
 source ./secrets.env
 
 cargo build --release
-docker build -t registry.murraygrov.es/discord-shard .
+docker build -f Dockerfile -t registry.murraygrov.es/discord-shard target/release
 docker push registry.murraygrov.es/discord-shard
 
 sentry-cli --auth-token ${SENTRY_TOKEN} upload-dif --org r-slash --project shard target/release/
