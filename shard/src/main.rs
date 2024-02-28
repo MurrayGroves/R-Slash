@@ -973,10 +973,14 @@ impl EventHandler for Handler {
                 },
 
                 "cancel_autopost" => {
-                    command.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap();
+                    command.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap_or_else(|e| {
+                        warn!("Failed to acknowledge cancel autopost, {:?}", e);
+                    });
                     if let Some(member) = &command.member {
                         if !member.permissions(&ctx).unwrap().manage_messages() {
-                            command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap();
+                            command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap_or_else(|e| {
+                                warn!("Failed to create ephemeral message warning about missing 'Manage Messages' permission, {:?}", e);
+                            });
                             return;
                         }
                     }
@@ -1142,7 +1146,10 @@ impl EventHandler for Handler {
 
             match modal_command {
                 "autopost" => {
-                    modal.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap();
+                    modal.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap_or_else(|e| {
+                        warn!("Failed to acknowledge autopost modal: {:?}", e);
+                        return;
+                    });
                     capture_event(ctx.data.clone(), "autopost_start", Some(&modal_tx), None, &format!("channel_{}", modal.channel.clone().unwrap().id.get().to_string())).await;
 
                     let lock = ctx.data.read().await;
