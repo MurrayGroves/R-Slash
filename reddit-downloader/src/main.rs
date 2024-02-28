@@ -1,28 +1,26 @@
 use itertools::Itertools;
 use tracing::{debug, info, warn, error};
-use tracing_subscriber::field::debug;
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use std::io::Write;
 use std::collections::HashMap;
 use std::iter::FromIterator;
 use tokio::time::{sleep, Duration};
-use futures::{lock::Mutex};
+use futures::lock::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use truncrate::*;
 
-use anyhow::{anyhow, Context, Error};
+use anyhow::{anyhow, Context};
 
 use redis::AsyncCommands;
 
 use reqwest::header::{USER_AGENT, HeaderMap};
 use std::env;
-use futures_util::{TryStreamExt, StreamExt};
+use futures_util::TryStreamExt;
 
 use mongodb::bson::{doc, Document};
-use mongodb::options::{FindOptions};
+use mongodb::options::FindOptions;
 use serde_json::Value::Null;
 
 mod downloaders;
@@ -714,15 +712,15 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
         let mut nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
 
         let mut subreddits = Vec::new();
-        subreddits.append(&mut sfw_subreddits);
         subreddits.append(&mut nsfw_subreddits);
+        subreddits.append(&mut sfw_subreddits);
 
         for subreddit in subreddits {
             debug!("Getting subreddit: {:?}", subreddit);
             let last_updated = con.get(&subreddit).await.unwrap_or(0u64);
             debug!("{:?} was last updated at {:?}", &subreddit, last_updated);
 
-            get_subreddit(subreddit.clone().to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, imgur_client.clone(), None, None, &downloaders_client).await?;
+            get_subreddit(subreddit.to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, imgur_client.clone(), None, None, &downloaders_client).await?;
             let _:() = con.set(&subreddit, get_epoch_ms()?).await.unwrap();
             if !index_exists(&mut con, format!("idx:{}", subreddit)).await {
                 create_index(&mut con, format!("idx:{}", subreddit), format!("subreddit:{}:post:", subreddit)).await?;
@@ -762,7 +760,7 @@ async fn main() {
 
     println!("Initialised tracing!");
 
-    let _guard = sentry::init(("http://623a0a9dd73f41d19553fe485514664c@100.67.30.19:9000/2", sentry::ClientOptions {
+    let _guard = sentry::init(("https://75873f85a862465795299365b603fbb5@us.sentry.io/4504774760660992", sentry::ClientOptions {
         release: sentry::release_name!(),
         traces_sample_rate: 1.0,
         ..Default::default()

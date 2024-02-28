@@ -5,5 +5,5 @@ RUN apt install -y libssl-dev
 RUN apt install -y openssl
 RUN apt install -y ca-certificates
 
-ADD ./discord-shard /usr/bin/discord-shard
+ADD target/release/discord-shard /usr/bin/discord-shard
 ENTRYPOINT ["/usr/bin/discord-shard"]

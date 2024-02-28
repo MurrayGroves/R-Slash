@@ -933,7 +933,7 @@ impl EventHandler for Handler {
                 "auto-post" => {
                     if let Some(member) = &command.member {
                         if !member.permissions(&ctx).unwrap().manage_messages() {
-                            command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap();
+                            command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap_or_else(|e| warn!("Failed to create response to autopost, {:?}", e));
                             return;
                         }
                     }
@@ -1222,6 +1222,7 @@ impl EventHandler for Handler {
                         current: 0,
                         limit,
                         channel: modal.channel_id,
+                        author: modal.user.id,
                     };
 
                     chan.send(AutoPostCommand::Start(post_request)).await.unwrap();
@@ -1256,6 +1257,12 @@ async fn monitor_total_shards(shard_manager: Arc<serenity::gateway::ShardManager
             debug!("Shard {} not found, marking self for termination.", shard_id);
             debug!("Instantiated shards: {:?}", shard_manager.shards_instantiated().await);
             let _ = fs::remove_file("/etc/probes/live");
+        } else {
+            if !Path::new("/etc/probes/live").exists() {
+                debug!("Resurrected!");
+                let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
+                file.write_all(b"alive").expect("Unable to write to /etc/probes/live");
+            }
         }
 
         if db_total_shards != total_shards {
@@ -1386,9 +1393,9 @@ async fn main() {
             _ => "r-slash".into()
         };
 
-        let _guard = sentry::init(("http://9ebbf7835f99405ebfca243cf5263782@100.67.30.19:9000/3", sentry::ClientOptions {
+        let _guard = sentry::init(("https://e1d0fdcc5e224a40ae768e8d36dd7387@o4504774745718784.ingest.sentry.io/4504793832161280", sentry::ClientOptions {
             release: sentry::release_name!(),
-            traces_sample_rate: 0.01,
+            traces_sample_rate: 0.2,
             environment: Some(bot_name.clone()),
             server_name: Some(shard_id.to_string().into()),
             ..Default::default()
