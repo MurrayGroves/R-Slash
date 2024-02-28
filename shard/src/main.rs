@@ -1279,6 +1279,9 @@ async fn monitor_total_shards(shard_manager: Arc<serenity::gateway::ShardManager
         } else {
             if !Path::new("/etc/probes/live").exists() {
                 debug!("Resurrected!");
+                if !Path::new("/etc/probes").is_dir() {
+                    fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+                }
                 let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
                 file.write_all(b"alive").expect("Unable to write to /etc/probes/live");
             }
