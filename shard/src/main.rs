@@ -1191,20 +1191,39 @@ impl EventHandler for Handler {
                         }
                     }
                     
+                    let multiplier = if interval.ends_with("s") {
+                        1
+                    } else if interval.ends_with("m") {
+                        60
+                    } else if interval.ends_with("h") {
+                        3600
+                    } else if interval.ends_with("d") {
+                        86400
+                    } else {
+                        return;
+                    };
                     
                     let interval = if interval.ends_with("s") {
-                        interval.replace("s", "").parse::<u64>().unwrap()
+                        interval.replace("s", "").parse::<u64>()
                     } else if interval.ends_with("m") {
-                        interval.replace("m", "").parse::<u64>().unwrap() * 60
+                        interval.replace("m", "").parse::<u64>()
                     } else if interval.ends_with("h") {
-                        interval.replace("h", "").parse::<u64>().unwrap() * 3600
+                        interval.replace("h", "").parse::<u64>()
                     } else if interval.ends_with("d") {
-                        interval.replace("d", "").parse::<u64>().unwrap() * 86400
+                        interval.replace("d", "").parse::<u64>()
                     } else {
                         return;
                     };
 
-                    let interval = Duration::from_secs(interval);
+                    let interval = match interval {
+                        Ok(x) => {
+                            Duration::from_secs(x * (multiplier as u64))
+                        },
+                        Err(_) => {
+                            debug!("Invalid interval: {:?}", interval);
+                            return;
+                        }
+                    };
 
                     let limit = match limit.parse::<u32>() {
                         Ok(x) => x,
