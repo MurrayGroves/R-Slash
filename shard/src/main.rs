@@ -1379,7 +1379,7 @@ async fn main() {
         tracing_subscriber::Registry::default()
         .with(sentry::integrations::tracing::layer().span_filter(
             |md| {
-                if md.name().contains("recv") || md.name().contains("recv_event") || md.name().contains("dispatch") || md.name().contains("handle_event") || md.name().contains("check_heartbeat") {
+                if md.name().contains("recv") || md.name().contains("recv_event") || md.name().contains("dispatch") || md.name().contains("handle_event") || md.name().contains("check_heartbeat") || md.name().contains("headers") {
                     return false
                 } else {
                     return true;
