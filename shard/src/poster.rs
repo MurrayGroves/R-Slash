@@ -27,6 +27,8 @@ pub enum AutoPostCommand {
     Stop(ChannelId),
 }
 
+
+// TODO - Never panic!
 pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<TypeMap>>, http: Arc<serenity::http::Http>) {
     let mut requests = HashMap::new();
 

@@ -9,6 +9,7 @@ use tracing::instrument;
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use types::ResponseFallbackMethod;
 use std::fs;
 use std::io::Write;
 use std::collections::HashMap;
@@ -47,9 +48,12 @@ use connection_pooler::ResourceManager;
 
 mod poster;
 mod types;
+mod reddit;
 
 use crate::poster::AutoPostCommand;
 use crate::types::ConfigStruct;
+use crate::types::InteractionResponse;
+use crate::reddit::*;
 
 
 /// Returns current milliseconds since the Epoch
@@ -138,235 +142,6 @@ async fn get_subreddit_cmd<'a>(command: &'a CommandInteraction, ctx: &'a Context
 }
 
 
-#[instrument(skip(con, parent_tx))]
-async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<u16, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("db.query", "get_length_of_search_results").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "get_length_of_search_results");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let mut new_search = String::new();
-    for c in search.chars() {
-        if c.is_whitespace() && c != ' ' && c != '_' {
-            new_search.push('\\');
-            new_search.push(c);
-        }
-        else {
-            new_search.push(c);
-        }
-    }
-
-    debug!("Getting length of search results for {} in {}", new_search, search_index);
-    let results: Vec<u16> = redis::cmd("FT.SEARCH")
-        .arg(search_index)
-        .arg(new_search)
-        .arg("LIMIT")
-        .arg(0) // Return no results, just number of results
-        .arg(0)
-        .query_async(con).await?;
-
-    span.finish();
-    Ok(results[0])
-}
-
-
-// Returns the post ID at the given index in the search results
-#[instrument(skip(con, parent_span))]
-async fn get_post_at_search_index(search_index: String, search: &str, index: u16, con: &mut redis::aio::MultiplexedConnection, parent_span: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_span {
-        Some(parent) => parent.start_child("db.query", "get_post_at_search_index").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "get_post_at_search_index");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let mut new_search = String::new();
-    for c in search.chars() {
-        if c.is_whitespace() && c != ' ' && c != '_' {
-            new_search.push('\\');
-            new_search.push(c);
-        }
-        else {
-            new_search.push(c);
-        }
-    }
-
-    let results: Vec<redis::Value> = redis::cmd("FT.SEARCH")
-        .arg(search_index)
-        .arg(new_search)
-        .arg("LIMIT")
-        .arg(index)
-        .arg(1)
-        .arg("SORTBY")
-        .arg("score")
-        .arg("NOCONTENT") // Only show POST IDs not post content
-        .query_async(con).await?;
-
-    let to_return = from_redis_value::<String>(&results[1])?;
-    span.finish();
-    Ok(to_return)
-}
-
-
-// Returns the post ID at the given index in the list
-#[instrument(skip(con, parent_tx))]
-async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
-    debug!("Getting post at index {} in list {}", index, list);
-
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("db.query", "get_post_at_list_index").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "get_post_at_list_index");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let mut results: Vec<String> = redis::cmd("LRANGE")
-        .arg(list)
-        .arg(index)
-        .arg(index)
-        .query_async(con).await?;
-
-    span.finish();
-    Ok(results.remove(0))
-}
-
-
-#[instrument(skip(con, parent_tx))]
-async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("db.query", "get_post_by_id").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "get_post_by_id");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let post: HashMap<String, redis::Value> = con.hgetall(&post_id).await?;
-
-    let subreddit = post_id.split(":").collect::<Vec<&str>>()[1].to_string();
-
-    let author = from_redis_value::<String>(&post.get("author").unwrap().clone())?;
-    let title = from_redis_value::<String>(&post.get("title").unwrap().clone())?;
-    let url = from_redis_value::<String>(&post.get("url").unwrap().clone())?;
-    let embed_url = from_redis_value::<String>(&post.get("embed_url").unwrap().clone())?;
-    let timestamp = from_redis_value::<i64>(&post.get("timestamp").unwrap().clone())?;
-    
-    let to_return = InteractionResponse {
-        embed: Some(CreateEmbed::default()
-            .title(title)
-            .description(format!("r/{}", subreddit))
-            .author(CreateEmbedAuthor::new(format!("u/{}", author))
-                .url(format!("https://reddit.com/u/{}", author))
-            )
-            .url(url)
-            .color(0x00ff00)
-            .image(embed_url)
-            .timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(timestamp)?)
-            .to_owned()
-        ),
-
-        components: Some(vec![CreateActionRow::Buttons(vec![
-            CreateButton::new(json!({
-                "subreddit": subreddit,
-                "search": search,
-                "command": "again"
-            }).to_string())
-                .label("🔁")
-                .style(ButtonStyle::Primary),
-
-            CreateButton::new(json!({
-                "subreddit": subreddit,
-                "search": search,
-                "command": "auto-post"
-            }).to_string())
-                .label("Auto-Post")
-                .style(ButtonStyle::Primary),
-        ])]),
-
-        fallback: ResponseFallbackMethod::Edit,
-        ..Default::default()
-    };
-
-    span.finish();
-    return Ok(to_return);
-}
-
-
-#[instrument(skip(con, parent_tx))]
-pub async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &mut redis::aio::MultiplexedConnection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("subreddit.search", "get_subreddit_search").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("subreddit.search", "get_subreddit_search");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let mut index: u16 = con.incr(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 1i16).await?;
-    let _:() = con.expire(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 60*60).await?;
-    index -= 1;
-    let length: u16 = get_length_of_search_results(format!("idx:{}", &subreddit), search.clone(), con, Some(&span)).await?;
-
-    if length == 0 {
-        return Ok(InteractionResponse {
-            embed: Some(CreateEmbed::default()
-                .title("No search results found")
-                .color(0xff0000)
-                .to_owned()
-            ),
-            ..Default::default()
-        });
-    }
-
-    index = length - (index + 1);
-
-    if index >= length {
-        let _:() = con.set(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 0i16).await?;
-        index = 0;
-    }
-
-    let post_id = get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con, Some(&span)).await?;
-    let to_return = get_post_by_id(post_id, Some(search), con, Some(&span)).await?;
-    span.finish();
-    return Ok(to_return);
-}
-
-
-#[instrument(skip(con, parent_tx))]
-pub async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::MultiplexedConnection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("subreddit.get", "get_subreddit").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("subreddit.get", "get_subreddit");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let subreddit = subreddit.to_lowercase();
-
-    let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 1i16).await?;
-    let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 60*60).await?;
-    index -= 1;
-    let length: u16 = con.llen(format!("subreddit:{}:posts", &subreddit)).await?;
-
-    if index >= length {
-        let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 0i16).await?;
-        index = 0;
-    }
-
-    let post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con, Some(&span)).await?;
-
-    let to_return = get_post_by_id(post_id, None, con, Some(&span)).await?;
-    span.finish();
-    return Ok(to_return);
-}
-
-
 fn error_response(code: String) -> InteractionResponse {
     let embed = CreateEmbed::default()
         .title("An Error Occurred")
@@ -412,26 +187,6 @@ async fn cmd_get_user_tiers<'a>(command: &'a CommandInteraction, ctx: &'a Contex
     });
 }
 
-#[instrument(skip(con, parent_tx))]
-async fn list_contains(element: &str, list: &str, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<bool, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("db.query", "list_contains").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "list_contains");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let position: Option<u16> = con.lpos(list, element, redis::LposOptions::default()).await?;
-
-    let to_return = match position {
-        Some(_) => Ok(true),
-        None => Ok(false),
-    };
-
-    span.finish();
-    to_return
-}
 
 #[instrument(skip(command, ctx, parent_tx))]
 async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
@@ -624,43 +379,6 @@ async fn get_command_response<'a>(command: &'a CommandInteraction, ctx: &'a Cont
 
         _ => {
             Err(anyhow!("Unknown command"))?
-        }
-    }
-}
-
-
-/// What to do if sending a response fails due to already being acknowledged
-#[derive(Debug, Clone)]
-enum ResponseFallbackMethod {
-    /// Edit the original response
-    Edit,
-    /// Send a followup response
-    Followup,
-    /// Return an error
-    Error,
-    /// Do nothing
-    None
-}
-
-#[derive(Debug, Clone)]
-struct InteractionResponse {
-    file: Option<serenity::builder::CreateAttachment>,
-    embed: Option<serenity::builder::CreateEmbed>,
-    content: Option<String>,
-    ephemeral: bool,
-    components: Option<Vec<CreateActionRow>>,
-    fallback: ResponseFallbackMethod,
-}
-
-impl Default for InteractionResponse {
-    fn default() -> Self {
-        InteractionResponse {
-            file: None,
-            embed: None,
-            content: None,
-            ephemeral: false,
-            components: None,
-            fallback: ResponseFallbackMethod::Error
         }
     }
 }
