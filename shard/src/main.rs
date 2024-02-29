@@ -691,9 +691,6 @@ impl EventHandler for Handler {
                 },
 
                 "cancel_autopost" => {
-                    command.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap_or_else(|e| {
-                        warn!("Failed to acknowledge cancel autopost, {:?}", e);
-                    });
                     if let Some(member) = &command.member {
                         if !member.permissions(&ctx).unwrap().manage_messages() {
                             command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap_or_else(|e| {
@@ -702,6 +699,11 @@ impl EventHandler for Handler {
                             return;
                         }
                     }
+                    
+                    command.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap_or_else(|e| {
+                        warn!("Failed to acknowledge cancel autopost, {:?}", e);
+                    });
+   
 
 
                     let lock = ctx.data.read().await;
