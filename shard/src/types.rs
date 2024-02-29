@@ -12,6 +12,7 @@ mod tests {
 }
 
 /// Stores config values required for operation of the shard
+#[derive(Debug, Clone)]
 pub struct ConfigStruct {
     pub shard_id: u32,
     pub nsfw_subreddits: Vec<String>,

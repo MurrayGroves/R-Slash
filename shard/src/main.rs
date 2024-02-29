@@ -707,7 +707,20 @@ impl EventHandler for Handler {
                     let lock = ctx.data.read().await;
                     let config = lock.get::<ConfigStruct>().unwrap();
                     let chan = config.auto_post_chan.clone();
-                    chan.send(AutoPostCommand::Stop(command.channel_id)).await.unwrap();
+                    match chan.send(AutoPostCommand::Stop(command.channel_id)).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            error!("Failed to send stop autopost command: {:?}", e);
+                            let mut config = lock.get::<ConfigStruct>().unwrap().clone();
+                            drop(lock);
+                            let auto_post_chan = tokio::sync::mpsc::channel(100);
+                            config.auto_post_chan = auto_post_chan.0.clone();
+                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone()));
+                            let mut lock = ctx.data.write().await;
+                            lock.insert::<ConfigStruct>(config);
+                            info!("Restarted autopost loop");
+                        }
+                    };
                     capture_event(ctx.data.clone(), "autopost_cancel", Some(&component_tx), None, &format!("channel_{}", &command.channel.clone().unwrap().id.get().to_string())).await;
                     None
                 }
@@ -969,7 +982,20 @@ impl EventHandler for Handler {
                         author: modal.user.id,
                     };
 
-                    chan.send(AutoPostCommand::Start(post_request)).await.unwrap();
+                    match chan.send(AutoPostCommand::Start(post_request)).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            error!("Failed to send stop autopost command: {:?}", e);
+                            let mut config = lock.get::<ConfigStruct>().unwrap().clone();
+                            drop(lock);
+                            let auto_post_chan = tokio::sync::mpsc::channel(100);
+                            config.auto_post_chan = auto_post_chan.0.clone();
+                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone()));
+                            let mut lock = ctx.data.write().await;
+                            lock.insert::<ConfigStruct>(config);
+                            info!("Restarted autopost loop");
+                        }
+                    };
                 },
 
                 _ => {
