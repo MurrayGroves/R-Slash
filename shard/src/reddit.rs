@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
+use anyhow::{bail, Context, Error};
 use redis::{from_redis_value, AsyncCommands};
 use serde_json::json;
-use serenity::all::{ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor};
+use serenity::all::{ButtonStyle, ChannelId, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor};
 use tracing::{debug, instrument};
 
 use crate::types::{InteractionResponse, ResponseFallbackMethod};
@@ -95,10 +96,14 @@ pub async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::a
     };
 
     let mut results: Vec<String> = redis::cmd("LRANGE")
-        .arg(list)
+        .arg(&list)
         .arg(index)
         .arg(index)
         .query_async(con).await?;
+
+    if results.is_empty() {
+        bail!("No results found in list: {} at index: {}", list, index);
+    }
 
     span.finish();
     Ok(results.remove(0))
@@ -119,15 +124,17 @@ pub async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &m
 
     let post: HashMap<String, redis::Value> = con.hgetall(&post_id).await?;
 
+    if post.is_empty() {
+        bail!("Post not found: {}", post_id);
+    }
+
     let subreddit = post_id.split(":").collect::<Vec<&str>>()[1].to_string();
 
-    // TODO - Return error if post not found, causing caller to retry with new ID
-
-    let author = from_redis_value::<String>(&post.get("author").unwrap().clone())?;
-    let title = from_redis_value::<String>(&post.get("title").unwrap().clone())?;
-    let url = from_redis_value::<String>(&post.get("url").unwrap().clone())?;
-    let embed_url = from_redis_value::<String>(&post.get("embed_url").unwrap().clone())?;
-    let timestamp = from_redis_value::<i64>(&post.get("timestamp").unwrap().clone())?;
+    let author = from_redis_value::<String>(&post.get("author").context("No author in post")?.clone())?;
+    let title = from_redis_value::<String>(&post.get("title").context("No title in post")?.clone())?;
+    let url = from_redis_value::<String>(&post.get("url").context("No url in post")?.clone())?;
+    let embed_url = from_redis_value::<String>(&post.get("embed_url").context("No embed_url in post")?.clone())?;
+    let timestamp = from_redis_value::<i64>(&post.get("timestamp").context("No timestamp in post").clone())?;
     
     let to_return = InteractionResponse {
         embed: Some(CreateEmbed::default()
