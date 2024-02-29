@@ -111,7 +111,7 @@ pub async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::a
 
 
 #[instrument(skip(con, parent_tx))]
-pub async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
+pub async fn get_post_by_id<'a>(post_id: &str, search: Option<&str>, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("db.query", "get_post_by_id").into(),
         None => {
@@ -134,7 +134,7 @@ pub async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &m
     let title = from_redis_value::<String>(&post.get("title").context("No title in post")?.clone())?;
     let url = from_redis_value::<String>(&post.get("url").context("No url in post")?.clone())?;
     let embed_url = from_redis_value::<String>(&post.get("embed_url").context("No embed_url in post")?.clone())?;
-    let timestamp = from_redis_value::<i64>(&post.get("timestamp").context("No timestamp in post").clone())?;
+    let timestamp = from_redis_value::<i64>(&post.get("timestamp").context("No timestamp in post")?.clone())?;
     
     let to_return = InteractionResponse {
         embed: Some(CreateEmbed::default()
@@ -199,11 +199,21 @@ pub async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Multiple
         index = 0;
     }
 
-    let post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con, Some(&span)).await?;
+    let mut post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con, Some(&span)).await?;
+    let mut post = get_post_by_id(&post_id, None, con, Some(&span)).await;
+    // If the post is not found, keep incrementing the index until a post is found
+    while let Err(_) = post {
+        index += 1;
+        if index >= length {
+            let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 0i16).await?;
+            index = 0;
+        }
+        post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con, Some(&span)).await?;
+        post = get_post_by_id(&post_id, None, con, Some(&span)).await;
+    }
 
-    let to_return = get_post_by_id(post_id, None, con, Some(&span)).await?;
     span.finish();
-    return Ok(to_return);
+    return post;
 }
 
 
@@ -240,10 +250,19 @@ pub async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &m
         index = 0;
     }
 
-    let post_id = get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con, Some(&span)).await?;
-    let to_return = get_post_by_id(post_id, Some(search), con, Some(&span)).await?;
+    let mut post_id = get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con, Some(&span)).await?;
+    let mut post = get_post_by_id(&post_id, Some(&search), con, Some(&span)).await;
+    while let Err(_) = post {
+        index += 1;
+        if index >= length {
+            let _:() = con.set(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 0i16).await?;
+            index = 0;
+        }
+        post_id = get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con, Some(&span)).await?;
+        post = get_post_by_id(&post_id, Some(&search), con, Some(&span)).await;
+    };
     span.finish();
-    return Ok(to_return);
+    return post;
 }
 
 
