@@ -74,22 +74,32 @@ async fn capture_event(data: Arc<RwLock<TypeMap>>, event: &str, parent_tx: Optio
         }
     };
 
-    debug!("Getting posthog manager");
-    let posthog_manager = data.read().await.get::<ResourceManager<posthog::Client>>().unwrap().clone();
-    debug!("Getting posthog client");
-    let client_mutex = posthog_manager.get_available_resource().await;
-    debug!("Locking client mutex");
-    let client = client_mutex.lock().await;
-    debug!("Locked client mutex");
+    let event = event.to_string();
+    let properties = match properties {
+        Some(properties) => Some(properties.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<HashMap<String, String>>()),
+        None => None,
+    };
+    let distinct_id = distinct_id.to_string();
 
-    let mut properties_map = serde_json::Map::new();
-    if properties.is_some() {
-        for (key, value) in properties.unwrap() {
-            properties_map.insert(key.to_string(), serde_json::Value::String(value));
+    tokio::spawn(async move {
+        debug!("Getting posthog manager");
+        let posthog_manager = data.read().await.get::<ResourceManager<posthog::Client>>().unwrap().clone();
+        debug!("Getting posthog client");
+        let client_mutex = posthog_manager.get_available_resource().await;
+        debug!("Locking client mutex");
+        let client = client_mutex.lock().await;
+        debug!("Locked client mutex");
+    
+        let mut properties_map = serde_json::Map::new();
+        if properties.is_some() {
+            for (key, value) in properties.unwrap() {
+                properties_map.insert(key.to_string(), serde_json::Value::String(value));
+            }
         }
-    }
+    
+        debug!("{:?}", client.capture(&event, properties_map, &distinct_id).await.unwrap().text().await.unwrap());
+    });
 
-    debug!("{:?}", client.capture(event, properties_map, distinct_id).await.unwrap().text().await.unwrap());
     span.finish();
 }
 
