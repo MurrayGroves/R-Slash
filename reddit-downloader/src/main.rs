@@ -20,7 +20,7 @@ use std::env;
 use futures_util::TryStreamExt;
 
 use mongodb::bson::{doc, Document};
-use mongodb::options::FindOptions;
+use mongodb::options::{ClientOptions, FindOptions};
 use serde_json::Value::Null;
 
 mod downloaders;
@@ -456,6 +456,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                 // Subreddit has not been downloaded before, meaning we should try get posts into Redis ASAP to minimise the time before the user gets a response
                 if existing_posts.len() < 30 {
                     // Push post to list of posts
+                    debug!("Pushing key: {}", key);
                     con.rpush(format!("subreddit:{}:posts", subreddit), &key).await?;
                 }
                 
@@ -501,8 +502,11 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
             }
         }
 
-        con.del(format!("subreddit:{}:posts", subreddit)).await?;
-        con.rpush(format!("subreddit:{}:posts", subreddit), keys.clone()).await?;
+        if (keys.len() != 0) {
+            con.del(format!("subreddit:{}:posts", subreddit)).await?;
+            con.rpush(format!("subreddit:{}:posts", subreddit), keys.clone()).await?;
+        }
+
 
         let time_since_request = get_epoch_ms()? - last_requested;
         if time_since_request < 2000 {
@@ -579,7 +583,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
     let imgur_client = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
     let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
 
-    let mut client_options = mongodb::options::ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.expect("Failed to parse client options");
+    let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
     client_options.app_name = Some("Downloader".to_string());
 
     let mongodb_client = mongodb::Client::with_options(client_options).expect("failed to connect to mongodb");

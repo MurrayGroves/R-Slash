@@ -1,5 +1,6 @@
 use log::*;
 use serde_json::json;
+use serenity::all::GuildMemberUpdateEvent;
 use std::collections::HashMap;
 use std::io::Write;
 use std::env;
@@ -20,14 +21,14 @@ use rslash_types::*;
 
 // Terminate a user's current membership period
 async fn terminate_membership(user_id: UserId) {
-    let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+    let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
     client_options.app_name = Some(format!("Kofi Handler"));
 
     let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
     let db = mongodb_client.database("memberships");
     let coll = db.collection::<Document>("users");
 
-    let filter = doc! {"discord_id": user_id.0.to_string(), "tiers.bronze.end": None::<i64>};
+    let filter = doc! {"discord_id": user_id.get().to_string(), "tiers.bronze.end": None::<i64>};
     let user = doc! {
         "$set" : {
             "tiers.bronze.$.end": Timestamp::now().unix_timestamp()
@@ -43,14 +44,14 @@ async fn terminate_membership(user_id: UserId) {
 
 // Start a new membership period for the user
 async fn add_membership(user_id: UserId) {
-    let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+    let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
     client_options.app_name = Some(format!("Kofi Handler"));
 
     let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
     let db = mongodb_client.database("memberships");
     let coll = db.collection::<Document>("users");
 
-    let filter = doc! {"discord_id": user_id.0.to_string()};
+    let filter = doc! {"discord_id": user_id.get().to_string()};
     let user = doc! {
             "$push" : {
                 "tiers.bronze": {
@@ -69,20 +70,38 @@ async fn add_membership(user_id: UserId) {
 
 struct Handler;
 
+
+pub struct ConfigStruct {
+    pub mongo_client: mongodb::Client,
+    pub posthog: posthog::Client,
+}
+
+impl serenity::prelude::TypeMapKey for ConfigStruct {
+    type Value = ConfigStruct;
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("{} is connected!", ready.user.name);
         // Store support server info in cache
-        ctx.shard.chunk_guild(GuildId(697986402117484574), None, serenity::client::bridge::gateway::ChunkGuildFilter::None, None);
+        ctx.shard.chunk_guild(GuildId::new(697986402117484574), None, false, serenity::gateway::ChunkGuildFilter::None, None);
     }
 
-    async fn guild_member_update(&self, ctx: Context, old: Option<Member>, new: Member) {
+    async fn guild_member_update(&self, ctx: Context, old: Option<Member>, new: Option<Member>, event: GuildMemberUpdateEvent) {
         debug!("Old: {:?}, New: {:?}", old, new);
-        let now_donator = new.roles.contains(&RoleId(777150304155861013));
+        let new = match new {
+            Some(new) => new,
+            None => return
+        };
+        let now_donator = new.roles.contains(&RoleId::new(777150304155861013));
 
-        let tiers = get_user_tiers(new.user.id.0.to_string(), &mut ctx.data.write().await, None).await;
+        let mut data = ctx.data.write().await;
+        let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+        let mongodb_client = &mut data_mut.mongo_client;
+        let tiers = get_user_tiers(new.user.id.get().to_string(), mongodb_client, None).await;
 
+        debug!("Tiers: {:?}", tiers);
         if tiers.bronze.manual { // If the user has a manual bronze membership, don't do anything
             return;
         }
@@ -110,22 +129,21 @@ impl EventHandler for Handler {
                 }
             });
 
-            let mut data = ctx.data.write().await;
-            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-            let posthog_client: &mut posthog::Client = match data_mut.get_mut("posthog").unwrap() {
-                ConfigValue::PosthogClient(client) => client,
-                _ => panic!("Expected posthog client")
-            };
+            let posthog_client = &mut data_mut.posthog;
             
-            posthog_client.capture("donator_change", props, &format!("user_{}", new.user.id.0.to_string())).await.unwrap();
+            posthog_client.capture("donator_change", props, &format!("user_{}", new.user.id.get().to_string())).await.unwrap();
         }
     }
 
 
     async fn guild_member_addition(&self, ctx: Context, new: Member) {
-        let now_donator = new.roles.contains(&RoleId(777150304155861013));
+        let now_donator = new.roles.contains(&RoleId::new(777150304155861013));
 
-        let previously_donator = get_user_tiers(new.user.id.0.to_string(), &mut ctx.data.write().await, None).await.bronze.active;        
+        let mut data = ctx.data.write().await;
+        let data_mut = data.get_mut::<ConfigStruct>().unwrap();
+        let mongodb_client = &mut data_mut.mongo_client;
+
+        let previously_donator = get_user_tiers(new.user.id.get().to_string(), mongodb_client, None).await.bronze.active;        
 
         debug!("Previously donator: {}, now donator: {}", previously_donator, now_donator);
 
@@ -150,12 +168,9 @@ impl EventHandler for Handler {
 
             let mut data = ctx.data.write().await;
             let data_mut = data.get_mut::<ConfigStruct>().unwrap();
-            let posthog_client: &mut posthog::Client = match data_mut.get_mut("posthog").unwrap() {
-                ConfigValue::PosthogClient(client) => client,
-                _ => panic!("Expected posthog client")
-            };
+            let posthog_client = &mut data_mut.posthog;
             
-            posthog_client.capture("donator_change", props, &format!("user_{}", new.user.id.0.to_string())).await.unwrap();
+            posthog_client.capture("donator_change", props, &format!("user_{}", new.user.id.get().to_string())).await.unwrap();
         }
     }
 }
@@ -179,7 +194,7 @@ async fn main() {
     let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
     let posthog_client = posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
 
-    let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+    let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
     client_options.app_name = Some("Role Detector".to_string());
     let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
 
@@ -188,11 +203,13 @@ async fn main() {
 
     {
         let mut data = client.data.write().await;
-        let mut hashmap = HashMap::new();
-        hashmap.insert("posthog".to_string(), ConfigValue::PosthogClient(posthog_client));
-        hashmap.insert("mongodb_connection".to_string(), ConfigValue::MONGODB(mongodb_client));
+
+        let config = ConfigStruct {
+            mongo_client: mongodb_client,
+            posthog: posthog_client,
+        };
         
-        data.insert::<ConfigStruct>(hashmap);
+        data.insert::<ConfigStruct>(config);
     }
 
     // Finally, start a single shard, and start listening to events.

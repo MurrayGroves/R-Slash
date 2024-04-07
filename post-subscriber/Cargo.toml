@@ -1,0 +1,12 @@
+[package]
+name = "post-subscriber"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serenity = "0.12"
+redis = "0.24"
+tokio = {version="1.36", features = ["rt-multi-thread"]}
+env_logger = "0.11"

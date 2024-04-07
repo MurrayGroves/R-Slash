@@ -1065,7 +1065,7 @@ async fn main() {
     let redis_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
     let mut con = redis_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
 
-    let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+    let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
     client_options.app_name = Some(format!("Shard {}", shard_id));
 
     let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
@@ -1100,7 +1100,7 @@ async fn main() {
             let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
             let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
 
-            let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
             client_options.app_name = Some(format!("Shard {}", shard_id));
             mongodb::Client::with_options(client_options).unwrap()
         })))).await;

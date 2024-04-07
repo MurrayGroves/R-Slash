@@ -37,5 +37,6 @@ name = "discord-shard"
 path = "src/main.rs"
 
 [profile.release]
-debug = 2
+debug = 0
 split-debuginfo = "packed"
+lto = "thin"

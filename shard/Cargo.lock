@@ -1872,6 +1872,7 @@ dependencies = [
  "posthog",
  "redis",
  "serenity 0.11.7",
+ "typemap_rev 0.1.5",
 ]
 
 [[package]]
