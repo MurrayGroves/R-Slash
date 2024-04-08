@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
-use anyhow::{bail, Context, Error};
+use anyhow::{bail, Context, Error, anyhow};
+use log::warn;
 use redis::{from_redis_value, AsyncCommands};
 use serde_json::json;
 use serenity::all::{ButtonStyle, ChannelId, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor};
 use tracing::{debug, instrument};
+use async_recursion::async_recursion;
 
-use crate::types::{InteractionResponse, ResponseFallbackMethod};
+use crate::{get_epoch_ms, types::{InteractionResponse, ResponseFallbackMethod}};
 
 #[instrument(skip(con, parent_tx))]
 pub async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<u16, anyhow::Error> {
@@ -178,6 +180,7 @@ pub async fn get_post_by_id<'a>(post_id: &str, search: Option<&str>, con: &mut r
 
 
 #[instrument(skip(con, parent_tx))]
+#[async_recursion]
 pub async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::MultiplexedConnection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
         Some(parent) => parent.start_child("subreddit.get", "get_subreddit").into(),
@@ -189,27 +192,44 @@ pub async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Multiple
 
     let subreddit = subreddit.to_lowercase();
 
-    let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 1i16).await?;
-    let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 60*60).await?;
-    index -= 1;
-    let length: u16 = con.llen(format!("subreddit:{}:posts", &subreddit)).await?;
+    let fetched_posts: HashMap<String, u64> = con.hgetall(format!("subreddit:{}:channels:{}:posts", &subreddit, channel)).await?;
+    let posts: Vec<String> = con.lrange(format!("subreddit:{}:posts", &subreddit), 0, -1).await?;
 
-    if index >= length {
-        let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 0i16).await?;
-        index = 0;
+    let mut post_id: Result<String, Error> = Err(anyhow!("No posts found for subreddit: {}", subreddit));
+
+    // Find the first post that the channel has not seen before
+    for post in posts {
+        if fetched_posts.contains_key(&post) {
+            continue;
+        }
+        post_id = Ok(post);
+        break;
+    }
+    
+    // If the channel has seen all posts, find the post they saw longest ago
+    if post_id.is_err() {
+        match fetched_posts.iter().min_by_key(|x| x.1).unwrap() {
+            (post, _) => {
+                post_id = Ok(post.to_string());
+            }
+        };
     }
 
-    let mut post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con, Some(&span)).await?;
+    let post_id = match post_id {
+        Ok(id) => id,
+        Err(e) => bail!(e),
+    };
+
+
+    let _:() = con.hset(format!("subreddit:{}:channels:{}:posts", &subreddit, channel), &post_id, get_epoch_ms()).await?;
+
     let mut post = get_post_by_id(&post_id, None, con, Some(&span)).await;
-    // If the post is not found, keep incrementing the index until a post is found
-    while let Err(_) = post {
-        index += 1;
-        if index >= length {
-            let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 0i16).await?;
-            index = 0;
-        }
-        post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con, Some(&span)).await?;
-        post = get_post_by_id(&post_id, None, con, Some(&span)).await;
+
+    // If the post is not found, some bug has occurred, remove the post from the subreddit list and call this function again to get a new one
+    if let Err(e) = post {
+        warn!("Error getting post by ID: {}", e);
+        let _:() = con.lrem(format!("subreddit:{}:posts", &subreddit), 0, &post_id).await?;
+        post = get_subreddit(subreddit, con, channel, Some(&span)).await;
     }
 
     span.finish();

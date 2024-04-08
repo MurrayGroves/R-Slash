@@ -26,6 +26,7 @@ tracing = "*"
 tracing-subscriber = { version = "*"}
 compile-time = "*"
 chrono = "*"
+async-recursion = "*"
 
 posthog = {path = "../posthog"}
 memberships = {path = "../memberships"}
