@@ -1,6 +1,6 @@
 [package]
 name = "discord-shard"
-version = "1.1.0"
+version = "1.1.4"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -26,6 +26,7 @@ tracing = "*"
 tracing-subscriber = { version = "*"}
 compile-time = "*"
 chrono = "*"
+async-recursion = "*"
 
 posthog = {path = "../posthog"}
 memberships = {path = "../memberships"}
@@ -37,5 +38,6 @@ name = "discord-shard"
 path = "src/main.rs"
 
 [profile.release]
-debug = 2
+debug = 0
 split-debuginfo = "packed"
+lto = "thin"

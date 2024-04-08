@@ -9,12 +9,13 @@ use tracing::instrument;
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use types::ResponseFallbackMethod;
 use std::fs;
 use std::io::Write;
 use std::collections::HashMap;
 use std::env;
 
-use serenity::builder::{Builder, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateModal, EditInteractionResponse};
+use serenity::builder::{CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateModal, EditInteractionResponse};
 use serenity::model::id::{ChannelId, ShardId};
 use serenity::model::gateway::GatewayIntents;
 use serenity::{
@@ -47,9 +48,12 @@ use connection_pooler::ResourceManager;
 
 mod poster;
 mod types;
+mod reddit;
 
-use crate::poster::{AutoPostCommand, PostRequest};
+use crate::poster::AutoPostCommand;
 use crate::types::ConfigStruct;
+use crate::types::InteractionResponse;
+use crate::reddit::*;
 
 
 /// Returns current milliseconds since the Epoch
@@ -70,22 +74,32 @@ async fn capture_event(data: Arc<RwLock<TypeMap>>, event: &str, parent_tx: Optio
         }
     };
 
-    debug!("Getting posthog manager");
-    let posthog_manager = data.read().await.get::<ResourceManager<posthog::Client>>().unwrap().clone();
-    debug!("Getting posthog client");
-    let client_mutex = posthog_manager.get_available_resource().await;
-    debug!("Locking client mutex");
-    let client = client_mutex.lock().await;
-    debug!("Locked client mutex");
+    let event = event.to_string();
+    let properties = match properties {
+        Some(properties) => Some(properties.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<HashMap<String, String>>()),
+        None => None,
+    };
+    let distinct_id = distinct_id.to_string();
 
-    let mut properties_map = serde_json::Map::new();
-    if properties.is_some() {
-        for (key, value) in properties.unwrap() {
-            properties_map.insert(key.to_string(), serde_json::Value::String(value));
+    tokio::spawn(async move {
+        debug!("Getting posthog manager");
+        let posthog_manager = data.read().await.get::<ResourceManager<posthog::Client>>().unwrap().clone();
+        debug!("Getting posthog client");
+        let client_mutex = posthog_manager.get_available_resource().await;
+        debug!("Locking client mutex");
+        let client = client_mutex.lock().await;
+        debug!("Locked client mutex");
+    
+        let mut properties_map = serde_json::Map::new();
+        if properties.is_some() {
+            for (key, value) in properties.unwrap() {
+                properties_map.insert(key.to_string(), serde_json::Value::String(value));
+            }
         }
-    }
+    
+        debug!("{:?}", client.capture(&event, properties_map, &distinct_id).await.unwrap().text().await.unwrap());
+    });
 
-    debug!("{:?}", client.capture(event, properties_map, distinct_id).await.unwrap().text().await.unwrap());
     span.finish();
 }
 
@@ -125,9 +139,8 @@ async fn get_subreddit_cmd<'a>(command: &'a CommandInteraction, ctx: &'a Context
     }
 
     debug!("Getting redis client");
-    let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-    let con_mutex = redis_manager.get_available_resource().await;
-    let mut con = con_mutex.lock().await;
+    let conf = data_read.get::<ConfigStruct>().unwrap();
+    let mut con = conf.redis.clone();
     debug!("Got redis client");
     if options.len() > 1 {
         let search = options[1].value.as_str().unwrap().to_string();
@@ -136,235 +149,6 @@ async fn get_subreddit_cmd<'a>(command: &'a CommandInteraction, ctx: &'a Context
     else {
         return get_subreddit(subreddit, &mut con, command.channel_id, Some(tx)).await
     }
-}
-
-
-#[instrument(skip(con, parent_tx))]
-async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<u16, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("db.query", "get_length_of_search_results").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "get_length_of_search_results");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let mut new_search = String::new();
-    for c in search.chars() {
-        if c.is_whitespace() && c != ' ' && c != '_' {
-            new_search.push('\\');
-            new_search.push(c);
-        }
-        else {
-            new_search.push(c);
-        }
-    }
-
-    debug!("Getting length of search results for {} in {}", new_search, search_index);
-    let results: Vec<u16> = redis::cmd("FT.SEARCH")
-        .arg(search_index)
-        .arg(new_search)
-        .arg("LIMIT")
-        .arg(0) // Return no results, just number of results
-        .arg(0)
-        .query_async(con).await?;
-
-    span.finish();
-    Ok(results[0])
-}
-
-
-// Returns the post ID at the given index in the search results
-#[instrument(skip(con, parent_span))]
-async fn get_post_at_search_index(search_index: String, search: &str, index: u16, con: &mut redis::aio::Connection, parent_span: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_span {
-        Some(parent) => parent.start_child("db.query", "get_post_at_search_index").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "get_post_at_search_index");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let mut new_search = String::new();
-    for c in search.chars() {
-        if c.is_whitespace() && c != ' ' && c != '_' {
-            new_search.push('\\');
-            new_search.push(c);
-        }
-        else {
-            new_search.push(c);
-        }
-    }
-
-    let results: Vec<redis::Value> = redis::cmd("FT.SEARCH")
-        .arg(search_index)
-        .arg(new_search)
-        .arg("LIMIT")
-        .arg(index)
-        .arg(1)
-        .arg("SORTBY")
-        .arg("score")
-        .arg("NOCONTENT") // Only show POST IDs not post content
-        .query_async(con).await?;
-
-    let to_return = from_redis_value::<String>(&results[1])?;
-    span.finish();
-    Ok(to_return)
-}
-
-
-// Returns the post ID at the given index in the list
-#[instrument(skip(con, parent_tx))]
-async fn get_post_at_list_index(list: String, index: u16, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<String, anyhow::Error> {
-    debug!("Getting post at index {} in list {}", index, list);
-
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("db.query", "get_post_at_list_index").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "get_post_at_list_index");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let mut results: Vec<String> = redis::cmd("LRANGE")
-        .arg(list)
-        .arg(index)
-        .arg(index)
-        .query_async(con).await?;
-
-    span.finish();
-    Ok(results.remove(0))
-}
-
-
-#[instrument(skip(con, parent_tx))]
-async fn get_post_by_id<'a>(post_id: String, search: Option<String>, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("db.query", "get_post_by_id").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "get_post_by_id");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let post: HashMap<String, redis::Value> = con.hgetall(&post_id).await?;
-
-    let subreddit = post_id.split(":").collect::<Vec<&str>>()[1].to_string();
-
-    let author = from_redis_value::<String>(&post.get("author").unwrap().clone())?;
-    let title = from_redis_value::<String>(&post.get("title").unwrap().clone())?;
-    let url = from_redis_value::<String>(&post.get("url").unwrap().clone())?;
-    let embed_url = from_redis_value::<String>(&post.get("embed_url").unwrap().clone())?;
-    let timestamp = from_redis_value::<i64>(&post.get("timestamp").unwrap().clone())?;
-    
-    let to_return = InteractionResponse {
-        embed: Some(CreateEmbed::default()
-            .title(title)
-            .description(format!("r/{}", subreddit))
-            .author(CreateEmbedAuthor::new(format!("u/{}", author))
-                .url(format!("https://reddit.com/u/{}", author))
-            )
-            .url(url)
-            .color(0x00ff00)
-            .image(embed_url)
-            .timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(timestamp)?)
-            .to_owned()
-        ),
-
-        components: Some(vec![CreateActionRow::Buttons(vec![
-            CreateButton::new(json!({
-                "subreddit": subreddit,
-                "search": search,
-                "command": "again"
-            }).to_string())
-                .label("🔁")
-                .style(ButtonStyle::Primary),
-
-            CreateButton::new(json!({
-                "subreddit": subreddit,
-                "search": search,
-                "command": "auto-post"
-            }).to_string())
-                .label("Auto-Post")
-                .style(ButtonStyle::Primary),
-        ])]),
-
-        fallback: ResponseFallbackMethod::Edit,
-        ..Default::default()
-    };
-
-    span.finish();
-    return Ok(to_return);
-}
-
-
-#[instrument(skip(con, parent_tx))]
-pub async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("subreddit.search", "get_subreddit_search").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("subreddit.search", "get_subreddit_search");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let mut index: u16 = con.incr(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 1i16).await?;
-    let _:() = con.expire(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 60*60).await?;
-    index -= 1;
-    let length: u16 = get_length_of_search_results(format!("idx:{}", &subreddit), search.clone(), con, Some(&span)).await?;
-
-    if length == 0 {
-        return Ok(InteractionResponse {
-            embed: Some(CreateEmbed::default()
-                .title("No search results found")
-                .color(0xff0000)
-                .to_owned()
-            ),
-            ..Default::default()
-        });
-    }
-
-    index = length - (index + 1);
-
-    if index >= length {
-        let _:() = con.set(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 0i16).await?;
-        index = 0;
-    }
-
-    let post_id = get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con, Some(&span)).await?;
-    let to_return = get_post_by_id(post_id, Some(search), con, Some(&span)).await?;
-    span.finish();
-    return Ok(to_return);
-}
-
-
-#[instrument(skip(con, parent_tx))]
-pub async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Connection, channel: ChannelId, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<InteractionResponse, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("subreddit.get", "get_subreddit").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("subreddit.get", "get_subreddit");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let subreddit = subreddit.to_lowercase();
-
-    let mut index: u16 = con.incr(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 1i16).await?;
-    let _:() = con.expire(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 60*60).await?;
-    index -= 1;
-    let length: u16 = con.llen(format!("subreddit:{}:posts", &subreddit)).await?;
-
-    if index >= length {
-        let _:() = con.set(format!("subreddit:{}:channels:{}:index", &subreddit, channel), 0i16).await?;
-        index = 0;
-    }
-
-    let post_id = get_post_at_list_index(format!("subreddit:{}:posts", &subreddit), index, con, Some(&span)).await?;
-
-    let to_return = get_post_by_id(post_id, None, con, Some(&span)).await?;
-    span.finish();
-    return Ok(to_return);
 }
 
 
@@ -413,26 +197,6 @@ async fn cmd_get_user_tiers<'a>(command: &'a CommandInteraction, ctx: &'a Contex
     });
 }
 
-#[instrument(skip(con, parent_tx))]
-async fn list_contains(element: &str, list: &str, con: &mut redis::aio::Connection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<bool, anyhow::Error> {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("db.query", "list_contains").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "list_contains");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
-    let position: Option<u16> = con.lpos(list, element, redis::LposOptions::default()).await?;
-
-    let to_return = match position {
-        Some(_) => Ok(true),
-        None => Ok(false),
-    };
-
-    span.finish();
-    to_return
-}
 
 #[instrument(skip(command, ctx, parent_tx))]
 async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
@@ -480,9 +244,8 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
         });
     }
 
-    let redis_manager = data_lock.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-    let redis_client_mutex = redis_manager.get_available_resource().await;
-    let mut con = redis_client_mutex.lock().await;
+    let conf = data_lock.get::<ConfigStruct>().unwrap();
+    let mut con = conf.redis.clone();
 
     let already_queued = list_contains(&subreddit, "custom_subreddits_queue", &mut con, Some(parent_tx)).await?;
 
@@ -500,7 +263,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
         loop {
             sleep(Duration::from_millis(1000)).await;
 
-            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(&mut *con).await {
+            let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(&mut con).await {
                 Ok(posts) => {
                     posts
                 },
@@ -525,9 +288,8 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
 #[instrument(skip(command, ctx, parent_tx))]
 async fn info<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
     let data_read = ctx.data.read().await;    
-    let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-    let redis_client_mutex = redis_manager.get_available_resource().await;
-    let mut con = redis_client_mutex.lock().await;
+    let conf = data_read.get::<ConfigStruct>().unwrap();
+    let mut con = conf.redis.clone();
 
     capture_event(ctx.data.clone(), "cmd_info", Some(parent_tx), None, &format!("user_{}", command.user.id.get().to_string())).await;
 
@@ -632,43 +394,6 @@ async fn get_command_response<'a>(command: &'a CommandInteraction, ctx: &'a Cont
 }
 
 
-/// What to do if sending a response fails due to already being acknowledged
-#[derive(Debug, Clone)]
-enum ResponseFallbackMethod {
-    /// Edit the original response
-    Edit,
-    /// Send a followup response
-    Followup,
-    /// Return an error
-    Error,
-    /// Do nothing
-    None
-}
-
-#[derive(Debug, Clone)]
-struct InteractionResponse {
-    file: Option<serenity::builder::CreateAttachment>,
-    embed: Option<serenity::builder::CreateEmbed>,
-    content: Option<String>,
-    ephemeral: bool,
-    components: Option<Vec<CreateActionRow>>,
-    fallback: ResponseFallbackMethod,
-}
-
-impl Default for InteractionResponse {
-    fn default() -> Self {
-        InteractionResponse {
-            file: None,
-            embed: None,
-            content: None,
-            ephemeral: false,
-            components: None,
-            fallback: ResponseFallbackMethod::Error
-        }
-    }
-}
-
-
 /// Discord event handler
 struct Handler;
 
@@ -678,9 +403,8 @@ impl EventHandler for Handler {
     async fn guild_create(&self, ctx: Context, guild: Guild, is_new: Option<bool>) {
         debug!("Guild create event fired");
         let data_read = ctx.data.read().await;
-        let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-        let redis_client_mutex = redis_manager.get_available_resource().await;
-        let mut con = redis_client_mutex.lock().await;
+        let conf = data_read.get::<ConfigStruct>().unwrap();
+        let mut con = conf.redis.clone();
         let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace()), ctx.shard_id.0, ctx.cache.guild_count()).await.unwrap();
 
         if let Some(x) = is_new { // First time client has seen the guild
@@ -693,9 +417,8 @@ impl EventHandler for Handler {
     async fn guild_delete(&self, ctx: Context, incomplete: UnavailableGuild, _full: Option<Guild>) {
         {
             let data_read = ctx.data.read().await;    
-            let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-            let redis_client_mutex = redis_manager.get_available_resource().await;
-            let mut con = redis_client_mutex.lock().await;
+            let conf = data_read.get::<ConfigStruct>().unwrap();
+            let mut con = conf.redis.clone();
             let _:() = con.hset(format!("shard_guild_counts_{}", get_namespace()), ctx.shard_id.0, ctx.cache.guild_count()).await.unwrap();
         }
     
@@ -710,7 +433,14 @@ impl EventHandler for Handler {
         info!("Shard {} connected as {}, on {} servers!", ready.shard.unwrap().id.0, ready.user.name, ready.guilds.len());
 
         if !Path::new("/etc/probes").is_dir() {
-            fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+            match fs::create_dir("/etc/probes") {
+                Ok(_) => {},
+                Err(e) => {
+                    if !format!("{}", e).contains("File exists") {
+                        error!("Error creating /etc/probes: {:?}", e);
+                    }
+                }
+            }
         }
         if !Path::new("/etc/probes/live").exists() {
             let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
@@ -743,25 +473,17 @@ impl EventHandler for Handler {
         let tx_ctx = sentry::TransactionContext::new("interaction_create", "interaction");
         let tx = sentry::start_transaction(tx_ctx);
         sentry::configure_scope(|scope| scope.set_span(Some(tx.clone().into())));
-        
-        // Check if there is a deadlock
-        {
-            let try_write = ctx.data.try_write();
-            if try_write.is_err() {
-                debug!("Couldn't get data lock immediately");
-            } else {
-                debug!("Got data lock");
-            }
-        }
 
         if let Interaction::Command(command) = interaction.clone() {
             let slash_command_tx = tx.start_child("interaction.slash_command", "handle slash command");
             match command.guild_id {
                 Some(guild_id) => {
                     info!("{:?} ({:?}) > {:?} ({:?}) : /{} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.get(), command.user.name, command.user.id.get(), command.data.name, command.data.options);
+                    info!("Sent at {:?}", command.id.created_at());
                 },
                 None => {
                     info!("{:?} ({:?}) : /{} {:?}", command.user.name, command.user.id.get(), command.data.name, command.data.options);
+                    info!("Sent at {:?}", command.id.created_at());
                 }
             }
             let command_response = get_command_response(&command, &ctx, &tx).await;
@@ -887,9 +609,11 @@ impl EventHandler for Handler {
             match command.guild_id {
                 Some(guild_id) => {
                     info!("{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.get(), command.user.name, command.user.id.get(), command.data.custom_id, command.data.kind);
+                    info!("Sent at {:?}", command.id.created_at());
                 },
                 None => {
                     info!("{:?} ({:?}) : Button {} {:?}", command.user.name, command.user.id.get(), command.data.custom_id, command.data.kind);
+                    info!("Sent at {:?}", command.id.created_at());
                 }
             }
 
@@ -919,9 +643,8 @@ impl EventHandler for Handler {
                     capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())).await;
                     
                     let data_read = ctx.data.read().await;
-                    let redis_manager = data_read.get::<ResourceManager<redis::aio::Connection>>().unwrap().clone();
-                    let redis_client_mutex = redis_manager.get_available_resource().await;
-                    let mut con = redis_client_mutex.lock().await;
+                    let conf = data_read.get::<ConfigStruct>().unwrap();
+                    let mut con = conf.redis.clone();
         
                     let component_response = match search_enabled {
                         true => {
@@ -945,7 +668,7 @@ impl EventHandler for Handler {
                 "auto-post" => {
                     if let Some(member) = &command.member {
                         if !member.permissions(&ctx).unwrap().manage_messages() {
-                            command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap();
+                            command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap_or_else(|e| warn!("Failed to create response to autopost, {:?}", e));
                             return;
                         }
                     }
@@ -987,17 +710,36 @@ impl EventHandler for Handler {
                 "cancel_autopost" => {
                     if let Some(member) = &command.member {
                         if !member.permissions(&ctx).unwrap().manage_messages() {
-                            command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap();
+                            command.create_response(&ctx.http, CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content("You must have the 'Manage Messages' permission to setup auto-post.").ephemeral(true))).await.unwrap_or_else(|e| {
+                                warn!("Failed to create ephemeral message warning about missing 'Manage Messages' permission, {:?}", e);
+                            });
                             return;
                         }
                     }
+                    
+                    command.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap_or_else(|e| {
+                        warn!("Failed to acknowledge cancel autopost, {:?}", e);
+                    });
+   
 
 
                     let lock = ctx.data.read().await;
                     let config = lock.get::<ConfigStruct>().unwrap();
                     let chan = config.auto_post_chan.clone();
-                    chan.send(AutoPostCommand::Stop(command.channel_id)).await.unwrap();
-                    command.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap();
+                    match chan.send(AutoPostCommand::Stop(command.channel_id)).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            error!("Failed to send stop autopost command: {:?}", e);
+                            let mut config = lock.get::<ConfigStruct>().unwrap().clone();
+                            drop(lock);
+                            let auto_post_chan = tokio::sync::mpsc::channel(100);
+                            config.auto_post_chan = auto_post_chan.0.clone();
+                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone()));
+                            let mut lock = ctx.data.write().await;
+                            lock.insert::<ConfigStruct>(config);
+                            info!("Restarted autopost loop");
+                        }
+                    };
                     capture_event(ctx.data.clone(), "autopost_cancel", Some(&component_tx), None, &format!("channel_{}", &command.channel.clone().unwrap().id.get().to_string())).await;
                     None
                 }
@@ -1128,9 +870,11 @@ impl EventHandler for Handler {
             match modal.guild_id {
                 Some(guild_id) => {
                     info!("{:?} ({:?}) > {:?} ({:?}) : Modal {} {:?}", guild_id.name(&ctx.cache).unwrap_or("Name Unavailable".into()), guild_id.get(), modal.user.name, modal.user.id.get(), modal.data.custom_id, modal.data.components);
+                    info!("Sent at {:?}", modal.id.created_at());
                 },
                 None => {
                     info!("{:?} ({:?}) : Modal {} {:?}", modal.user.name, modal.user.id.get(), modal.data.custom_id, modal.data.components);
+                    info!("Sent at {:?}", modal.id.created_at());
                 }
             }
 
@@ -1152,6 +896,10 @@ impl EventHandler for Handler {
 
             match modal_command {
                 "autopost" => {
+                    modal.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap_or_else(|e| {
+                        warn!("Failed to acknowledge autopost modal: {:?}", e);
+                        return;
+                    });
                     capture_event(ctx.data.clone(), "autopost_start", Some(&modal_tx), None, &format!("channel_{}", modal.channel.clone().unwrap().id.get().to_string())).await;
 
                     let lock = ctx.data.read().await;
@@ -1200,20 +948,39 @@ impl EventHandler for Handler {
                         }
                     }
                     
+                    let multiplier = if interval.ends_with("s") {
+                        1
+                    } else if interval.ends_with("m") {
+                        60
+                    } else if interval.ends_with("h") {
+                        3600
+                    } else if interval.ends_with("d") {
+                        86400
+                    } else {
+                        return;
+                    };
                     
                     let interval = if interval.ends_with("s") {
-                        interval.replace("s", "").parse::<u64>().unwrap()
+                        interval.replace("s", "").parse::<u64>()
                     } else if interval.ends_with("m") {
-                        interval.replace("m", "").parse::<u64>().unwrap() * 60
+                        interval.replace("m", "").parse::<u64>()
                     } else if interval.ends_with("h") {
-                        interval.replace("h", "").parse::<u64>().unwrap() * 3600
+                        interval.replace("h", "").parse::<u64>()
                     } else if interval.ends_with("d") {
-                        interval.replace("d", "").parse::<u64>().unwrap() * 86400
+                        interval.replace("d", "").parse::<u64>()
                     } else {
                         return;
                     };
 
-                    let interval = Duration::from_secs(interval);
+                    let interval = match interval {
+                        Ok(x) => {
+                            Duration::from_secs(x * (multiplier as u64))
+                        },
+                        Err(_) => {
+                            debug!("Invalid interval: {:?}", interval);
+                            return;
+                        }
+                    };
 
                     let limit = match limit.parse::<u32>() {
                         Ok(x) => x,
@@ -1231,10 +998,23 @@ impl EventHandler for Handler {
                         current: 0,
                         limit,
                         channel: modal.channel_id,
+                        author: modal.user.id,
                     };
 
-                    chan.send(AutoPostCommand::Start(post_request)).await.unwrap();
-                    modal.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap();
+                    match chan.send(AutoPostCommand::Start(post_request)).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            error!("Failed to send stop autopost command: {:?}", e);
+                            let mut config = lock.get::<ConfigStruct>().unwrap().clone();
+                            drop(lock);
+                            let auto_post_chan = tokio::sync::mpsc::channel(100);
+                            config.auto_post_chan = auto_post_chan.0.clone();
+                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone()));
+                            let mut lock = ctx.data.write().await;
+                            lock.insert::<ConfigStruct>(config);
+                            info!("Restarted autopost loop");
+                        }
+                    };
                 },
 
                 _ => {
@@ -1251,7 +1031,7 @@ impl EventHandler for Handler {
 
 async fn monitor_total_shards(shard_manager: Arc<serenity::gateway::ShardManager>, total_shards: u32) {
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
-    let mut con = db_client.get_tokio_connection().await.expect("Can't connect to redis");
+    let mut con = db_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
 
     let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
     let shard_id: u32 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u32");
@@ -1264,7 +1044,17 @@ async fn monitor_total_shards(shard_manager: Arc<serenity::gateway::ShardManager
 
         if !shard_manager.has(ShardId(shard_id)).await {
             debug!("Shard {} not found, marking self for termination.", shard_id);
+            debug!("Instantiated shards: {:?}", shard_manager.shards_instantiated().await);
             let _ = fs::remove_file("/etc/probes/live");
+        } else {
+            if !Path::new("/etc/probes/live").exists() {
+                debug!("Resurrected!");
+                if !Path::new("/etc/probes").is_dir() {
+                    fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+                }
+                let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
+                file.write_all(b"alive").expect("Unable to write to /etc/probes/live");
+            }
         }
 
         if db_total_shards != total_shards {
@@ -1290,9 +1080,9 @@ async fn main() {
     let shard_id: u32 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u32");
 
     let redis_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
-    let mut con = redis_client.get_async_connection().await.expect("Can't connect to redis");
+    let mut con = redis_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
 
-    let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+    let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
     client_options.app_name = Some(format!("Shard {}", shard_id));
 
     let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
@@ -1327,20 +1117,9 @@ async fn main() {
             let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
             let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
 
-            let mut client_options = ClientOptions::parse("mongodb+srv://my-user:rslash@mongodb-svc.r-slash.svc.cluster.local/admin?replicaSet=mongodb&ssl=false").await.unwrap();
+            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
             client_options.app_name = Some(format!("Shard {}", shard_id));
             mongodb::Client::with_options(client_options).unwrap()
-        })))).await;
-
-        let redis_manager = ResourceManager::<redis::aio::Connection>::new(|| Arc::new(Mutex::new(Box::pin(async {
-            println!("Creating new redis client");
-            let redis_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
-            println!("Entered tokio runtime");
-            let con = redis_client.get_async_connection().await.unwrap();
-            println!("Got connection");
-            //let handle = tokio::task::spawn(async move {redis_client.get_async_connection().await});
-            //let con = std::thread::spawn(|| {tokio::runtime::Runtime::new().unwrap().block_on(handle).unwrap().unwrap()}).join().unwrap();
-            con
         })))).await;
 
         let posthog_manager = ResourceManager::<posthog::Client>::new(|| Arc::new(Mutex::new(Box::pin(async {
@@ -1349,12 +1128,12 @@ async fn main() {
         })))).await;
 
         data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
-        data.insert::<ResourceManager<redis::aio::Connection>>(redis_manager);
         data.insert::<ResourceManager<posthog::Client>>(posthog_manager);
         data.insert::<ConfigStruct>(ConfigStruct {
             shard_id: shard_id,
             nsfw_subreddits: nsfw_subreddits,
-            auto_post_chan: auto_post_chan.0.clone()
+            auto_post_chan: auto_post_chan.0.clone(),
+            redis: con,
         });
     }
 
@@ -1370,7 +1149,7 @@ async fn main() {
         tracing_subscriber::Registry::default()
         .with(sentry::integrations::tracing::layer().span_filter(
             |md| {
-                if md.name().contains("recv") || md.name().contains("recv_event") || md.name().contains("dispatch") || md.name().contains("handle_event") || md.name().contains("check_heartbeat") {
+                if md.name().contains("recv") || md.name().contains("recv_event") || md.name().contains("dispatch") || md.name().contains("handle_event") || md.name().contains("check_heartbeat") || md.name().contains("headers") {
                     return false
                 } else {
                     return true;
@@ -1406,9 +1185,9 @@ async fn main() {
             _ => "r-slash".into()
         };
 
-        let _guard = sentry::init(("http://9ebbf7835f99405ebfca243cf5263782@100.67.30.19:9000/3", sentry::ClientOptions {
+        let _guard = sentry::init(("https://e1d0fdcc5e224a40ae768e8d36dd7387@o4504774745718784.ingest.sentry.io/4504793832161280", sentry::ClientOptions {
             release: sentry::release_name!(),
-            traces_sample_rate: 1.0,
+            traces_sample_rate: 0.2,
             environment: Some(bot_name.clone()),
             server_name: Some(shard_id.to_string().into()),
             ..Default::default()

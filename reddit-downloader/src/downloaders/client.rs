@@ -64,7 +64,9 @@ impl Limiter {
 
     pub async fn update(&self) {
         let mut state = self.state.lock().await;
-        state.remaining -= 1;
+        if !state.remaining == 0 {
+            state.remaining -= 1;
+        }
         if let Some(per_minute) = self.per_minute {
             if state.reset < chrono::Utc::now().timestamp() {
                 state.remaining = per_minute;

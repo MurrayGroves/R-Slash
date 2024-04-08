@@ -1,10 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
-use connection_pooler::ResourceManager;
+use log::{debug, warn};
 use serde_json::json;
 use tokio::{sync::{mpsc::Receiver, RwLock}, time::Instant};
-use serenity::{all::ButtonStyle, builder::{CreateActionRow, CreateButton, CreateMessage}, model::id::ChannelId, prelude::TypeMap};
+use serenity::{all::{ButtonStyle, UserId}, builder::{CreateActionRow, CreateButton, CreateMessage}, model::id::ChannelId, prelude::TypeMap};
 use tokio::time::{Duration, sleep};
+
+use crate::types::ConfigStruct;
 
 use super::{get_subreddit, get_subreddit_search};
 
@@ -17,6 +19,7 @@ pub struct PostRequest {
     pub limit: u32,
     pub current: u32,
     pub last_post: Instant,
+    pub author: UserId,
 }
 
 pub enum AutoPostCommand {
@@ -24,6 +27,8 @@ pub enum AutoPostCommand {
     Stop(ChannelId),
 }
 
+
+// TODO - Never panic!
 pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<TypeMap>>, http: Arc<serenity::http::Http>) {
     let mut requests = HashMap::new();
 
@@ -53,9 +58,8 @@ pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<Type
             if request.last_post + request.interval < Instant::now() {
                 // Post the request
                 let data = data.read().await;
-                let client = data.get::<ResourceManager<redis::aio::Connection>>().unwrap();
-                let redis_client = client.get_available_resource().await;
-                let mut con = redis_client.lock().await;
+                let conf = data.get::<ConfigStruct>().unwrap();
+                let mut con = conf.redis.clone();
                 let subreddit = request.subreddit.clone();
                 let search = request.search.clone();
                 let channel = channel.clone();
@@ -94,7 +98,31 @@ pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<Type
                             .style(ButtonStyle::Danger)
                             ])]);
 
-                channel.send_message(http.clone(),  resp).await.unwrap();
+                match channel.send_message(http.clone(),  resp).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        debug!("Error sending message: {:?}", e);
+                        let dm = match request.author.create_dm_channel(http.clone()).await {
+                            Ok(dm) => dm,
+                            Err(e) => {
+                                warn!("Error creating DM: {:?}", e);
+                                continue;
+                            }
+                        };
+
+                        let msg = CreateMessage::new()
+                            .content(format!("Hello there! I tried to post to <#{}> but I don't have permission to do so. Please make sure I have the correct permissions and try again.", channel.get()));
+                        match dm.send_message(http.clone(), msg).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                warn!("Error sending DM: {:?}", e);
+                            }
+                        };
+
+                        to_remove.push(channel.clone());
+                    }
+                
+                };
                 
                 // Update the last post time
                 request.last_post = Instant::now();
