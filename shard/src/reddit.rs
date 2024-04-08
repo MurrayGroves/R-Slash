@@ -198,20 +198,23 @@ pub async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Multiple
     let mut post_id: Result<String, Error> = Err(anyhow!("No posts found for subreddit: {}", subreddit));
 
     // Find the first post that the channel has not seen before
+    let mut minimum_post = None;
     for post in posts {
         if fetched_posts.contains_key(&post) {
-            continue;
+            minimum_post = Some((post, get_epoch_ms()));
+        } else {
+            post_id = Ok(post);
+            break;
         }
-        post_id = Ok(post);
-        break;
     }
-    
-    // If the channel has seen all posts, find the post they saw longest ago
+
+    // If all posts have been seen, find the post that the channel saw longest ago
     if post_id.is_err() {
-        match fetched_posts.iter().min_by_key(|x| x.1).unwrap() {
-            (post, _) => {
+        match minimum_post {
+            Some((post, _)) => {
                 post_id = Ok(post.to_string());
-            }
+            },
+            None => {}
         };
     }
 

@@ -433,7 +433,14 @@ impl EventHandler for Handler {
         info!("Shard {} connected as {}, on {} servers!", ready.shard.unwrap().id.0, ready.user.name, ready.guilds.len());
 
         if !Path::new("/etc/probes").is_dir() {
-            fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+            match fs::create_dir("/etc/probes") {
+                Ok(_) => {},
+                Err(e) => {
+                    if !format!("{}", e).contains("File exists") {
+                        error!("Error creating /etc/probes: {:?}", e);
+                    }
+                }
+            }
         }
         if !Path::new("/etc/probes/live").exists() {
             let mut file = File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
