@@ -198,10 +198,12 @@ pub async fn get_subreddit<'a>(subreddit: String, con: &mut redis::aio::Multiple
     let mut post_id: Result<String, Error> = Err(anyhow!("No posts found for subreddit: {}", subreddit));
 
     // Find the first post that the channel has not seen before
-    let mut minimum_post = None;
+    let mut minimum_post: Option<(String, u64)> = None;
     for post in posts {
         if fetched_posts.contains_key(&post) {
-            minimum_post = Some((post, get_epoch_ms()));
+            if minimum_post.is_none() || fetched_posts.get(&post).unwrap() < &minimum_post.clone().unwrap().1 {
+                minimum_post = Some((post.clone(), fetched_posts.get(&post).unwrap().to_owned()));
+            }
         } else {
             post_id = Ok(post);
             break;
