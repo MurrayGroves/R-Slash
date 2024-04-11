@@ -502,10 +502,12 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
             }
         }
 
-        if (keys.len() != 0) {
+        if keys.len() != 0 {
+            redis::cmd("MULTI").query_async(con).await?;
             con.del(format!("subreddit:{}:posts", subreddit)).await?;
             con.rpush(format!("subreddit:{}:posts", subreddit), keys.clone()).await?;
-        }
+            redis::cmd("EXEC").query_async(con).await?;
+        };
 
 
         let time_since_request = get_epoch_ms()? - last_requested;
