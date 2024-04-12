@@ -93,11 +93,19 @@ pub async fn get_user_tiers<'a>(user: impl Into<String>, data: impl Into<Client<
     let mut manual = false;
     let bronze_active = match doc.get("tiers") {
         Some(tiers) => {
-            let tiers = mongodb::bson::from_bson::<HashMap<String, MembershipDuration>>(tiers.into()).unwrap();
-            let bronze = tiers.get("bronze");
+            let tiers = mongodb::bson::from_bson::<HashMap<String, Vec<MembershipDuration>>>(tiers.into()).unwrap_or_else(|_| {
+                let tiers = mongodb::bson::from_bson::<HashMap<String, MembershipDuration>>(tiers.into()).unwrap();
+                let mut new_tiers = HashMap::new();
+                for (k, v) in tiers {
+                    new_tiers.insert(k, vec![v]);
+                };
+                new_tiers
+            });
+            let empty = vec![];
+            let bronze = tiers.get("bronze").unwrap_or(&empty);
             let current_time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
-            match bronze {
+            match bronze.last() {
                 Some(tier) => {
                     manual = tier.manual.unwrap_or(false);
                     match tier.end {
