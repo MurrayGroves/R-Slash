@@ -67,6 +67,9 @@ pub async fn get_post_at_search_index(search_index: String, search: &str, index:
         }
     }
 
+
+    debug!("Getting post at index {} in search results for {}", index, new_search);
+
     let results: Vec<redis::Value> = redis::cmd("FT.SEARCH")
         .arg(search_index)
         .arg(new_search)
@@ -251,6 +254,9 @@ pub async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &m
             sentry::start_transaction(ctx).into()
         }
     };
+
+    let mut search = search.replace('"', "\\");
+    search = search.replace(":", "\\:");
 
     let mut index: u16 = con.incr(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 1i16).await?;
     let _:() = con.expire(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 60*60).await?;
