@@ -93,11 +93,11 @@ pub async fn get_user_tiers<'a>(user: impl Into<String>, data: impl Into<Client<
     let mut manual = false;
     let bronze_active = match doc.get("tiers") {
         Some(tiers) => {
-            let tiers = mongodb::bson::from_bson::<HashMap<String, Vec<MembershipDuration>>>(tiers.into()).unwrap();
-            let bronze = tiers.get("bronze").unwrap();
+            let tiers = mongodb::bson::from_bson::<HashMap<String, MembershipDuration>>(tiers.into()).unwrap();
+            let bronze = tiers.get("bronze");
             let current_time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
-            match bronze.last() {
+            match bronze {
                 Some(tier) => {
                     manual = tier.manual.unwrap_or(false);
                     match tier.end {
