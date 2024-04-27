@@ -16,7 +16,7 @@ pub struct PostRequest {
     pub search: Option<String>,
     // Interval between posts in seconds
     pub interval: Duration,
-    pub limit: u32,
+    pub limit: Option<u32>,
     pub current: u32,
     pub last_post: Instant,
     pub author: UserId,
@@ -65,7 +65,7 @@ pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<Type
                 let channel = channel.clone();
 
                 request.current += 1;
-                if request.current > request.limit {
+                if request.limit.is_some() && request.current > request.limit.unwrap() {
                     to_remove.push(channel.clone());
                     continue;
                 }
