@@ -410,7 +410,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                         Some(url)
                     } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") || url.contains(".mpd") {
                         debug!("URL is not embeddable, but we have the ability to turn it into one");
-                        let mut res = match downloaders_client.request(&url).await {
+                        let mut res = match downloaders_client.request(&url, &post["id"].to_string().replace('"', "")).await {
                             Ok(x) => x,
                             Err(x) => {
                                 let txt = format!("Failed to download media: {}", x.backtrace());
@@ -592,7 +592,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
 
     let imgur_client_id = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
 
-    let downloaders_client = downloaders::client::Client::new("/data/media", Some(imgur_client_id), None);
+    let downloaders_client = downloaders::client::Client::new("/data/media", Some(imgur_client_id), None).await?;
 
     debug!("Entering loop");
     if do_custom == "true".to_string() {

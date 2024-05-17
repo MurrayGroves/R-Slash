@@ -39,3 +39,5 @@ reddit-downloader/redgifs_browser.py
 stats-uploader/secrets.yml
 
 *.env
+
+downloader-hs/
