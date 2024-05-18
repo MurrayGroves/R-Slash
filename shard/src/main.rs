@@ -751,7 +751,7 @@ impl EventHandler for Handler {
                             drop(lock);
                             let auto_post_chan = tokio::sync::mpsc::channel(100);
                             config.auto_post_chan = auto_post_chan.0.clone();
-                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone()));
+                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone(), ctx.shard_id.0.into()));
                             let mut lock = ctx.data.write().await;
                             lock.insert::<ConfigStruct>(config);
                             info!("Restarted autopost loop");
@@ -1075,7 +1075,7 @@ impl EventHandler for Handler {
                             drop(lock);
                             let auto_post_chan = tokio::sync::mpsc::channel(100);
                             config.auto_post_chan = auto_post_chan.0.clone();
-                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone()));
+                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone(), ctx.shard_id.0.into()));
                             let mut lock = ctx.data.write().await;
                             lock.insert::<ConfigStruct>(config);
                             info!("Restarted autopost loop");
@@ -1230,7 +1230,7 @@ async fn main() {
         monitor_total_shards(shard_manager, total_shards).await;
     });
 
-    tokio::spawn(poster::start_loop(auto_post_chan.1, client.data.clone(), client.http.clone()));
+    tokio::spawn(poster::start_loop(auto_post_chan.1, client.data.clone(), client.http.clone(), shard_id.into()));
 
     let thread = tokio::spawn(async move {
         tracing_subscriber::Registry::default()

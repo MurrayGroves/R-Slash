@@ -141,14 +141,6 @@ pub async fn get_post_by_id<'a>(post_id: &str, search: Option<&str>, con: &mut r
     let embed_url = from_redis_value::<String>(&post.get("embed_url").context("No embed_url in post")?.clone())?;
     let timestamp = from_redis_value::<i64>(&post.get("timestamp").context("No timestamp in post")?.clone())?;
 
-    // If URL is hosted by us, and ends in .mp4, use the render URL (allows for embedding)
-    let url = if url.starts_with("https://r-slash") && url.ends_with(".mp4") {
-        let filename = url.split("/").last().ok_or(anyhow!("No filename found in URL: {}", url))?;
-        format!("https://r-slash.b-cdn.net/render/{}", filename)
-    } else {
-        url
-    };
-
     if embed_url.starts_with("https://r-slash") && embed_url.ends_with(".mp4") {
         let filename = embed_url.split("/").last().ok_or(anyhow!("No filename found in URL: {}", url))?;
         let embed_url = format!("https://r-slash.b-cdn.net/render/{}", filename);
