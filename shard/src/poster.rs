@@ -126,11 +126,11 @@ pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<Type
                 }
 
                 // Update the post memory
-                let filter: Document = doc! {"channel": request.channel.get() as i64};
+                let filter: Document = doc! {"channel": request.channel.get().to_string()};
                 let mut post_memory = match coll.find_one(filter.clone(), None).await {
                     Ok(Some(post)) => post,
                     Ok(None) => {
-                        warn!("Post memory not found for channel {}", request.channel.get());
+                        debug!("Post memory not found for channel {}", request.channel.get());
                         continue;
                     }
                     Err(e) => {

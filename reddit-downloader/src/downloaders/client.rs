@@ -4,6 +4,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{Context, Error, anyhow, Result};
+use reqwest::StatusCode;
 use serde_json::json;
 use serde_json::Value;
 use tracing::info;
@@ -25,13 +26,30 @@ pub struct Token {
 
 impl Token {
     async fn update_token(url: &str) -> Result<(String, i64)> {
-        let req = reqwest::Client::new().get(url).send().await?;
-        let json = req.json::<serde_json::Value>().await?;
-        let token = json["token"].as_str().ok_or(Error::msg("Failed to parse token"))?;
-        let decoded = base64::decode(token)?;
+        let mut req = reqwest::Client::new().get(url).send().await?;
+        while req.status() == 429 {
+            debug!("Token request status: {}", req.status());
+            debug!("Token request headers: {:?}", req.headers());
+            info!("Waiting 10 minutes for token rate limit");
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            req = reqwest::Client::new().get(url).send().await?;
+        }
+
+        let mut text = req.text().await?;
+        debug!("Token request body: {}", text);
+        // Redgifs returns tokens like this sometimes???????
+        let token = if text.contains("html") {
+            text = text.replace("<html><head><title>Loading...</title></head><body><script type='text/javascript'>window.location.replace('https://api.regifs.com/v2/auth/temporary?ch=1&js=", "");
+            text = text.split("&sid").next().ok_or(Error::msg("Failed to parse token"))?.to_string();
+            text
+        } else {
+            let json: Value = serde_json::from_str(&text)?;
+            json["token"].as_str().ok_or(Error::msg("Failed to parse token"))?.to_string()
+        };
+        debug!("Token: {}", token);
+        let tokenData = token.split(".").nth(1).ok_or(Error::msg("Failed to parse token"))?;
+        let decoded = base64::decode(tokenData)?;
         let decoded = String::from_utf8(decoded)?;
-        let decoded = decoded.split("}").next().ok_or(Error::msg("Failed to parse token, no `}` in response"))?;
-        let decoded = format!("{}{}", decoded, "}");
         let json: Value = serde_json::from_str(&decoded)?;
         let expiry = json["exp"].as_i64().ok_or(Error::msg("Failed to parse expiry"))?;
 
@@ -82,7 +100,7 @@ impl Limiter {
     }
 
     // Update the rate limit based on the headers from the last request
-    pub async fn update_headers(&self, headers: &reqwest::header::HeaderMap) -> Result<(), Error>{
+    pub async fn update_headers(&self, headers: &reqwest::header::HeaderMap, status: StatusCode) -> Result<(), Error>{
         let mut state = self.state.lock().await;
         if let Some(per_minute) = self.per_minute {
             state.remaining -= 1;
@@ -99,8 +117,14 @@ impl Limiter {
             if let Some(remaining) = headers.get("X-RateLimit-UserRemaining") {
                 state.remaining = remaining.to_str()?.parse()?;
             }
-            if let Some(reset) = headers.get("X-RateLimit-UserReset") {
+            else if let Some(reset) = headers.get("X-RateLimit-UserReset") {
                 state.reset = reset.to_str()?.parse()?;
+            } else {
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    // Wait 10 minutes if we hit the rate limit and they didn't tell us when to try again
+                    state.reset = chrono::Utc::now().timestamp() + 600;
+                    state.remaining = 0;
+                }
             }
         }
 

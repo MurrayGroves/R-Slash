@@ -1,13 +1,14 @@
-use std::{hash::{Hash, Hasher}, io::Write};
+use std::{hash::{Hash, Hasher}, io::Write, sync::Arc};
 
 use anyhow::{Error, Context, Result};
+use tokio::sync::RwLock;
 use tracing::debug;
 
 pub struct Client<'a> {
     path: &'a str,
     client: reqwest::Client,
     limiter: super::client::Limiter,
-    token: super::client::Token,
+    token: Arc<RwLock<super::client::Token>>,
 }
 
 impl <'a>Client<'a> {
@@ -16,7 +17,7 @@ impl <'a>Client<'a> {
             path,
             client: reqwest::Client::new(),
             limiter: limiter,
-            token: super::client::Token::new("https://api.regifs.com/v2/auth/temporary".to_string()).await?,
+            token: Arc::new(RwLock::new(super::client::Token::new("https://api.regifs.com/v2/auth/temporary".to_string()).await?)),
         })
     }
     
@@ -28,8 +29,11 @@ impl <'a>Client<'a> {
         id = id.split(".").next().ok_or(Error::msg("No ID in url"))?;
 
         let url = format!("https://api.redgifs.com/v2/gifs/{}", id);
-        let resp = self.client.get(&url).send().await?;
-        self.limiter.update_headers(resp.headers()).await;
+        let mut token_lock = self.token.write().await;
+        let token = token_lock.get_token().await?.to_string();
+        drop(token_lock);
+        let resp = self.client.get(&url).bearer_auth(token).send().await?;
+        self.limiter.update_headers(resp.headers(), resp.status()).await?;
 
         let json = resp.json::<serde_json::Value>().await?;
         let download_url = json
