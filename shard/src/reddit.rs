@@ -143,7 +143,7 @@ pub async fn get_post_by_id<'a>(post_id: &str, search: Option<&str>, con: &mut r
 
     if embed_url.starts_with("https://r-slash") && embed_url.ends_with(".mp4") {
         let filename = embed_url.split("/").last().ok_or(anyhow!("No filename found in URL: {}", url))?;
-        let embed_url = format!("https://r-slash.b-cdn.net/render/{}", filename);
+        let embed_url = format!("https://r-slash.b-cdn.net/render/{}?title={} - by u/{} in r/{}", filename, title, author, subreddit);
         
         span.finish();
         return Ok(InteractionResponse {

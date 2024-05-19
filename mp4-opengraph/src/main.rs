@@ -15,8 +15,6 @@ use anyhow::{anyhow, Context, Error};
 #[derive(serde::Deserialize)]
 struct PostQuery {
     title: String,
-    url: String,
-    description: String,
 }
 
 async fn handle(req: Request<hyper::body::Incoming>, base_html: Arc<String>) -> Result<Response<Full<Bytes>>, Error> {
@@ -38,8 +36,6 @@ async fn handle(req: Request<hyper::body::Incoming>, base_html: Arc<String>) -> 
 
     let mut html: String = base_html.to_string();
     html = html.replace("REPLACE_TITLE", &params.title);
-    html = html.replace("REPLACE_URL", &params.url);
-    html = html.replace("REPLACE_DESCRIPTION", &params.description);
     html = html.replace("REPLACE_VIDEO", &video);
 
     Ok(Response::new(Full::new(Bytes::from(html))))
@@ -49,7 +45,7 @@ async fn handle(req: Request<hyper::body::Incoming>, base_html: Arc<String>) -> 
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let base = Arc::new(std::fs::read_to_string(path::Path::new("base.html"))?);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8081));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8081));
 
     // We create a TcpListener and bind it to 127.0.0.1:8081
     let listener = TcpListener::bind(addr).await?;
