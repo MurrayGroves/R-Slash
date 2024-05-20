@@ -26,7 +26,7 @@ pub struct Token {
 
 impl Token {
     async fn update_token(url: &str) -> Result<(String, i64)> {
-        let mut req = reqwest::Client::new().get(url).send().await?;
+        let mut req = reqwest::Client::builder().user_agent("Booty Bot").build()?.get(url).send().await?;
         while req.status() == 429 {
             debug!("Token request status: {}", req.status());
             debug!("Token request headers: {:?}", req.headers());
@@ -236,9 +236,10 @@ impl <'a>Client<'a> {
         }   
 
 
-        let size = std::fs::metadata(&new_full_path)?.len();
+        let mut size = std::fs::metadata(&new_full_path)?.len();
         let mut count = 0;
         while count < 5 && size > 8 * 1024 * 1024 {
+            size = std::fs::metadata(&new_full_path)?.len();
             let output = Command::new("mv")
             .arg(&new_full_path)
             .arg("temp.gif")
@@ -263,6 +264,8 @@ impl <'a>Client<'a> {
             if size < std::fs::metadata("temp.gif")?.len() {
                 debug!("Size increased, breaking");
                 break;
+            } else {
+                debug!("Old size: {}, new size: {}", size, std::fs::metadata("temp.gif")?.len());
             }
     
             let output = Command::new("mv")
@@ -311,12 +314,17 @@ impl <'a>Client<'a> {
             self.generic.request(url).await?
         };
 
+        debug!("Path returned: {}", path);
+
         if path.ends_with(".mp4") {
             // Get size of the mp4
-            let size = std::fs::metadata(&path)?.len();
+            let size = std::fs::metadata(format!("{}/{}", self.path, path))?.len();
             // If the mp4 is small enough, convert it to a gif so it will autoplay
             if size < 2 * 1024 * 1024 {
+                debug!("File is small enough to convert to GIF ({} KB)", size / 1024);
                 path = self.process(&path).await.context("Processing gif")?;
+            } else {
+                debug!("File is too large to convert to GIF ({} KB)", size / 1024);
             }
         }
 
