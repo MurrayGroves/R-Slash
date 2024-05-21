@@ -36,6 +36,7 @@ pub struct PostMemory {
     pub current: u32,
     pub author: UserId,
     pub shard_id: u64,
+    pub bot: String,
 }
 
 pub enum AutoPostCommand {
@@ -45,7 +46,7 @@ pub enum AutoPostCommand {
 
 
 // TODO - Never panic!
-pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<TypeMap>>, http: Arc<serenity::http::Http>, shard_id: u64) {
+pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<TypeMap>>, http: Arc<serenity::http::Http>, shard_id: u64, bot: String) {
     debug!("Starting autopost loop for shard {}", shard_id);
     let mut requests = HashMap::new();
 
@@ -59,7 +60,7 @@ pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<Type
     // Load all the post memories from the database
     let mut cursor = coll.find(None, None).await.unwrap();
     while let Some(post) = cursor.try_next().await.unwrap() {
-        if post.shard_id != shard_id {
+        if post.shard_id != shard_id  || post.bot != bot {
             continue;
         }
         
@@ -94,6 +95,7 @@ pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<Type
                             current: req.current,
                             author: req.author,
                             shard_id,
+                            bot: bot.clone(),
                         };
                         coll.insert_one(memory, None).await.unwrap();
                     }
@@ -209,7 +211,7 @@ pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<Type
 
         for channel in to_remove {
             requests.remove(&channel);
-            let filter: Document = doc! {"channel": channel.get() as i64};
+            let filter: Document = doc! {"channel": channel.get().to_string()};
             match coll.delete_one(filter, None).await {
                 Ok(_) => {}
                 Err(e) => {
