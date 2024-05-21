@@ -103,7 +103,7 @@ impl Limiter {
     pub async fn update_headers(&self, headers: &reqwest::header::HeaderMap, status: StatusCode) -> Result<(), Error>{
         let mut state = self.state.lock().await;
         if let Some(per_minute) = self.per_minute {
-            state.remaining -= 1;
+            if state.remaining != 0 {state.remaining -= 1};
             if state.reset < chrono::Utc::now().timestamp() {
                 state.remaining = per_minute;
                 state.reset = chrono::Utc::now().timestamp() + 60;

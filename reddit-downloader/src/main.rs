@@ -490,7 +490,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                 // Push post to Redis
                 let value = Vec::from(post_object);
 
-                match con.hset_multiple::<&str, String, String, usize>(&key, &value).await {
+                match con.hset_multiple::<&str, String, String, redis::Value>(&key, &value).await {
                     Ok(_) => {},
                     Err(x) => {
                         let txt = format!("Failed to set post in redis: {}", x);
@@ -504,7 +504,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                 if existing_posts.len() < 30 {
                     // Push post to list of posts
                     debug!("Pushing key: {}", key);
-                    match con.rpush::<String, &str, usize>(format!("subreddit:{}:posts", subreddit), &key).await {
+                    match con.rpush::<String, &str, redis::Value>(format!("subreddit:{}:posts", subreddit), &key).await {
                         Ok(_) => {},
                         Err(x) => {
                             let txt = format!("Failed to push post to list: {}", x);
