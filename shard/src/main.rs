@@ -96,8 +96,13 @@ async fn capture_event(data: Arc<RwLock<TypeMap>>, event: &str, parent_tx: Optio
                 properties_map.insert(key.to_string(), serde_json::Value::String(value));
             }
         }
-    
-        debug!("{:?}", client.capture(&event, properties_map, &distinct_id).await.unwrap().text().await.unwrap());
+
+        match client.capture(&event, properties_map, &distinct_id).await {
+            Ok(_) => {},
+            Err(e) => {
+                warn!("Error capturing event: {:?}", e);
+            }
+        }    
     });
 
     span.finish();
