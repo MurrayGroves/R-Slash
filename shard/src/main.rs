@@ -257,7 +257,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
     let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
 
     if last_cached == 0 {
-        debug!("Subreddit last cached more than an hour ago, updating...");
+        debug!("Subreddit not cached");
         command.defer(&ctx.http).await.unwrap_or_else(|e| {
             warn!("Failed to defer response: {}", e);
         });
@@ -266,7 +266,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
             con.rpush("custom_subreddits_queue", &subreddit).await?;
         }
         loop {
-            sleep(Duration::from_millis(1000)).await;
+            sleep(Duration::from_millis(50)).await;
 
             let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(&mut con).await {
                 Ok(posts) => {
@@ -281,6 +281,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
             }
         }
     } else if last_cached +  3600000 < get_epoch_ms() as i64 {
+        debug!("Subreddit last cached more than an hour ago, updating...");
         // Tell downloader to update the subreddit, but use outdated posts for now.
         if !already_queued {
             con.rpush("custom_subreddits_queue", &subreddit).await?;
@@ -756,7 +757,8 @@ impl EventHandler for Handler {
                             drop(lock);
                             let auto_post_chan = tokio::sync::mpsc::channel(100);
                             config.auto_post_chan = auto_post_chan.0.clone();
-                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone(), ctx.shard_id.0.into()));
+                            let bot_name = ctx.cache.current_user().id.get().to_string();
+                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone(), ctx.shard_id.0.into(), bot_name));
                             let mut lock = ctx.data.write().await;
                             lock.insert::<ConfigStruct>(config);
                             info!("Restarted autopost loop");
@@ -1080,7 +1082,8 @@ impl EventHandler for Handler {
                             drop(lock);
                             let auto_post_chan = tokio::sync::mpsc::channel(100);
                             config.auto_post_chan = auto_post_chan.0.clone();
-                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone(), ctx.shard_id.0.into()));
+                            let bot_name = ctx.cache.current_user().id.get().to_string();
+                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone(), ctx.shard_id.0.into(), bot_name));
                             let mut lock = ctx.data.write().await;
                             lock.insert::<ConfigStruct>(config);
                             info!("Restarted autopost loop");
@@ -1235,7 +1238,8 @@ async fn main() {
         monitor_total_shards(shard_manager, total_shards).await;
     });
 
-    tokio::spawn(poster::start_loop(auto_post_chan.1, client.data.clone(), client.http.clone(), shard_id.into()));
+    let bot_name = application_id.to_string();
+    tokio::spawn(poster::start_loop(auto_post_chan.1, client.data.clone(), client.http.clone(), shard_id.into(), bot_name));
 
     let thread = tokio::spawn(async move {
         tracing_subscriber::Registry::default()

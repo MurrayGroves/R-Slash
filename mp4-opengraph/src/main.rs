@@ -23,6 +23,8 @@ async fn handle(req: Request<hyper::body::Incoming>, base_html: Arc<String>) -> 
         return Ok(Response::new(Full::new(Bytes::from("Invalid URL"))));
     }
 
+    println!("Request: {}", uri);
+
     let url = url::Url::parse(
         &format!("https://r-slash.b-cdn.net{}", uri)
     ).context("Converting into URL")?;

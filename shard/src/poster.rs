@@ -101,6 +101,13 @@ pub async fn start_loop(mut rx: Receiver<AutoPostCommand>, data: Arc<RwLock<Type
                     }
                     AutoPostCommand::Stop(channel) => {
                         requests.remove(&channel);
+                        let filter: Document = doc! {"channel": channel.get().to_string()};
+                        match coll.delete_one(filter, None).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                warn!("Error deleting post memory: {:?}", e);
+                            }
+                        };
                     }
                 }
                 true

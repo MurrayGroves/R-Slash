@@ -349,7 +349,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
 
         let posts: Arc<Mutex<HashMap<usize, String>>> = Arc::new(Mutex::new(HashMap::new()));
 
-        let ok = stream.for_each_concurrent(5, |result| {
+        stream.for_each_concurrent(5, |result| {
             // Clone Arcs so they can be moved into the async block and each thread gets its own reference
             let posts = Arc::clone(&posts);
             let existing_posts = Arc::clone(&existing_posts);
@@ -470,7 +470,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                 };
 
                 let timestamp = post["created_utc"].as_f64().unwrap() as u64;
-                let mut title = post["title"].to_string().replace('"', "");
+                let mut title = post["title"].to_string().replace('"', "").replace("&amp;", "&");
                 // Truncate title length to 256 chars (Discord embed title limit)
                 title = (*title.as_str()).truncate_to_boundary(256).to_string();
 
@@ -736,7 +736,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
                 }
             }
 
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(10)).await;
         }
     }
 

@@ -41,3 +41,5 @@ stats-uploader/secrets.yml
 *.env
 
 downloader-hs/
+
+scripts/all_posts.json
