@@ -7,4 +7,4 @@ docker push registry.murraygrov.es/reddit-downloader
 
 sentry-cli --auth-token ${SENTRY_TOKEN} upload-dif --org r-slash --project downloader target/debug/
 
-ssh -4 mediaserver@home.murraygrov.es "kubectl -n discord-bot-shared rollout restart deployment/reddit-downloader"
+ssh -4 mediaserver@home.murraygrov.es "kubectl -n discord-bot-shared rollout restart deployment/reddit-downloader; kubectl -n discord-bot-shared rollout restart deployment/reddit-downloader-custom"

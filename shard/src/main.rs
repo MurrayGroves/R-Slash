@@ -646,7 +646,7 @@ impl EventHandler for Handler {
                         _ => false,
                     };
         
-                    capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())).await;
+                    capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone().to_lowercase()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())).await;
                     
                     let data_read = ctx.data.read().await;
                     let conf = data_read.get::<ConfigStruct>().unwrap();

@@ -147,7 +147,7 @@ impl Limiter {
     // Wait until we are allowed to request again
     pub async fn wait(&self) {
         let state = self.state.lock().await;
-        if state.remaining == 0 {
+        if state.remaining == 0 && state.reset > chrono::Utc::now().timestamp() {
             let wait = state.reset - chrono::Utc::now().timestamp();
             drop(state);
             info!("Waiting {} seconds for rate limit", wait);
