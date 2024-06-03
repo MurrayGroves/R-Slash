@@ -146,7 +146,7 @@ pub async fn get_post_by_id<'a>(post_id: &str, search: Option<&str>, con: &mut r
         let title: String = url::form_urlencoded::byte_serialize(title.as_bytes()).collect();
         let author: String = url::form_urlencoded::byte_serialize(author.as_bytes()).collect();
         let subreddit: String = url::form_urlencoded::byte_serialize(subreddit.as_bytes()).collect();
-        let embed_url = format!("https://r-slash.b-cdn.net/render/{}?title={}%20-%20by%20u/{}%20in%20r/{}", filename, title, author, subreddit);
+        let embed_url = format!("https://r-slash.b-cdn.net/render/{}?title={}%20-%20by%20u/{}%20in%20r/{}&redirect={}", filename, title, author, subreddit, url);
         
         span.finish();
         return Ok(InteractionResponse {

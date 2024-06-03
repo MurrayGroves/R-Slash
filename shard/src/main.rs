@@ -1,12 +1,11 @@
 use log::trace;
-use serenity::all::{ActionRowComponent, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle};
+use serenity::all::{ActionRowComponent, InputTextStyle};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
 use tracing::{debug, info, warn, error};
 use rand::Rng;
 use serde_json::json;
 use tracing::instrument;
-use tracing_subscriber::{filter, reload};
 use tracing_subscriber::{Layer, util::SubscriberInitExt, prelude::__tracing_subscriber_SubscriberExt};
 
 use types::ResponseFallbackMethod;
@@ -15,8 +14,8 @@ use std::io::Write;
 use std::collections::HashMap;
 use std::env;
 
-use serenity::builder::{CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateModal, EditInteractionResponse};
-use serenity::model::id::{ChannelId, ShardId};
+use serenity::builder::{CreateActionRow, CreateEmbed, CreateEmbedFooter, CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateModal, EditInteractionResponse};
+use serenity::model::id::ShardId;
 use serenity::model::gateway::GatewayIntents;
 use serenity::{
     async_trait,
@@ -39,7 +38,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 
 use serenity::model::guild::{Guild, UnavailableGuild};
-use serenity::model::application::{Interaction, CommandInteraction, ButtonStyle};
+use serenity::model::application::{Interaction, CommandInteraction};
 
 use anyhow::{anyhow, Error};
 
