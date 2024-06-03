@@ -1,0 +1,26 @@
+@font-face {
+    font-family: 'Lilita One'; /*a name to be used later*/
+    src: url('../font.ttf') format("truetype"); /*URL to font*/
+}
+
+:root {
+    --background-color-dark: #2C3639;
+    --background-color-light: #3F4E4F;
+    --accent-color: #A27B5C;
+    --text-color: #DCD7C9;
+    color: var(--text-color);
+
+    body {
+        font-family: 'Lilita One';
+        background-color: var(--background-color-dark);
+        color: var(--text-color);
+    }
+}
+
+.rotate270 {
+    -webkit-transform: rotate(270deg);
+    -moz-transform: rotate(270deg);
+    -o-transform: rotate(270deg);
+    -ms-transform: rotate(270deg);
+    transform: rotate(270deg);
+}
