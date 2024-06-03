@@ -15,6 +15,7 @@ use anyhow::{anyhow, Context, Error};
 #[derive(serde::Deserialize)]
 struct PostQuery {
     title: String,
+    redirect: String,
 }
 
 async fn handle(req: Request<hyper::body::Incoming>, base_html: Arc<String>) -> Result<Response<Full<Bytes>>, Error> {
@@ -39,6 +40,7 @@ async fn handle(req: Request<hyper::body::Incoming>, base_html: Arc<String>) -> 
     let mut html: String = base_html.to_string();
     html = html.replace("REPLACE_TITLE", &params.title);
     html = html.replace("REPLACE_VIDEO", &video);
+    html = html.replace("REPLACE_URL", &params.redirect);
 
     Ok(Response::new(Full::new(Bytes::from(html))))
 }
