@@ -1,5 +1,5 @@
 use log::trace;
-use serenity::all::{ActionRowComponent, InputTextStyle};
+use serenity::all::{ActionRowComponent, ButtonStyle, CreateButton, InputTextStyle};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
 use tracing::{debug, info, warn, error};
@@ -304,17 +304,10 @@ async fn info<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &se
         guild_count += from_redis_value::<u64>(&count)?;
     }
 
-    let id = ctx.cache.current_user().id.get();
 
     return Ok(InteractionResponse {
         embed: Some(CreateEmbed::default()
             .title("Info")
-            .description(format!("[Support Server](https://discord.gg/jYtCFQG)
-        
-            [Add me to a server](https://discord.com/api/oauth2/authorize?client_id={}&permissions=515463498752&scope=applications.commands%20bot)
-            
-            [Privacy Policy](https://pastebin.com/DtZvJJhG)
-            [Terms & Conditions](https://pastebin.com/6c4z3uM5)", id))
             .color(0x00ff00).to_owned()
             .footer(CreateEmbedFooter::new(
                 format!("v{} compiled at {}", env!("CARGO_PKG_VERSION"), compile_time::datetime_str!())
@@ -325,6 +318,19 @@ async fn info<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &se
                 ("Shard Count".to_string(), ctx.cache.shard_count().to_string(), true),
             ]).to_owned()
         ),
+        components: Some(vec![CreateActionRow::Buttons(vec![
+                CreateButton::new_link("https://discord.gg/jYtCFQG")
+                    .label("Get Help"),
+                CreateButton::new_link("https://discord.com/api/oauth2/authorize?client_id=106529087272964929&permissions=515463498752&scope=applications.commands%20bot")
+                    .label("Add to another server"),
+                ]
+        ), CreateActionRow::Buttons(vec![
+            CreateButton::new_link("https://pastebin.com/DtZvJJhG")
+                .label("Privacy Policy"),
+            CreateButton::new_link("https://pastebin.com/6c4z3uM5")
+                .label("Terms & Conditions"),
+            ]
+    )]),
         ..Default::default()
     })
 }
