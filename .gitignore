@@ -53,3 +53,11 @@ reddit-downloader/redgifs_browser.py
 stats-uploader/secrets.yml
 
 *.env
+
+downloader-hs/
+
+scripts/all_posts.json
+
+website-bb/.svelte-kit/
+
+website-bb/node_modules/

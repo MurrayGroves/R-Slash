@@ -166,8 +166,6 @@ impl EventHandler for Handler {
                 }
             });
 
-            let mut data = ctx.data.write().await;
-            let data_mut = data.get_mut::<ConfigStruct>().unwrap();
             let posthog_client = &mut data_mut.posthog;
             
             posthog_client.capture("donator_change", props, &format!("user_{}", new.user.id.get().to_string())).await.unwrap();

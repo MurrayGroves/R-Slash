@@ -140,6 +140,40 @@ pub async fn get_post_by_id<'a>(post_id: &str, search: Option<&str>, con: &mut r
     let url = from_redis_value::<String>(&post.get("url").context("No url in post")?.clone())?;
     let embed_url = from_redis_value::<String>(&post.get("embed_url").context("No embed_url in post")?.clone())?;
     let timestamp = from_redis_value::<i64>(&post.get("timestamp").context("No timestamp in post")?.clone())?;
+
+    if embed_url.starts_with("https://r-slash") && embed_url.ends_with(".mp4") {
+        let filename = embed_url.split("/").last().ok_or(anyhow!("No filename found in URL: {}", url))?;
+        let title: String = url::form_urlencoded::byte_serialize(title.as_bytes()).collect();
+        let author: String = url::form_urlencoded::byte_serialize(author.as_bytes()).collect();
+        let subreddit: String = url::form_urlencoded::byte_serialize(subreddit.as_bytes()).collect();
+        let embed_url = format!("https://r-slash.b-cdn.net/render/{}?title={}%20-%20by%20u/{}%20in%20r/{}", filename, title, author, subreddit);
+        
+        span.finish();
+        return Ok(InteractionResponse {
+            content: Some(format!("[.]({})", embed_url)),
+            embed: None,
+            components: Some(vec![CreateActionRow::Buttons(vec![
+                CreateButton::new(json!({
+                    "subreddit": subreddit,
+                    "search": search,
+                    "command": "again"
+                }).to_string())
+                    .label("🔁")
+                    .style(ButtonStyle::Primary),
+    
+                CreateButton::new(json!({
+                    "subreddit": subreddit,
+                    "search": search,
+                    "command": "auto-post"
+                }).to_string())
+                    .label("Auto-Post")
+                    .style(ButtonStyle::Primary),
+            ])]),
+    
+            fallback: ResponseFallbackMethod::Edit,
+            ..Default::default()
+        });
+    }
     
     let to_return = InteractionResponse {
         embed: Some(CreateEmbed::default()

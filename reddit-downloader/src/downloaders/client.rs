@@ -3,7 +3,10 @@ use std::io::Write;
 use std::process::Command;
 use std::sync::Arc;
 
-use anyhow::{Context, Error, anyhow};
+use anyhow::{Context, Error, anyhow, Result};
+use reqwest::StatusCode;
+use serde_json::json;
+use serde_json::Value;
 use tracing::info;
 use tracing::warn;
 use tracing::debug;
@@ -13,6 +16,66 @@ use super::imgur;
 use super::generic;
 use super::redgifs;
 
+
+pub struct Token {
+    url: String,
+    token: String,
+    expiry: i64,
+}
+
+
+impl Token {
+    async fn update_token(url: &str) -> Result<(String, i64)> {
+        let mut req = reqwest::Client::builder().user_agent("Booty Bot").build()?.get(url).send().await?;
+        while req.status() == 429 {
+            debug!("Token request status: {}", req.status());
+            debug!("Token request headers: {:?}", req.headers());
+            info!("Waiting 10 minutes for token rate limit");
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            req = reqwest::Client::new().get(url).send().await?;
+        }
+
+        let mut text = req.text().await?;
+        debug!("Token request body: {}", text);
+        // Redgifs returns tokens like this sometimes???????
+        let token = if text.contains("html") {
+            text = text.replace("<html><head><title>Loading...</title></head><body><script type='text/javascript'>window.location.replace('https://api.regifs.com/v2/auth/temporary?ch=1&js=", "");
+            text = text.split("&sid").next().ok_or(Error::msg("Failed to parse token"))?.to_string();
+            text
+        } else {
+            let json: Value = serde_json::from_str(&text)?;
+            json["token"].as_str().ok_or(Error::msg("Failed to parse token"))?.to_string()
+        };
+        debug!("Token: {}", token);
+        let tokenData = token.split(".").nth(1).ok_or(Error::msg("Failed to parse token"))?;
+        let decoded = base64::decode(tokenData)?;
+        let decoded = String::from_utf8(decoded)?;
+        let json: Value = serde_json::from_str(&decoded)?;
+        let expiry = json["exp"].as_i64().ok_or(Error::msg("Failed to parse expiry"))?;
+
+        return Ok((token.to_string(), expiry));
+    }
+
+    pub async fn new(url: String) -> Result<Self> {
+        let (token, expiry) = Self::update_token(&url).await?;
+
+        Ok(Self {
+            url,
+            token,
+            expiry,
+        })
+    }
+
+    pub async fn get_token(&mut self) -> Result<&str> {
+        if self.expiry < chrono::Utc::now().timestamp() - 60 {
+            let (token, expiry) = Self::update_token(&self.url).await?;
+            self.token = token;
+            self.expiry = expiry;
+        }
+
+        Ok(&self.token)
+    }
+}
 
 struct LimitState {
     remaining: u64,
@@ -37,10 +100,10 @@ impl Limiter {
     }
 
     // Update the rate limit based on the headers from the last request
-    pub async fn update_headers(&self, headers: &reqwest::header::HeaderMap) -> Result<(), Error>{
+    pub async fn update_headers(&self, headers: &reqwest::header::HeaderMap, status: StatusCode) -> Result<(), Error>{
         let mut state = self.state.lock().await;
         if let Some(per_minute) = self.per_minute {
-            state.remaining -= 1;
+            if state.remaining != 0 {state.remaining -= 1};
             if state.reset < chrono::Utc::now().timestamp() {
                 state.remaining = per_minute;
                 state.reset = chrono::Utc::now().timestamp() + 60;
@@ -54,8 +117,14 @@ impl Limiter {
             if let Some(remaining) = headers.get("X-RateLimit-UserRemaining") {
                 state.remaining = remaining.to_str()?.parse()?;
             }
-            if let Some(reset) = headers.get("X-RateLimit-UserReset") {
+            else if let Some(reset) = headers.get("X-RateLimit-UserReset") {
                 state.reset = reset.to_str()?.parse()?;
+            } else {
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    // Wait 10 minutes if we hit the rate limit and they didn't tell us when to try again
+                    state.reset = chrono::Utc::now().timestamp() + 600;
+                    state.remaining = 0;
+                }
             }
         }
 
@@ -78,7 +147,7 @@ impl Limiter {
     // Wait until we are allowed to request again
     pub async fn wait(&self) {
         let state = self.state.lock().await;
-        if state.remaining == 0 {
+        if state.remaining == 0 && state.reset > chrono::Utc::now().timestamp() {
             let wait = state.reset - chrono::Utc::now().timestamp();
             drop(state);
             info!("Waiting {} seconds for rate limit", wait);
@@ -102,8 +171,8 @@ impl <'a>Client<'a> {
     /// * `path` - Path to the directory where the downloaded files will be stored
     /// * `imgur_client_id` - Client ID for the Imgur API, if missing then Imgur downloads will fail
     /// * `posthog_client` - Optional Posthog client for tracking downloads and api usage
-    pub fn new(path: &'a str, imgur_client_id: Option<String>, posthog_client: Option<posthog::Client>) -> Self {
-        Self {
+    pub async fn new(path: &'a str, imgur_client_id: Option<String>, posthog_client: Option<posthog::Client>) -> Result<Self> {
+        Ok(Self {
             imgur: match imgur_client_id {
                 Some(client_id) => Some(imgur::Client::new(&path, Arc::new(client_id), Limiter::new(None))),
                 None => None,
@@ -112,8 +181,8 @@ impl <'a>Client<'a> {
             path: &path,
             posthog: posthog_client,
             dash: Some(dash::Client::new(&path, Limiter::new(Some(60)))),
-            redgifs: Some(redgifs::Client::new(&path, Limiter::new(Some(60)))),
-        }
+            redgifs: Some(redgifs::Client::new(&path, Limiter::new(Some(60))).await?),
+        })
     }
 
     /// Convert a single mp4 to a gif, and return the path to the gif
@@ -167,9 +236,10 @@ impl <'a>Client<'a> {
         }   
 
 
-        let size = std::fs::metadata(&new_full_path)?.len();
+        let mut size = std::fs::metadata(&new_full_path)?.len();
         let mut count = 0;
         while count < 5 && size > 8 * 1024 * 1024 {
+            size = std::fs::metadata(&new_full_path)?.len();
             let output = Command::new("mv")
             .arg(&new_full_path)
             .arg("temp.gif")
@@ -194,6 +264,8 @@ impl <'a>Client<'a> {
             if size < std::fs::metadata("temp.gif")?.len() {
                 debug!("Size increased, breaking");
                 break;
+            } else {
+                debug!("Old size: {}, new size: {}", size, std::fs::metadata("temp.gif")?.len());
             }
     
             let output = Command::new("mv")
@@ -220,12 +292,12 @@ impl <'a>Client<'a> {
     }
 
     /// Download a single mp4 from a url, and return the path to the gif
-    pub async fn request(&self, url: &str) -> Result<String, Error> {
+    pub async fn request(&self, url: &str, filename: &str) -> Result<String, Error> {
         let mut path = if url.ends_with(".mp4") {
             self.generic.request(url).await?
         } else if url.contains("redgifs.com") {
             match &self.redgifs {
-                Some(redgifs) => redgifs.request(url).await.context("Requesting from redgifs")?,
+                Some(redgifs) => redgifs.request(url, filename).await.context("Requesting from redgifs")?,
                 None => Err(Error::msg("Redgifs client not set"))?,
             }
         } else if url.contains("imgur.com") {
@@ -242,8 +314,18 @@ impl <'a>Client<'a> {
             self.generic.request(url).await?
         };
 
+        debug!("Path returned: {}", path);
+
         if path.ends_with(".mp4") {
-            path = self.process(&path).await.context("Processing gif")?;
+            // Get size of the mp4
+            let size = std::fs::metadata(format!("{}/{}", self.path, path))?.len();
+            // If the mp4 is small enough, convert it to a gif so it will autoplay
+            if size < 2 * 1024 * 1024 {
+                debug!("File is small enough to convert to GIF ({} KB)", size / 1024);
+                path = self.process(&path).await.context("Processing gif")?;
+            } else {
+                debug!("File is too large to convert to GIF ({} KB)", size / 1024);
+            }
         }
 
         Ok(path)
@@ -260,14 +342,14 @@ mod tests {
 
     #[tokio::test]
     async fn process_output_success() -> Result<(), Error> {
-        let client = Client::new("test-data".into(), None, None);
+        let client = Client::new("test-data".into(), None, None).await?;
         client.process("test.mp4").await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn process_filename_correct() -> Result<(), Error> {
-        let client = Client::new("test-data".into(), None, None);
+        let client = Client::new("test-data".into(), None, None).await?;
         let path = client.process("test.mp4").await?;
         assert_eq!(path, "test.gif");
         Ok(())
@@ -276,9 +358,9 @@ mod tests {
     #[tokio::test]
     async fn imgur_gif_image() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data".into(), Some(client_id), None);
+        let client = Client::new("test-data".into(), Some(client_id), None).await?;
 
-        let path = client.request("https://imgur.com/H48hDPg").await.context("initiating request")?;
+        let path = client.request("https://imgur.com/H48hDPg", "").await.context("initiating request")?;
         println!("{}", path);
         assert_eq!(path, "https://i.imgur.com/H48hDPg.gif");
 
@@ -290,9 +372,9 @@ mod tests {
     #[tokio::test]
     async fn imgur_gif_album() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data".into(), Some(client_id), None);
+        let client = Client::new("test-data".into(), Some(client_id), None).await?;
 
-        let path = client.request("https://imgur.com/a/ErqxbAa").await.context("initiating request")?;
+        let path = client.request("https://imgur.com/a/ErqxbAa", "").await.context("initiating request")?;
         assert_eq!(path, "https://i.imgur.com/su3kGzS.gif");
 
         Ok(())
@@ -301,9 +383,9 @@ mod tests {
     #[tokio::test]
     async fn imgur_gif_gallery() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data".into(), Some(client_id), None);
+        let client = Client::new("test-data".into(), Some(client_id), None).await?;
 
-        let path = client.request("https://imgur.com/gallery/rvGOIHS").await.context("initiating request")?;
+        let path = client.request("https://imgur.com/gallery/rvGOIHS", "").await.context("initiating request")?;
         println!("{}", path);
         assert!(path.ends_with(".gif"));
 
@@ -318,9 +400,9 @@ mod tests {
 
     #[tokio::test]
     async fn redgifs() -> Result<(), Error> {
-        let client = Client::new("test-data".into(), None, None);
+        let client = Client::new("test-data".into(), None, None).await?;
 
-        let path = client.request("https://www.redgifs.com/watch/elderlysupportivepeafowl").await.context("initiating request")?;
+        let path = client.request("https://www.redgifs.com/watch/elderlysupportivepeafowl", "test").await.context("initiating request")?;
         println!("{}", path);
         assert!(path.ends_with(".gif"));
 
@@ -335,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn parallel_request() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data".into(), Some(client_id), None);
+        let client = Client::new("test-data".into(), Some(client_id), None).await?;
 
         let urls = vec![
             "https://imgur.com/gallery/rvGOIHS",
@@ -351,7 +433,7 @@ mod tests {
 
         for url in urls {
             let client = client_arc.clone();
-            let task = tokio::spawn(async move {println!("started");let res = client.request(url).await; println!("done"); return res;});
+            let task = tokio::spawn(async move {println!("started");let res = client.request(url, "").await; println!("done"); return res;});
             tasks.insert(url.to_string(), task);
         }
 

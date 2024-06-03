@@ -41,7 +41,7 @@ impl Client {
             "properties": properties
         });
         let body = serde_json::to_string(&json).unwrap();
-        debug!("{:?}", body);
+        trace!("{:?}", body);
         let res = self.client.post(&self.host).body(body).header("Content-Type", "application/json").send().await?;
         Ok(res)
     }

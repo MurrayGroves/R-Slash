@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use itertools::Itertools;
 use tracing::{debug, info, warn, error};
 use tracing_subscriber::Layer;
@@ -348,7 +349,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
 
         let posts: Arc<Mutex<HashMap<usize, String>>> = Arc::new(Mutex::new(HashMap::new()));
 
-        let ok = stream.try_for_each_concurrent(5, |result| {
+        stream.for_each_concurrent(5, |result| {
             // Clone Arcs so they can be moved into the async block and each thread gets its own reference
             let posts = Arc::clone(&posts);
             let existing_posts = Arc::clone(&existing_posts);
@@ -356,7 +357,15 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
             let subreddit = Arc::clone(&subreddit);
 
             async move {
-                let (i, post) = result;
+                let (i, post) = match result {
+                    Ok(x) => x,
+                    Err(x) => {
+                        let txt = format!("Failed to get post: {}", x);
+                        warn!("{}", txt);
+                        sentry::capture_message(&txt, sentry::Level::Warning);
+                        return;
+                    }
+                };
                 debug!("{:?} - {:?}", post["title"], post["url"]);
 
                 // If the post has been removed by a moderator, skip it
@@ -364,10 +373,24 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                     debug!("Post removed by moderator");
                     if existing_posts.contains(&format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))) {
                         debug!("Removing post from DB");
-                        con.lrem(format!("subreddit:{}:posts", subreddit), 0, format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
-                        con.del(format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
+                        match con.lrem::<String, String, usize>(format!("subreddit:{}:posts", subreddit), 0, format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await {
+                            Ok(_) => {},
+                            Err(x) => {
+                                let txt = format!("Failed to remove post from DB: {}", x);
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                            }
+                        };
+                        match con.del::<String, usize>(format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await {
+                            Ok(_) => {},
+                            Err(x) => {
+                                let txt = format!("Failed to remove post from DB: {}", x);
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                            }
+                        };
                     }
-                    return Ok(());
+                    return;
                 }
     
                 // If the post has been removed by the author, skip it
@@ -375,14 +398,28 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                     debug!("Post removed by author");
                     if existing_posts.contains(&format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))) {
                         debug!("Removing post from DB");
-                        con.lrem(format!("subreddit:{}:posts", subreddit), 0, format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
-                        con.del(format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await?;
+                        match con.lrem::<String, String, usize>(format!("subreddit:{}:posts", subreddit), 0, format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await {
+                            Ok(_) => {},
+                            Err(x) => {
+                                let txt = format!("Failed to remove post from DB: {}", x);
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                            }
+                        };
+                        match con.del::<String, usize>(format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await {
+                            Ok(_) => {},
+                            Err(x) => {
+                                let txt = format!("Failed to remove post from DB: {}", x);
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                            }
+                        };
                     }
-                    return Ok(());
+                    return;
                 }
     
                 if post["title"].to_string() == "Flipping a pancake" { // For some reason pinned images aren't marked as pinned on the api, and this one post is pinned but doesn't embed.
-                    return Ok(());
+                    return;
                 }
 
                 // Redis key for this post
@@ -410,13 +447,16 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                         Some(url)
                     } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") || url.contains(".mpd") {
                         debug!("URL is not embeddable, but we have the ability to turn it into one");
-                        let mut res = match downloaders_client.request(&url).await {
-                            Ok(x) => x,
+                        let mut res = match downloaders_client.request(&url, &post["id"].to_string().replace('"', "")).await {
+                            Ok(x) => {
+                                debug!("Downloaded media: {}", x);
+                                x
+                            },
                             Err(x) => {
-                                let txt = format!("Failed to download media: {}", x.backtrace());
+                                let txt = format!("Failed to download media: {}", x);
                                 warn!("{}", txt);
                                 sentry::capture_message(&txt, sentry::Level::Warning);
-                                return Err(x);
+                                return;
                             }
                         };
                         if !res.starts_with("http") {
@@ -425,12 +465,12 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                         Some(res)
                     } else {
                         debug!("URL is not embeddable, and we do not have the ability to turn it into one.");
-                        return Ok(());
+                        return;
                     }
                 };
 
                 let timestamp = post["created_utc"].as_f64().unwrap() as u64;
-                let mut title = post["title"].to_string().replace('"', "");
+                let mut title = post["title"].to_string().replace('"', "").replace("&amp;", "&");
                 // Truncate title length to 256 chars (Discord embed title limit)
                 title = (*title.as_str()).truncate_to_boundary(256).to_string();
 
@@ -450,34 +490,36 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                 // Push post to Redis
                 let value = Vec::from(post_object);
 
-                con.hset_multiple(&key, &value).await?;
+                match con.hset_multiple::<&str, String, String, redis::Value>(&key, &value).await {
+                    Ok(_) => {},
+                    Err(x) => {
+                        let txt = format!("Failed to set post in redis: {}", x);
+                        warn!("{}", txt);
+                        sentry::capture_message(&txt, sentry::Level::Warning);
+                    }
+                };
 
 
                 // Subreddit has not been downloaded before, meaning we should try get posts into Redis ASAP to minimise the time before the user gets a response
                 if existing_posts.len() < 30 {
                     // Push post to list of posts
                     debug!("Pushing key: {}", key);
-                    con.rpush(format!("subreddit:{}:posts", subreddit), &key).await?;
+                    match con.rpush::<String, &str, redis::Value>(format!("subreddit:{}:posts", subreddit), &key).await {
+                        Ok(_) => {},
+                        Err(x) => {
+                            let txt = format!("Failed to push post to list: {}", x);
+                            warn!("{}", txt);
+                            sentry::capture_message(&txt, sentry::Level::Warning);
+                        }
+                    };
                 }
                 
                 // Push post to thread-safe hashmap
                 let mut posts = posts.lock().await;
                 posts.insert(i, key);
-
-                Ok(())
             }
         }
         ).await;
-
-        // Report any errors that happeend while processing posts
-        match ok {
-            Ok(_) => {},
-            Err(x) => {
-                let txt = format!("Error occurred while processing posts: {}", x.backtrace());
-                warn!("{}", txt);
-                sentry::capture_message(&txt, sentry::Level::Warning);
-            }
-        }
 
         // Create new list of all posts in 
         let mut keys = Vec::new();
@@ -592,7 +634,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
 
     let imgur_client_id = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
 
-    let downloaders_client = downloaders::client::Client::new("/data/media", Some(imgur_client_id), None);
+    let downloaders_client = downloaders::client::Client::new("/data/media", Some(imgur_client_id), None).await?;
 
     debug!("Entering loop");
     if do_custom == "true".to_string() {
@@ -694,7 +736,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
                 }
             }
 
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(10)).await;
         }
     }
 

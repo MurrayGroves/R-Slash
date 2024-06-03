@@ -1,74 +1,64 @@
-use std::{hash::{Hash, Hasher}, io::Write};
+use std::{hash::{Hash, Hasher}, io::Write, sync::Arc};
 
-use anyhow::{Error, Context};
+use anyhow::{Error, Context, Result};
+use futures::StreamExt;
+use tokio::{io::AsyncWriteExt, sync::RwLock};
 use tracing::debug;
 
 pub struct Client<'a> {
     path: &'a str,
     client: reqwest::Client,
     limiter: super::client::Limiter,
+    token: Arc<RwLock<super::client::Token>>,
 }
 
 impl <'a>Client<'a> {
-    pub fn new(path: &'a str, limiter: super::client::Limiter) -> Self {
-        Self {
+    pub async fn new(path: &'a str, limiter: super::client::Limiter) -> Result<Self> {
+        Ok(Self {
             path,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder().user_agent("Booty Bot").build()?,
             limiter: limiter,
-        }
+            token: Arc::new(RwLock::new(super::client::Token::new("https://api.redgifs.com/v2/auth/temporary".to_string()).await?)),
+        })
     }
     
 
-    pub async fn request(&self, url: &str) -> Result<String, Error> {
+    pub async fn request(&self, url: &str, filename: &str) -> Result<String, Error> {
         self.limiter.wait().await;
 
         let mut id = url.split("/").last().ok_or(Error::msg("No ID in url"))?;
         id = id.split(".").next().ok_or(Error::msg("No ID in url"))?;
 
-        let url = format!("https://redgifs.com/ifr/{}", id);
-        let html = self.client.get(&url).send().await?.text().await?;
-        self.limiter.update().await;
-        let meta = metascraper::MetaScraper::parse(&html)?.metadata().metatags.ok_or(Error::msg("Failed to parse metatags"))?;
+        let url = format!("https://api.redgifs.com/v2/gifs/{}", id);
+        let mut token_lock = self.token.write().await;
+        let token = token_lock.get_token().await?.to_string();
+        drop(token_lock);
+        let resp = self.client.get(&url).header("authorization", format!("Bearer {}", token)).send().await?;
+        self.limiter.update_headers(resp.headers(), resp.status()).await?;
 
-        for tag in meta {
-            if tag.name == "og:video" {
-                let path = format!("{}/{}.mp4", self.path, id);
-                self.limiter.wait().await;
-                // Had issues with invalid requests using reqwest, so I just used wget :)
-                let output = tokio::process::Command::new("wget")
-                .arg("-r")
-                .arg("-O")
-                .arg(&path)
-                .arg(tag.content)
-                .output().await?;
+        let json = resp.json::<serde_json::Value>().await?;
+        debug!("Response Json {:?}", json);
+        let download_url = json
+                                    .get("gif").ok_or(Error::msg("No gif in response"))?
+                                    .get("urls").ok_or(Error::msg("No urls in response"))?
+                                    .get("sd").ok_or(Error::msg("No mp4 url in response"))?
+                                    .as_str().ok_or(Error::msg("mp4 url is not a string"))?;
 
-                self.limiter.update().await;
+        let path = format!("{}/{}.mp4", self.path, filename);
+        debug!("Downloading {} to {}", download_url, path);
+        self.limiter.wait().await;
+        let req = self.client.get(download_url).send().await?;
+        self.limiter.update_headers(req.headers(), req.status()).await?;
+        let mut file = tokio::fs::File::create(&path).await?;
+        let mut stream = req.bytes_stream();
+        while let Some(item) = stream.next().await {
+            let chunk = item?;
+            file.write_all(&chunk).await?;
+        };
 
-                if !output.status.success() {
-                    std::io::stderr().write_all(&output.stderr).unwrap();
-                    Err(Error::msg(format!("wget failed: {}\n{}", output.status.to_string(), output.status))).with_context(|| format!("path: {}", path))?;
-                }
-                return Ok(path.replace(&format!("{}/", self.path), ""));
-            } else if tag.name == "og:image:url" {
-                let path = format!("{}/{}.jpg", self.path, id);
-                self.limiter.wait().await;
-                let output = tokio::process::Command::new("wget")
-                .arg("-r")
-                .arg("-O")
-                .arg(&path)
-                .arg(tag.content)
-                .output().await?;
+        debug!("Downloaded...");
+        debug!("Returning {}", path.replace(&format!("{}/", self.path), ""));
 
-                self.limiter.update().await;
-
-                if !output.status.success() {
-                    std::io::stderr().write_all(&output.stderr).unwrap();
-                    Err(Error::msg(format!("wget failed: {}\n{}", output.status.to_string(), output.status))).with_context(|| format!("path: {}", path))?;
-                }
-                return Ok(path.replace(&format!("{}/", self.path), ""));
-            }
-        }
-
-        Err(Error::msg("Failed to find video link in metatags"))
+        return Ok(path.replace(&format!("{}/", self.path), ""));
     }
 }

@@ -1,3 +1,4 @@
+set -e
 source ./secrets.env
 
 cargo build --release

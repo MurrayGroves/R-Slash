@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 k8s-interface = {path = "../k8s-interface"}
-serenity = { version = "0.11.5", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
+serenity = { version = "0.12", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"], git = "https://github.com/serenity-rs/serenity", branch = "current" }
 redis = { version = "*", features = ["aio", "tokio-comp", "connection-manager"] }
 serde = {version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -16,6 +16,6 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 kube = "*"
 tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time", "full"]}
 reqwest = { version = "*", features = ["json", "stream", "blocking", "rustls-tls"] }
-k8s-openapi = "*"
+k8s-openapi = { version = "*", features = ["v1_24"] }
 
 rslash_types = {path = "../rslash_types"}

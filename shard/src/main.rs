@@ -1,14 +1,14 @@
 use log::trace;
-use serenity::all::{ActionRowComponent, InputTextStyle};
+use serenity::all::{ActionRowComponent, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
 use tracing::{debug, info, warn, error};
 use rand::Rng;
 use serde_json::json;
 use tracing::instrument;
-use tracing_subscriber::Layer;
-use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{filter, reload};
+use tracing_subscriber::{Layer, util::SubscriberInitExt, prelude::__tracing_subscriber_SubscriberExt};
+
 use types::ResponseFallbackMethod;
 use std::fs;
 use std::io::Write;
@@ -96,8 +96,13 @@ async fn capture_event(data: Arc<RwLock<TypeMap>>, event: &str, parent_tx: Optio
                 properties_map.insert(key.to_string(), serde_json::Value::String(value));
             }
         }
-    
-        debug!("{:?}", client.capture(&event, properties_map, &distinct_id).await.unwrap().text().await.unwrap());
+
+        match client.capture(&event, properties_map, &distinct_id).await {
+            Ok(_) => {},
+            Err(e) => {
+                warn!("Error capturing event: {:?}", e);
+            }
+        }    
     });
 
     span.finish();
@@ -212,7 +217,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
             embed: Some(CreateEmbed::default()
                 .title("Premium Feature")
                 .description("You must have premium in order to use this command.
-                Get it here: https://ko-fi.com/rslash")
+                Get it [here](https://ko-fi.com/rslash)")
                 .color(0xff0000).to_owned()
             ),
             ..Default::default()
@@ -252,7 +257,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
     let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
 
     if last_cached == 0 {
-        debug!("Subreddit last cached more than an hour ago, updating...");
+        debug!("Subreddit not cached");
         command.defer(&ctx.http).await.unwrap_or_else(|e| {
             warn!("Failed to defer response: {}", e);
         });
@@ -261,7 +266,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
             con.rpush("custom_subreddits_queue", &subreddit).await?;
         }
         loop {
-            sleep(Duration::from_millis(1000)).await;
+            sleep(Duration::from_millis(50)).await;
 
             let posts: Vec<String> = match redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(0i64).query_async(&mut con).await {
                 Ok(posts) => {
@@ -276,6 +281,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
             }
         }
     } else if last_cached +  3600000 < get_epoch_ms() as i64 {
+        debug!("Subreddit last cached more than an hour ago, updating...");
         // Tell downloader to update the subreddit, but use outdated posts for now.
         if !already_queued {
             con.rpush("custom_subreddits_queue", &subreddit).await?;
@@ -640,7 +646,7 @@ impl EventHandler for Handler {
                         _ => false,
                     };
         
-                    capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())).await;
+                    capture_event(ctx.data.clone(), "subreddit_cmd", Some(&component_tx), Some(HashMap::from([("subreddit", subreddit.clone().to_lowercase()), ("button", "true".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())).await;
                     
                     let data_read = ctx.data.read().await;
                     let conf = data_read.get::<ConfigStruct>().unwrap();
@@ -673,29 +679,46 @@ impl EventHandler for Handler {
                         }
                     }
 
+                    let is_premium = {
+                        let data_read = ctx.data.read().await;
+                        let mongodb_manager = data_read.get::<ResourceManager<mongodb::Client>>().unwrap().clone();
+                        let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
+                        let mut mongodb_client = mongodb_client_mutex.lock().await;
+                        let membership = get_user_tiers(command.user.id.get().to_string(), &mut *mongodb_client, Some(&component_tx)).await;
+                        membership.bronze.active
+                    };
+
+                    let max_length = match is_premium {
+                        true => 100,
+                        false => 2,
+                    };
+
+                    let components = vec![
+                        CreateActionRow::InputText(
+                            CreateInputText::new(InputTextStyle::Short, "Delay", "delay")
+                            .label("Delay e.g. 5s, 3m, 5h, 1d")
+                            .placeholder("5s")
+                            .min_length(2)
+                            .max_length(6)
+                        ),
+
+                        CreateActionRow::InputText(
+                            CreateInputText::new(InputTextStyle::Short, "Limit", "limit")
+                            .label("Times to post e.g. 10")
+                            .placeholder("Can be \"infinite\" if you have premium")
+                            .min_length(1)
+                            .max_length(max_length)
+                        ),
+                    ];
+
+
                     let resp = CreateInteractionResponse::Modal(
                         CreateModal::new(serde_json::to_string(&json!({
                             "subreddit": custom_id["subreddit"],
                             "command": "autopost",
                             "search": custom_id["search"]
                         })).unwrap(), "Autopost Delay")
-                        .components(vec![
-                            CreateActionRow::InputText(
-                                CreateInputText::new(InputTextStyle::Short, "Delay", "delay")
-                                .label("Delay e.g. 5s, 3m, 5h, 1d")
-                                .placeholder("5s")
-                                .min_length(2)
-                                .max_length(6)
-                            ),
-
-                            CreateActionRow::InputText(
-                                CreateInputText::new(InputTextStyle::Short, "Limit", "limit")
-                                .label("How many times to post in total")
-                                .placeholder("10")
-                                .min_length(1)
-                                .max_length(2)
-                            ),
-                        ])
+                        .components(components)
                     );
                     match command.create_response(&ctx.http, resp).await {
                         Ok(_) => {},
@@ -734,7 +757,8 @@ impl EventHandler for Handler {
                             drop(lock);
                             let auto_post_chan = tokio::sync::mpsc::channel(100);
                             config.auto_post_chan = auto_post_chan.0.clone();
-                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone()));
+                            let bot_name = ctx.cache.current_user().id.get().to_string();
+                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone(), ctx.shard_id.0.into(), bot_name));
                             let mut lock = ctx.data.write().await;
                             lock.insert::<ConfigStruct>(config);
                             info!("Restarted autopost loop");
@@ -896,10 +920,6 @@ impl EventHandler for Handler {
 
             match modal_command {
                 "autopost" => {
-                    modal.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap_or_else(|e| {
-                        warn!("Failed to acknowledge autopost modal: {:?}", e);
-                        return;
-                    });
                     capture_event(ctx.data.clone(), "autopost_start", Some(&modal_tx), None, &format!("channel_{}", modal.channel.clone().unwrap().id.get().to_string())).await;
 
                     let lock = ctx.data.read().await;
@@ -920,7 +940,7 @@ impl EventHandler for Handler {
                     };
 
                     let mut interval = String::new();
-                    let mut limit = String::new();
+                    let mut limit = None;
 
                     for row in &modal.data.components {
                         for comp in &row.components {
@@ -936,9 +956,9 @@ impl EventHandler for Handler {
                                         };
                                     } else if input.custom_id == "limit" {
                                         limit = match input.value.clone() {
-                                            Some(x) => x,
+                                            Some(x) => Some(x),
                                             _ => {
-                                                "10".to_string()
+                                                Some("10".to_string())
                                             }
                                         };
                                     }
@@ -947,7 +967,66 @@ impl EventHandler for Handler {
                             }
                         }
                     }
+
+                    let is_premium = get_user_tiers(modal.user.id.get().to_string(), &mut *lock.get::<ResourceManager<mongodb::Client>>().unwrap().get_available_resource().await.lock().await, None).await.bronze.active;
+
+                    let limit = match limit {
+                        Some(x) => {
+                            match x.parse::<u32>() {
+                                Ok(x) => Some(x),
+                                Err(_) => {
+                                    if x == "infinite" && is_premium {
+                                        None
+                                    } else {
+                                        debug!("Invalid limit: {:?}", x);
+                                        let error_message = if x == "infinite" {
+                                            "You must be a premium user to set the limit to infinite.\n[Buy Premium](https://ko-fi.com/rslash)"
+                                        } else {
+                                            "Invalid limit, must be a number."
+                                        };
+
+
+                                        let error_response = CreateInteractionResponseMessage::new()
+                                            .embed(CreateEmbed::new()
+                                                .title("Invalid Limit")
+                                                .description(error_message)
+                                                .color(0xff0000)
+                                            )
+                                            .ephemeral(true);
+
+                                        match modal.create_response(&ctx.http, CreateInteractionResponse::Message(error_response)).await {
+                                            Ok(_) => {},
+                                            Err(e) => {
+                                                error!("Failed to send error response: {:?}", e);
+                                            }
+                                        };
+                                        return;
+                                    }
+                                }
+                            }
+                        },
+                        None => None
+                    };
                     
+                    let invalid_interval = || async {
+                        debug!("Invalid interval: {:?}", interval);
+
+                        let error_response = CreateInteractionResponseMessage::new()
+                            .embed(CreateEmbed::new()
+                                .title("Invalid Interval")
+                                .description(format!("Invalid Interval: {}, it must be a number followed by either 's', 'm', 'h', or 'd' - indicating seconds, minutes, hours, or days.", interval))
+                                .color(0xff0000)
+                            )
+                            .ephemeral(true);
+
+                        match modal.create_response(&ctx.http, CreateInteractionResponse::Message(error_response)).await {
+                            Ok(_) => {},
+                            Err(e) => {
+                                error!("Failed to send error response: {:?}", e);
+                            }
+                        };
+                    };
+
                     let multiplier = if interval.ends_with("s") {
                         1
                     } else if interval.ends_with("m") {
@@ -957,6 +1036,7 @@ impl EventHandler for Handler {
                     } else if interval.ends_with("d") {
                         86400
                     } else {
+                        invalid_interval().await;
                         return;
                     };
                     
@@ -969,6 +1049,7 @@ impl EventHandler for Handler {
                     } else if interval.ends_with("d") {
                         interval.replace("d", "").parse::<u64>()
                     } else {
+                        invalid_interval().await;
                         return;
                     };
 
@@ -977,15 +1058,7 @@ impl EventHandler for Handler {
                             Duration::from_secs(x * (multiplier as u64))
                         },
                         Err(_) => {
-                            debug!("Invalid interval: {:?}", interval);
-                            return;
-                        }
-                    };
-
-                    let limit = match limit.parse::<u32>() {
-                        Ok(x) => x,
-                        Err(_) => {
-                            debug!("Invalid limit: {:?}", limit);
+                            invalid_interval().await;
                             return;
                         }
                     };
@@ -1004,17 +1077,38 @@ impl EventHandler for Handler {
                     match chan.send(AutoPostCommand::Start(post_request)).await {
                         Ok(_) => {},
                         Err(e) => {
-                            error!("Failed to send stop autopost command: {:?}", e);
+                            error!("Failed to send start autopost command: {:?}", e);
                             let mut config = lock.get::<ConfigStruct>().unwrap().clone();
                             drop(lock);
                             let auto_post_chan = tokio::sync::mpsc::channel(100);
                             config.auto_post_chan = auto_post_chan.0.clone();
-                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone()));
+                            let bot_name = ctx.cache.current_user().id.get().to_string();
+                            tokio::spawn(poster::start_loop(auto_post_chan.1, ctx.data.clone(), ctx.http.clone(), ctx.shard_id.0.into(), bot_name));
                             let mut lock = ctx.data.write().await;
                             lock.insert::<ConfigStruct>(config);
                             info!("Restarted autopost loop");
+
+                            let error_response = CreateInteractionResponseMessage::new()
+                                .embed(CreateEmbed::new()
+                                    .title("Error Starting Autopost")
+                                    .description("An internal error occurred while starting the autopost loop, please try again.")
+                                    .color(0xff0000)
+                                )
+                                .ephemeral(true);
+
+                            match modal.create_response(&ctx.http, CreateInteractionResponse::Message(error_response)).await {
+                                Ok(_) => {},
+                                Err(e) => {
+                                    error!("Failed to send error response: {:?}", e);
+                                }
+                            };
                         }
                     };
+
+                    modal.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await.unwrap_or_else(|e| {
+                        warn!("Failed to acknowledge autopost modal: {:?}", e);
+                        return;
+                    });
                 },
 
                 _ => {
@@ -1109,6 +1203,7 @@ async fn main() {
         .expect("Error creating client");
 
 
+
     let auto_post_chan = tokio::sync::mpsc::channel(100);
     {
         let mut data: tokio::sync::RwLockWriteGuard<'_, TypeMap> = client.data.write().await;
@@ -1143,7 +1238,8 @@ async fn main() {
         monitor_total_shards(shard_manager, total_shards).await;
     });
 
-    tokio::spawn(poster::start_loop(auto_post_chan.1, client.data.clone(), client.http.clone()));
+    let bot_name = application_id.to_string();
+    tokio::spawn(poster::start_loop(auto_post_chan.1, client.data.clone(), client.http.clone(), shard_id.into(), bot_name));
 
     let thread = tokio::spawn(async move {
         tracing_subscriber::Registry::default()

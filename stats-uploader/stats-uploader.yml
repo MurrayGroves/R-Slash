@@ -33,6 +33,16 @@ spec:
                 secretKeyRef:
                   name: stats-credentials
                   key: TOP_GG_TOKEN
+            - name: DISCORDLIST_GG_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: stats-credentials
+                  key: DISCORDLIST_GG_TOKEN
+            - name: DISCORDS_COM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: stats-credentials
+                  key: DISCORDS_COM_TOKEN
 
       imagePullSecrets:
         - name: murraygroves-registry-secret

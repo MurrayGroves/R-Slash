@@ -3,13 +3,14 @@ use std::process::Command as Cmd;
 use serde_json;
 use redis;
 use redis::Commands;
+use serenity::all::{CreateCommand, CreateCommandOption};
 use std::sync::Arc;
 use kube::api::Patch;
 use futures_util::TryStreamExt;
 use serenity::client::{Context, EventHandler};
 use serenity::prelude::{GatewayIntents, TypeMapKey};
 use serenity::async_trait;
-use serenity::model::application::command::{Command, CommandOptionType};
+use serenity::model::application::{Command, CommandOptionType};
 use serenity::model::gateway::Ready;
 
 use mongodb::{options::ClientOptions};
@@ -114,7 +115,7 @@ async fn fetch_guild_config(guild_id: GuildId, cache: Arc<Cache>, mongodb_client
     let db = mongodb_client.database("config");
     let coll = db.collection::<Document>("servers");
 
-    let filter = doc! {"id": guild_id.0.to_string()};
+    let filter = doc! {"id": guild_id.get().to_string()};
     let find_options = FindOptions::builder().build();
     let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
 
@@ -134,7 +135,7 @@ async fn fetch_guild_config(guild_id: GuildId, cache: Arc<Cache>, mongodb_client
             };
 
             let server = doc! {
-                "id": guild_id.0.to_string(),
+                "id": guild_id.get().to_string(),
                 "nsfw": nsfw,
             };
 
@@ -159,111 +160,16 @@ impl EventHandler for Handler {
         if command == "delete" {
             let command: u64 = env::args_os().nth(4).unwrap().into_string().unwrap().parse().unwrap();
             let id = serenity::model::id::CommandId::from(command);
-            serenity::model::application::command::Command::delete_global_application_command(&ctx.http, id).await.expect("Failed to delete command");
-        }
-
-        if command == "guilds" {
-            let mut client_options = ClientOptions::parse("mongodb://my-user:rslash@localhost:27018/?tls=false&directConnection=true").await.unwrap();
-            client_options.app_name = Some("rslash-manager".to_string());
-
-            let mut mongodb_client = mongodb::Client::with_options(client_options).unwrap();
-
-            let db = mongodb_client.database("config");
-            let coll = db.collection::<Document>("settings");
-
-            let filter = doc! {"id": "subreddit_list".to_string()};
-            let find_options = FindOptions::builder().build();
-            let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
-
-            let doc = cursor.try_next().await.unwrap().unwrap();
-            let sfw_subreddits: Vec<&str> = doc.get_array("sfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
-            let nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
-
-            let mut guilds = Vec::new();
-            loop {
-                let mut page = ctx.http.as_ref().get_guilds(Some(&GuildPagination::After(guilds.last().map_or(GuildId(1), |g: &GuildInfo| g.id))), Some(200)).await.unwrap();
-                if page.len() == 0 {
-                    break;
-                }
-                println!("Reached guild {}", guilds.len());
-                guilds.append(&mut page);
-            }
-            println!("Number of guilds: {}", guilds.len());
-            let mut count = 0;
-            for guild in guilds {
-                count += 1;
-                if count % 100 == 0 {
-                    println!("Created commands on guild {}", count);
-                }
-                let id = guild.id;
-
-                let guild_config = fetch_guild_config(id, ctx.cache.clone(), &mut mongodb_client).await;
-                let nsfw = guild_config.get_str("nsfw").unwrap();
-
-                let _ = id.create_application_command(&ctx.http, |command| {
-                command
-                    .name("get")
-                    .description("Get a post from a specified subreddit");
-
-                command.create_option(|option| {
-                    option.name("subreddit")
-                        .description("The subreddit to get a post from")
-                        .required(true)
-                        .kind(CommandOptionType::String);
-
-                    if nsfw == "nsfw" || nsfw == "both" {
-                        for subreddit in &nsfw_subreddits {
-                            option.add_string_choice(subreddit, subreddit);
-                        }
-                    }
-                    if nsfw == "non-nsfw" || nsfw == "both" {
-                        for subreddit in &sfw_subreddits {
-                            option.add_string_choice(subreddit, subreddit);
-                        }
-                    }
-
-                    return option;
-                });
-
-                return command;
-            }).await;
-            }
-        }
-
-        if command == "get_delete" {
-            let mut guilds = Vec::new();
-            loop {
-                let mut page = ctx.http.as_ref().get_guilds(Some(&GuildPagination::After(guilds.last().map_or(GuildId(1), |g: &GuildInfo| g.id))), Some(200)).await.unwrap();
-                if page.len() == 0 {
-                    break;
-                }
-                println!("Reached guild {}", guilds.len());
-                guilds.append(&mut page);
-            }
-            println!("Number of guilds: {}", guilds.len());
-            let mut count = 0;
-            for guild in guilds {
-                count += 1;
-                if count % 100 == 0 {
-                    println!("Created commands on guild {}", count);
-                }
-                let id = guild.id;
-                match id.set_application_commands(&ctx.http, |c| {
-                    c.set_application_commands(Vec::new())
-                }).await {
-                    Ok(_) => {},
-                    Err(e) => println!("Error: {}", e)
-                }; // Delete all guild commands
-            }
+            serenity::model::application::Command::delete_global_command(&ctx.http, id).await.expect("Failed to delete command");
         }
 
         if command == "ping_delete" {
             let id = serenity::model::id::CommandId::from(1053326533651071067);
-            Command::delete_global_application_command(&ctx.http, id).await.expect("Failed to delete command");
+            Command::delete_global_command(&ctx.http, id).await.expect("Failed to delete command");
         }
 
         if command == "get" || command == "all" {
-            let mut client_options = ClientOptions::parse("mongodb://my-user:rslash@localhost:27018/?tls=false&directConnection=true").await.unwrap();
+            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@localhost:27018/?tls=false&directConnection=true").await.unwrap();
             client_options.app_name = Some("rslash-manager".to_string());
 
             let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
@@ -281,124 +187,72 @@ impl EventHandler for Handler {
 
             let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
             let nsfw = application_id == 278550142356029441;
-            let _ = Command::create_global_application_command(&ctx.http,|command| {
-                command
-                    .name("get")
-                    .description("Get a post from a specified subreddit");
+            let builder = CreateCommand::new("get")
+                .description("Get a post from a specified subreddit");
 
-                command.create_option(|option| {
-                    option.name("subreddit")
-                        .description("The subreddit to get a post from")
-                        .required(true)
-                        .kind(CommandOptionType::String);
+            let mut options = CreateCommandOption::new(
+                CommandOptionType::String,
+                "subreddit",
+                "The subreddit to get a post from",
+            ).required(true);
 
-                    if nsfw {
-                        for subreddit in &nsfw_subreddits {
-                            option.add_string_choice(subreddit, subreddit);
-                        }
-                    }
-                    else {
-                        for subreddit in &sfw_subreddits {
-                            option.add_string_choice(subreddit, subreddit);
-                        }
-                    }
+            if nsfw {
+                for subreddit in &nsfw_subreddits {
+                    options = options.add_string_choice(subreddit.to_string(), subreddit.to_string());
+                }
+            }
+            else {
+                for subreddit in &sfw_subreddits {
+                    options = options.add_string_choice(subreddit.to_string(), subreddit.to_string());
+                }
+            }
 
-                    return option;
-                });
 
-                command.create_option(|option| {
-                    option.name("search")
-                        .description("Search by title")
-                        .required(false)
-                        .kind(CommandOptionType::String)
-                });
 
-                return command;
-            }).await;
+            
+            let _ = Command::create_global_command(&ctx.http, builder.add_option(options)).await;
         }
 
         if command == "membership" || command == "all" {
-            let _ = Command::create_global_application_command(&ctx.http, |command| {
-                command
-                    .name("membership")
+            let _ = Command::create_global_command(&ctx.http,
+                CreateCommand::new("membership")
                     .description("Get information about your membership")
-            }).await.expect("Failed to register slash commands");
+            ).await.expect("Failed to register slash commands");
         }
 
         if command == "ping" || command == "all" {
-            let _ = Command::create_global_application_command(&ctx.http, |command| {
-                command
-                    .name("ping")
+            let _ = Command::create_global_command(&ctx.http, 
+                CreateCommand::new("ping")
                     .description("Basic command to check if the bot is online")
-            }).await.expect("Failed to register slash command");
+            ).await.expect("Failed to register slash command");
         }
 
         if command == "support" || command == "all" {
-            let _ = Command::create_global_application_command(&ctx.http, |command| {
-                command
-                    .name("support")
+            let _ = Command::create_global_command(&ctx.http,
+                CreateCommand::new("support")
                     .description("Get help with the bot.")
-            }).await.expect("Failed to register slash command");
+            ).await.expect("Failed to register slash command");
         }
 
         if command == "info" || command == "all" {
-            let _ = Command::create_global_application_command(&ctx.http, |command| {
-                command
-                    .name("info")
+            let _ = Command::create_global_command(&ctx.http,
+                CreateCommand::new("info")
                     .description("Get information about the bot")
-            }).await.expect("Failed to register slash commands");
+            ).await.expect("Failed to register slash commands");
         }
 
         if command == "custom" || command == "all" {
-            let _ = Command::create_global_application_command(&ctx.http, |command| {
-                command
-                    .name("custom")
+            let _ = Command::create_global_command(&ctx.http,
+                CreateCommand::new("custom")
                     .description("PREMIUM: Get post from a custom subreddit")
-                    .create_option(|option| {
-                        option.name("subreddit")
-                            .description("The subreddit to get a post from")
+                    .add_option(
+                        CreateCommandOption::new(CommandOptionType::String, "subreddit", "The subreddit to get a post from")
                             .required(true)
-                            .kind(CommandOptionType::String)
-                    })
-                    .create_option( |option| {
-                        option.name("search")
-                            .description("Search by title")
-                            .required(false)
-                            .kind(CommandOptionType::String)
-                    })
-            }).await.expect("Failed to register slash commands");
-        }
-
-        if command == "configure" {
-            println!("Matched on configure");
-            let _ = Command::create_global_application_command(&ctx.http, |command| {
-                command
-                    .name("configure-server")
-                    .description("Configure the bot")
-                    .default_member_permissions(serenity::model::permissions::Permissions::MANAGE_GUILD);
-
-                command.create_option(|option| {
-                    option.name("commands")
-                        .description("Configure server-level command behaviour")
-                        .kind(CommandOptionType::SubCommandGroup)
-                        .create_sub_option(|sub_option| {
-                            sub_option.name("nsfw")
-                                .kind(CommandOptionType::SubCommand)
-                                .description("Whether to show NSFW subreddits or not")
-                                .create_sub_option(|sub_option| {
-                                    sub_option.name("value")
-                                        .required(true)
-                                        .description("You can allow members to only use SFW subreddits, NSFW subreddits, or both.")
-                                        .add_string_choice("Only show NSFW subreddits", "nsfw")
-                                        .add_string_choice("Only show non-NSFW subreddits", "non-nsfw")
-                                        .add_string_choice("Show both NSFW and non-NSFW subreddits", "both")
-                                        .kind(CommandOptionType::String)
-                                })
-
-                        })
-                });
-                return command;
-            }).await.expect("Failed to register slash commands");
+                    )
+                    .add_option(
+                        CreateCommandOption::new(CommandOptionType::String, "search", "Search by title")
+                    )
+            ).await.expect("Failed to register slash commands");
         }
         println!("Exiting");
         std::process::exit(0);
@@ -423,7 +277,7 @@ async fn update_commands(command: Option<&str>) {
 
     let mut client = serenity::Client::builder(token, GatewayIntents::non_privileged())
         .event_handler(Handler)
-        .application_id(application_id)
+        .application_id(application_id.into())
         .await
         .expect("Error creating client");
 
@@ -432,7 +286,7 @@ async fn update_commands(command: Option<&str>) {
         data.insert::<CommandToUpdate>(command.to_string());
     }
 
-    client.start_shard(shard_id as u64, total_shards as u64).await.expect("Error starting shard");
+    client.start_shard(shard_id as u32, total_shards as u32).await.expect("Error starting shard");
 
 }
 

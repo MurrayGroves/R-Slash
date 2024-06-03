@@ -1898,6 +1898,7 @@ name = "reddit-downloader"
 version = "1.2.1"
 dependencies = [
  "anyhow",
+ "base64 0.13.1",
  "chrono",
  "console-subscriber",
  "dash-mpd",

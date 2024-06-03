@@ -30,7 +30,7 @@ impl <'a>Client<'a> {
             .send()
             .await?;
 
-        self.limiter.update_headers(response.headers()).await?;
+        self.limiter.update_headers(response.headers(), response.status()).await?;
 
         let response = response
             .json::<serde_json::Value>()
@@ -47,7 +47,7 @@ impl <'a>Client<'a> {
             .send()
             .await?;
 
-        self.limiter.update_headers(response.headers()).await?;
+        self.limiter.update_headers(response.headers(), response.status()).await?;
 
         let txt = response.text().await?;
         let json = serde_json::from_str::<serde_json::Value>(&txt).context(txt)?;
@@ -59,7 +59,7 @@ impl <'a>Client<'a> {
         self.limiter.wait().await;
         let gif = format!("https://i.imgur.com/{}.gif", id);
         let head = self.client.head(&gif).send().await?;
-        self.limiter.update_headers(head.headers()).await?;
+        self.limiter.update_headers(head.headers(), head.status()).await?;
 
         if head.headers().get("Content-Type").ok_or(Error::msg("Failed to get content type"))?.to_str()? == "image/gif" {
             return Ok(gif);
