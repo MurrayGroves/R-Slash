@@ -207,9 +207,6 @@ impl EventHandler for Handler {
                 }
             }
 
-
-
-            
             let _ = Command::create_global_command(&ctx.http, builder.add_option(options)).await;
         }
 
@@ -235,7 +232,7 @@ impl EventHandler for Handler {
         }
 
         if command == "info" || command == "all" {
-            let _ = Command::create_global_command(&ctx.http,
+            Command::create_global_command(&ctx.http,
                 CreateCommand::new("info")
                     .description("Get information about the bot")
             ).await.expect("Failed to register slash commands");
@@ -248,6 +245,7 @@ impl EventHandler for Handler {
                     .add_option(
                         CreateCommandOption::new(CommandOptionType::String, "subreddit", "The subreddit to get a post from")
                             .required(true)
+                            .set_autocomplete(true)
                     )
                     .add_option(
                         CreateCommandOption::new(CommandOptionType::String, "search", "Search by title")
