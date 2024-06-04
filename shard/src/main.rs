@@ -1,5 +1,5 @@
 use log::trace;
-use serenity::all::{ActionRowComponent, ButtonStyle, CreateButton, InputTextStyle};
+use serenity::all::{ActionRowComponent, AutocompleteChoice, ButtonStyle, CreateAutocompleteResponse, CreateButton, InputTextStyle};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
 use tracing::{debug, info, warn, error};
@@ -31,7 +31,7 @@ use std::path::Path;
 use futures_util::TryStreamExt;
 use tokio::sync::Mutex;
 
-use redis;
+use redis::{self, FromRedisValue};
 use redis::{AsyncCommands, from_redis_value};
 use mongodb::options::ClientOptions;
 use mongodb::bson::{doc, Document};
@@ -232,7 +232,7 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
         .user_agent(format!("Discord:RSlash:{} (by /u/murrax2)", env!("CARGO_PKG_VERSION")))
         .build()?;
     let res = web_client
-        .get(format!("https://www.reddit.com/r/{}.json", subreddit))
+        .head(format!("https://www.reddit.com/r/{}.json", subreddit))
         .send()
         .await?;
 
@@ -257,12 +257,21 @@ async fn get_custom_subreddit<'a>(command: &'a CommandInteraction, ctx: &'a Cont
 
     if last_cached == 0 {
         debug!("Subreddit not cached");
+
         command.defer(&ctx.http).await.unwrap_or_else(|e| {
             warn!("Failed to defer response: {}", e);
         });
         if !already_queued {
             debug!("Queueing subreddit for download");
             con.rpush("custom_subreddits_queue", &subreddit).await?;
+
+            let selector = if ctx.cache.current_user().id.get() == 278550142356029441 {
+                "nsfw"
+            } else {
+                "sfw"
+            };
+
+            con.hset(&format!("custom_sub:{}:{}", selector, subreddit), "name", &subreddit).await?;
         }
         loop {
             sleep(Duration::from_millis(50)).await;
@@ -304,6 +313,7 @@ async fn info<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &se
         guild_count += from_redis_value::<u64>(&count)?;
     }
 
+    let id = ctx.cache.current_user().id.get();
 
     return Ok(InteractionResponse {
         embed: Some(CreateEmbed::default()
@@ -321,7 +331,7 @@ async fn info<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &se
         components: Some(vec![CreateActionRow::Buttons(vec![
                 CreateButton::new_link("https://discord.gg/jYtCFQG")
                     .label("Get Help"),
-                CreateButton::new_link("https://discord.com/api/oauth2/authorize?client_id=106529087272964929&permissions=515463498752&scope=applications.commands%20bot")
+                CreateButton::new_link(format!("https://discord.com/api/oauth2/authorize?client_id={}&permissions=515463498752&scope=applications.commands%20bot", id))
                     .label("Add to another server"),
                 ]
         ), CreateActionRow::Buttons(vec![
@@ -461,7 +471,7 @@ impl EventHandler for Handler {
 
     /// Fires when the shard's status is updated
     async fn shard_stage_update(&self, _: Context, event: ShardStageUpdateEvent) {
-        debug!("Shard stage changed");
+        debug!("Shard stage changed to {:?}", event);
         let alive = match event.new {
             serenity::gateway::ConnectionStage::Connected => true,
             _ => false,
@@ -893,7 +903,7 @@ impl EventHandler for Handler {
             component_tx.finish();
         };
         
-        if let Interaction::Modal(modal) = interaction {
+        if let Interaction::Modal(modal) = interaction.clone() {
             let modal_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.modal", "handle modal interaction"));
 
             match modal.guild_id {
@@ -1122,6 +1132,92 @@ impl EventHandler for Handler {
             }
 
             modal_tx.finish();
+        }
+
+        if let Interaction::Autocomplete(autocomplete) = interaction {
+            let subreddit = match autocomplete.data.options.iter().find(|option| {
+                option.name == "subreddit"
+            }) {
+                Some(option) => option.value.as_str().unwrap().to_string(),
+                None => {
+                    return;
+                }
+            };
+
+            if subreddit.len() < 2 {
+                return;
+            }
+
+            debug!("Autocomplete for {:?}", subreddit);
+
+            let data_read = ctx.data.read().await;
+            let conf = data_read.get::<ConfigStruct>().unwrap();
+            let mut con = conf.redis.clone();
+
+            let mut search = subreddit.replace('"', "\\");
+            search = search.replace(":", "\\:");        
+
+            let selector = if ctx.cache.current_user().id.get() == 278550142356029441 {
+                "nsfw"
+            } else {
+                "sfw"
+            };
+
+            debug!("Getting autocomplete results for {:?}", search);
+            let results: Vec<redis::Value> = match redis::cmd("FT.SEARCH")
+                .arg(format!("{}_subs", selector))
+                .arg(format!("*{}*", search))
+                .arg("LIMIT")
+                .arg(0)
+                .arg(10)
+                .query_async(&mut con).await {
+                    Ok(x) => x,
+                    Err(e) => {
+                        error!("Error getting autocomplete results: {:?}", e);
+                        return;
+                    }
+            };
+
+            let mut skip_first = true;
+            let mut option_names = Vec::new();
+            let mut skip = true;
+            for result in results {
+                if skip_first {
+                    skip_first = false;
+                    continue
+                }
+
+                if skip {
+                    skip = false;
+                    continue;
+                }
+
+                let result: Vec<redis::Value> = match result.into_sequence() {
+                    Ok(x) => x,
+                    Err(e) => {
+                        error!("Error getting autocomplete result: {:?}", e);
+                        continue;
+                    }
+                };
+                let name = match String::from_redis_value(&result[1]) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        error!("Error getting autocomplete result: {:?}", e);
+                        continue;
+                    }
+                };
+                option_names.push(name);
+            }
+
+            let resp = CreateAutocompleteResponse::new()
+                .set_choices(option_names.into_iter().map(|x| AutocompleteChoice::new(x.clone(), x)).collect());
+
+            match autocomplete.create_response(&ctx.http, CreateInteractionResponse::Autocomplete(resp)).await {
+                Ok(_) => {},
+                Err(e) => {
+                    error!("Failed to send autocomplete response: {:?}", e);
+                }
+            };
         }
         tx.finish();
     }
