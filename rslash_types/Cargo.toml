@@ -11,3 +11,4 @@ posthog = {path = "../posthog"}
 serenity = "*"
 redis = { version = "*", features = ["aio", "tokio-comp"] }
 typemap_rev = "*"
+tokio = "*"

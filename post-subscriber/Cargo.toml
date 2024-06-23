@@ -10,3 +10,13 @@ serenity = "0.12"
 redis = "0.24"
 tokio = {version="1.36", features = ["rt-multi-thread"]}
 env_logger = "0.11"
+log = "*"
+posthog = {path = "../posthog"}
+mongodb = "*"
+tarpc = {version="*", features = ["serde-transport", "tcp", "serde-transport-bincode"]}
+anyhow = "*"
+futures = "*"
+serde_derive = "*"
+serde = "*"
+
+post_api = {path = "../post-api"}
