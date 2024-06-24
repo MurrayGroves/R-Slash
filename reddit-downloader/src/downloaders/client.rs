@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Error, anyhow, Result};
 use reqwest::StatusCode;
+use sentry::Scope;
 use serde_json::json;
 use serde_json::Value;
 use tracing::info;
@@ -186,39 +187,28 @@ impl <'a>Client<'a> {
     }
 
     /// Convert a single mp4 to a gif, and return the path to the gif
+    #[tracing::instrument(skip(self))]
     async fn process(&self, path: &str) -> Result<String, Error> {
+        let parent_span = sentry::configure_scope(|scope| scope.get_span());
+        let span: sentry::TransactionOrSpan = match &parent_span {
+            Some(parent) => parent.start_child("subtask", "description").into(),
+            None => {
+                let ctx = sentry::TransactionContext::new("task", "op");
+                sentry::start_transaction(ctx).into()
+            }
+        };
+
         let new_path: String = format!("{}.gif", path.replace(".mp4", ""));
         let full_path = format!("{}/{}", self.path, path);
         let new_full_path = format!("{}/{}", self.path, new_path);
 
-        /*let output = Command::new("mediainfo")
-            .arg("--output=JSON")
-            .arg(&full_path)
-            .output()?;
-
-        let output = String::from_utf8_lossy(&output.stdout);
-        let output: serde_json::Value = serde_json::from_str(&output).context("Parsing mediainfo output")?;
-        // First track is used for general metadata, second track contains video metadata
-        let width = output["media"]["track"][1]["Width"].as_str().ok_or(Error::msg("Failed to parse mediainfo output"))?.parse::<u32>()?;
-        let height = output["media"]["track"][1]["Height"].as_str().ok_or(Error::msg("Failed to parse mediainfo output"))?.parse::<u32>()?;
-
-        // If the video is too big, scale it down
-        let scale = if width > height {
-            format!(",scale=320:-1:flags=lanczos")
-        } else {
-            format!(",scale=-1:300:flags=lanczos")
-        };
-
-        // If the video is small enough, don't scale it
-        let scale = if width < 320 && height < 300 {
-            ""
-        } else {
-            &scale
-        };*/
-
         let scale = ",scale=-1:'min(360,ih)':flags=lanczos";
 
-        let output = Command::new("ffmpeg")
+
+        {
+            let span = span.start_child("ffmpeg", "converting mp4 to gif");
+
+            let output = Command::new("ffmpeg")
             .arg("-y")
             .arg("-i")
             .arg(&full_path)
@@ -229,11 +219,14 @@ impl <'a>Client<'a> {
             .arg(&new_full_path)
             .output()?;
 
-        if !output.status.success() {
-            std::io::stderr().write_all(&output.stderr).unwrap();
-            warn!("Failed to convert mp4 to gif: {}", String::from_utf8_lossy(&output.stderr));
-            Err(Error::msg(format!("ffmpeg failed: {}\n{}", output.status.to_string(), output.status))).with_context(|| format!("path: {}", full_path))?;
-        }   
+            if !output.status.success() {
+                std::io::stderr().write_all(&output.stderr).unwrap();
+                warn!("Failed to convert mp4 to gif: {}", String::from_utf8_lossy(&output.stderr));
+                Err(Error::msg(format!("ffmpeg failed: {}\n{}", output.status.to_string(), output.status))).with_context(|| format!("path: {}", full_path))?;
+            }
+
+            span.finish();
+        }
 
 
         let mut size = std::fs::metadata(&new_full_path)?.len();
@@ -249,6 +242,7 @@ impl <'a>Client<'a> {
                 warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
             }
     
+            let span = span.start_child("gifsicle", "optimising gif");
             let output = Command::new("gifsicle")
                 .arg("-O3")
                 .arg("--lossy=80")
@@ -260,6 +254,7 @@ impl <'a>Client<'a> {
             if !output.status.success() {
                 warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
             }
+            span.finish();
             
             if size < std::fs::metadata("temp.gif")?.len() {
                 debug!("Size increased, breaking");
@@ -292,6 +287,7 @@ impl <'a>Client<'a> {
     }
 
     /// Download a single mp4 from a url, and return the path to the gif
+    #[tracing::instrument(skip(self))]
     pub async fn request(&self, url: &str, filename: &str) -> Result<String, Error> {
         let mut path = if url.ends_with(".mp4") {
             self.generic.request(url).await?

@@ -3,7 +3,7 @@ use std::{hash::{Hash, Hasher}, io::Write, sync::Arc};
 use anyhow::{Error, Context, Result};
 use futures::StreamExt;
 use tokio::{io::AsyncWriteExt, sync::RwLock};
-use tracing::debug;
+use tracing::{debug, instrument};
 
 pub struct Client<'a> {
     path: &'a str,
@@ -22,7 +22,7 @@ impl <'a>Client<'a> {
         })
     }
     
-
+    #[instrument(skip(self))]
     pub async fn request(&self, url: &str, filename: &str) -> Result<String, Error> {
         self.limiter.wait().await;
 

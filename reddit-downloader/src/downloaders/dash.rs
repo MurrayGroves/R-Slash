@@ -18,7 +18,7 @@ impl <'a>Client<'a> {
         }
     }
     
-
+    #[instrument(skip(self))]
     pub async fn request(&self, url: &str) -> Result<String, Error> {
         self.limiter.wait().await;
 

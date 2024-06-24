@@ -25,7 +25,7 @@ use tarpc::{
 
 
 #[tarpc::service]
-trait Subscriber {
+pub trait Subscriber {
     async fn register_subscription(subreddit: String, channel: u64) -> Result<(), String>;
 
     async fn delete_subscription(subreddit: String, channel: u64) -> Result<(), String>;
@@ -167,7 +167,7 @@ impl Subscriber for SubscriberServer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Subscription {
+pub struct Subscription {
     subreddit: String,
     channel: u64
 }
@@ -191,26 +191,24 @@ async fn main() {
 
     debug!("Starting...");
 
-    // Configure the client with your Discord bot token in the environment.
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
-    // Set gateway intents, which decides what events the bot will be notified about
     let intents = GatewayIntents::empty();
+    let mut client = serenity::Client::builder(&token, intents).event_handler(Handler).await.expect("Err creating client");
+    let http = client.http.clone();
+
     let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
     let posthog_client = posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
 
-    let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
+    let mongo_url = env::var("MONGO_URL").expect("MONGO_URL not set");
+    let mut client_options = ClientOptions::parse(mongo_url).await.unwrap();
     client_options.app_name = Some("Post Subscriber".to_string());
     let mongodb_client = Arc::new(Mutex::new(mongodb::Client::with_options(client_options).unwrap()));
 
     let subscriptions = Arc::new(Mutex::new(Vec::new()));
 
-    let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
-    let redis = db_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
-
-    let mut client =
-    serenity::Client::builder(&token, intents).event_handler(Handler).await.expect("Err creating client");
-
-    let http = client.http.clone();
+    let redis_url = env::var("REDIS_URL").expect("REDIS_URL not set");
+    let redis_client = redis::Client::open(redis_url).unwrap();
+    let redis = redis_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
 
     let mut listener = tarpc::serde_transport::tcp::listen("0.0.0.0:50051", Bincode::default).await.unwrap();
     listener.config_mut().max_frame_length(usize::MAX);

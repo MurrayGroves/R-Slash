@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::{Error, anyhow, Context, Result};
 
 use futures_util::StreamExt;
+use tracing::instrument;
 
 pub struct Client<'a> {
     path: &'a str,
@@ -21,7 +22,7 @@ impl <'a>Client<'a> {
         }
     }
     
-
+    #[instrument(skip(self))]
     async fn request_gallery(&self, id: &str) -> Result<String, Error> {
         self.limiter.wait().await;
 
@@ -39,6 +40,7 @@ impl <'a>Client<'a> {
         Ok(response["data"]["images"][0]["link"].as_str().ok_or(Error::msg("Failed to extract image link from Imgur response"))?.to_string())
     }
 
+    #[instrument(skip(self))]
     async fn request_album(&self, id: &str) -> Result<String, Error> {
         self.limiter.wait().await;
 
@@ -55,6 +57,7 @@ impl <'a>Client<'a> {
         Ok(json["data"]["images"][0]["link"].as_str().ok_or(Error::msg("Failed to extract image link from Imgur response"))?.to_string())
     }
 
+    #[instrument(skip(self))]
     async fn request_image(&self, id: &str) -> Result<String, Error> {
         self.limiter.wait().await;
         let gif = format!("https://i.imgur.com/{}.gif", id);
@@ -76,6 +79,7 @@ impl <'a>Client<'a> {
 
 
     /// Download a single image from a url, and return the path to the image, or URL if no conversion is needed
+    #[instrument(skip(self))]
     pub async fn request(&self, url: &str) -> Result<String, Error> {
         let id = url.split("/").last().ok_or(Error::msg("Failed to extract imgur ID"))?
         .split(".").next().ok_or(Error::msg("Failed to extract imgur ID"))?;

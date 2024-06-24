@@ -25,3 +25,5 @@ posthog = {path = "../posthog"}
 dash-mpd = "*"
 metascraper = "*"
 base64 = "*"
+
+post-subscriber = {path = "../post-subscriber"}
