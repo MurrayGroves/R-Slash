@@ -1,8 +1,10 @@
 use futures::{Future, StreamExt};
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Bson};
 use mongodb::options::ClientOptions;
+use redis::AsyncCommands;
 use serde_derive::{Deserialize, Serialize};
 use serenity::all::{ChannelId, CreateMessage, GatewayIntents, Http};
+use serenity::json::json;
 use serenity::{all::EventHandler, async_trait};
 
 use log::{debug, error, info, warn};
@@ -26,11 +28,11 @@ use tarpc::{
 
 #[tarpc::service]
 pub trait Subscriber {
-    async fn register_subscription(subreddit: String, channel: u64) -> Result<(), String>;
+    async fn register_subscription(subreddit: String, channel: u64, bot: Bot) -> Result<(), String>;
 
-    async fn delete_subscription(subreddit: String, channel: u64) -> Result<(), String>;
+    async fn delete_subscription(subreddit: String, channel: u64, bot: Bot) -> Result<(), String>;
 
-    async fn list_subscriptions(channel: u64) -> Result<Vec<Subscription>, String>;
+    async fn list_subscriptions(channel: u64, bot: Bot) -> Result<Vec<Subscription>, String>;
 
     async fn notify(subreddit: String, post_id: String) -> Result<(), String>;
 
@@ -42,20 +44,25 @@ struct SubscriberServer {
     socket_addr: SocketAddr,
     db: Arc<Mutex<mongodb::Client>>,
     subscriptions: Arc<Mutex<Vec<Subscription>>>,
-    discord: Arc<Http>,
+    discord_bb: Arc<Http>,
+    discord_rs: Arc<Http>,
     redis: redis::aio::MultiplexedConnection,
+    posthog: posthog::Client
 }
 
 impl Subscriber for SubscriberServer {
-    async fn register_subscription(self, _: context::Context, subreddit: String, channel: u64) -> Result<(), String> {
+    async fn register_subscription(self, _: context::Context, subreddit: String, channel: u64, bot: Bot) -> Result<(), String> {
         info!("Registering subscription for subreddit {} to channel {}", subreddit, channel);
+
+        let _ = self.posthog.capture("subscription_create", json!([("subreddit", &subreddit)]), &channel.to_string()).await;
 
         let client = self.db.lock().await;
         let coll: mongodb::Collection<Subscription> = client.database("state").collection("subscriptions");
 
         let subscription = Subscription {
             subreddit: subreddit,
-            channel: channel
+            channel: channel,
+            bot,
         };
 
         match coll.insert_one(&subscription, None).await {
@@ -67,15 +74,18 @@ impl Subscriber for SubscriberServer {
         Ok(())
     }
 
-    async fn delete_subscription(self, _: context::Context, subreddit: String, channel: u64) -> Result<(), String> {
+    async fn delete_subscription(self, _: context::Context, subreddit: String, channel: u64, bot: Bot) -> Result<(), String> {
         info!("Deleting subscription for subreddit {} to channel {}", subreddit, channel);
+
+        let _ = self.posthog.capture("subscription_delete", json!([("subreddit", &subreddit)]), &channel.to_string()).await;
 
         let client = self.db.lock().await;
         let coll: mongodb::Collection<Subscription> = client.database("state").collection("subscriptions");
 
         let filter = doc! {
             "subreddit": &subreddit,
-            "channel": channel as i64
+            "channel": channel as i64,
+            "bot": bot
         };
 
         match coll.delete_one(filter, None).await {
@@ -88,14 +98,15 @@ impl Subscriber for SubscriberServer {
     }
 
     // List subscriptions for a channel
-    async fn list_subscriptions(self, _: context::Context, channel: u64) -> Result<Vec<Subscription>, String> {
+    async fn list_subscriptions(self, _: context::Context, channel: u64, bot: Bot) -> Result<Vec<Subscription>, String> {
         info!("Listing subscriptions");
 
         let client = self.db.lock().await;
         let coll: mongodb::Collection<Subscription> = client.database("state").collection("subscriptions");
 
         let filter = doc!{
-            "channel": channel as i64
+            "channel": channel as i64,
+            "bot": bot
         };
 
         let mut cursor = match coll.find(filter, None).await {
@@ -105,12 +116,18 @@ impl Subscriber for SubscriberServer {
         let mut subscriptions = Vec::new();
 
         while let Some(sub) = cursor.next().await {
-            subscriptions.push(sub.unwrap());
+            match sub {
+                Ok(sub) => {
+                    subscriptions.push(sub);
+                },
+                Err(e) => return Err(e.to_string())
+            }
         }
 
         Ok(subscriptions)
     }
 
+    // Notify subscribers of a new post
     async fn notify(self, _: context::Context, subreddit: String, post_id: String) -> Result<(), String> {
         info!("Notifying subscribers of post {} in subreddit {}", post_id, subreddit);
 
@@ -127,13 +144,18 @@ impl Subscriber for SubscriberServer {
         // Remove the components because we don't want autopost and refresh options in this context
         post.components = None;
 
+        let _ = self.posthog.capture("subreddit_new_post", json!([("subreddit", &subreddit)]), "").await;
+
         for sub in filtered {
             info!("Notifying channel {} of post {} in subreddit {}", sub.channel, post_id, subreddit);
+
+            let _ = self.posthog.capture("notify_new_post", json!([("subreddit", &subreddit)]), &sub.channel.to_string()).await;
 
             let post = post.clone();
 
             let channel: ChannelId = sub.channel.into();
             
+            // Turn post response into message
             let mut resp = CreateMessage::default();
             if let Some(em) = post.embed {
                 resp = resp.embed(em);
@@ -147,9 +169,19 @@ impl Subscriber for SubscriberServer {
                 resp = resp.add_file(attachment);
             }
 
-            match channel.send_message(&self.discord, resp).await {
-                Ok(_) => (),
-                Err(e) => return Err(e.to_string())
+            match sub.bot {
+                Bot::BB => {
+                    match channel.send_message(&self.discord_bb, resp).await {
+                        Ok(_) => (),
+                        Err(e) => return Err(e.to_string())
+                    }
+                },
+                Bot::RS => {
+                    match channel.send_message(&self.discord_rs, resp).await {
+                        Ok(_) => (),
+                        Err(e) => return Err(e.to_string())
+                    }
+                }
             }
         }
 
@@ -169,7 +201,23 @@ impl Subscriber for SubscriberServer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     subreddit: String,
-    channel: u64
+    channel: u64,
+    bot: Bot
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum Bot {
+    BB,
+    RS
+}
+
+impl Into<Bson> for Bot {
+    fn into(self) -> Bson {
+        match self {
+            Bot::BB => Bson::String("BB".to_string()),
+            Bot::RS => Bson::String("RS".to_string())
+        }
+    }
 }
 
 async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
@@ -191,10 +239,15 @@ async fn main() {
 
     debug!("Starting...");
 
-    let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
+    let token = env::var("DISCORD_TOKEN_BB").expect("Expected DISCORD_TOKEN_BB in the environment");
     let intents = GatewayIntents::empty();
-    let mut client = serenity::Client::builder(&token, intents).event_handler(Handler).await.expect("Err creating client");
-    let http = client.http.clone();
+    let mut client_bb = serenity::Client::builder(&token, intents).event_handler(Handler).await.expect("Err creating client");
+    let http_bb = client_bb.http.clone();
+
+    let token = env::var("DISCORD_TOKEN_RS").expect("Expected DISCORD_TOKEN_RS in the environment");
+    let intents = GatewayIntents::empty();
+    let mut client_rs = serenity::Client::builder(&token, intents).event_handler(Handler).await.expect("Err creating client");
+    let http_rs = client_rs.http.clone();
 
     let posthog_key: String = env::var("POSTHOG_API_KEY").expect("POSTHOG_API_KEY not set").parse().expect("Failed to convert POSTHOG_API_KEY to string");
     let posthog_client = posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
@@ -208,7 +261,13 @@ async fn main() {
 
     let redis_url = env::var("REDIS_URL").expect("REDIS_URL not set");
     let redis_client = redis::Client::open(redis_url).unwrap();
-    let redis = redis_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
+    let mut redis = redis_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
+
+    let total_shards_bb: redis::RedisResult<u32> = redis.get("total_shards_booty-bot").await;
+    let total_shards_bb: u32 = total_shards_bb.expect("Failed to get or convert total_shards");
+
+    let total_shards_rs: redis::RedisResult<u32> = redis.get("total_shards_r-slash").await;
+    let total_shards_rs: u32 = total_shards_rs.expect("Failed to get or convert total_shards");
 
     let mut listener = tarpc::serde_transport::tcp::listen("0.0.0.0:50051", Bincode::default).await.unwrap();
     listener.config_mut().max_frame_length(usize::MAX);
@@ -223,8 +282,10 @@ async fn main() {
                 socket_addr: channel.transport().peer_addr().unwrap(),
                 db: Arc::clone(&mongodb_client),
                 subscriptions: Arc::clone(&subscriptions),
-                discord: Arc::clone(&http),
-                redis: redis.clone()
+                discord_bb: Arc::clone(&http_bb),
+                discord_rs: Arc::clone(&http_rs),
+                redis: redis.clone(),
+                posthog: posthog_client.clone()
             };
             channel.execute(server.serve()).for_each(spawn)
         })
@@ -235,7 +296,14 @@ async fn main() {
 
     info!("Started tarpc server, connecting to discord...");
 
-    if let Err(why) = client.start().await {
+    tokio::spawn(async move {
+        if let Err(why) = client_bb.start_shard(0, total_shards_bb).await {
+            error!("Client error: {:?}", why);
+        }
+    });
+
+    if let Err(why) = client_rs.start_shard(0, total_shards_rs).await {
         error!("Client error: {:?}", why);
     }
+
 }

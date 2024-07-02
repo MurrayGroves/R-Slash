@@ -2,6 +2,7 @@ use log::*;
 use serde_json::json;
 use serde_json::Value;
 
+#[derive(Clone)]
 pub struct Client {
     pub api_key: String,
     pub host: String,

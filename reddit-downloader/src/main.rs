@@ -32,7 +32,8 @@ pub enum ConfigValue<'a> {
     U64(u64),
     Bool(bool),
     String(String),
-    DownloaderClient(downloaders::client::Client<'a>)
+    DownloaderClient(downloaders::client::Client<'a>),
+    SubscriberClient(post_subscriber::SubscriberClient),
 }
 
 /// Stores config values required for operation of the downloader
@@ -230,7 +231,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
     let mut url = String::new();
 
     let existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query_async(con).await
-    .context("Getting existing posts")?;
+        .context("Getting existing posts")?;
     debug!("Existing posts: {:?}", existing_posts);
     
     // Wrap data that needs to be shared between threads in Arcs

@@ -204,7 +204,6 @@ impl <'a>Client<'a> {
 
         let scale = ",scale=-1:'min(360,ih)':flags=lanczos";
 
-
         {
             let span = span.start_child("ffmpeg", "converting mp4 to gif");
 

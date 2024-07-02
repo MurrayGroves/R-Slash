@@ -2006,6 +2006,7 @@ dependencies = [
  "posthog",
  "redis",
  "serenity 0.12.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio",
  "typemap_rev",
 ]
 
