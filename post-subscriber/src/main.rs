@@ -25,19 +25,7 @@ use tarpc::{
     tokio_serde::formats::Bincode,
 };
 
-
-#[tarpc::service]
-pub trait Subscriber {
-    async fn register_subscription(subreddit: String, channel: u64, bot: Bot) -> Result<(), String>;
-
-    async fn delete_subscription(subreddit: String, channel: u64, bot: Bot) -> Result<(), String>;
-
-    async fn list_subscriptions(channel: u64, bot: Bot) -> Result<Vec<Subscription>, String>;
-
-    async fn notify(subreddit: String, post_id: String) -> Result<(), String>;
-
-    async fn watched_subreddits() -> Result<HashSet<String>, String>;
-}
+use post_subscriber::{Subscriber, Subscription, Bot};
 
 #[derive(Clone)]
 struct SubscriberServer {
@@ -198,27 +186,6 @@ impl Subscriber for SubscriberServer {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Subscription {
-    subreddit: String,
-    channel: u64,
-    bot: Bot
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum Bot {
-    BB,
-    RS
-}
-
-impl Into<Bson> for Bot {
-    fn into(self) -> Bson {
-        match self {
-            Bot::BB => Bson::String("BB".to_string()),
-            Bot::RS => Bson::String("RS".to_string())
-        }
-    }
-}
 
 async fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
     tokio::spawn(fut);
@@ -257,7 +224,29 @@ async fn main() {
     client_options.app_name = Some("Post Subscriber".to_string());
     let mongodb_client = Arc::new(Mutex::new(mongodb::Client::with_options(client_options).unwrap()));
 
-    let subscriptions = Arc::new(Mutex::new(Vec::new()));
+    let existing_subs = {
+        let client = mongodb_client.lock().await;
+        let coll: mongodb::Collection<Subscription> = client.database("state").collection("subscriptions");
+
+        let mut cursor = coll.find(None, None).await.expect("Failed to get subscriptions");
+        let mut subscriptions = Vec::new();
+
+        while let Some(sub) = cursor.next().await {
+            match sub {
+                Ok(sub) => {
+                    subscriptions.push(sub);
+                },
+                Err(e) => {
+                    error!("Failed to get subscription: {:?}", e);
+                    break;
+                }
+            }
+        }
+
+        subscriptions
+    };
+
+    let subscriptions = Arc::new(Mutex::new(existing_subs));
 
     let redis_url = env::var("REDIS_URL").expect("REDIS_URL not set");
     let redis_client = redis::Client::open(redis_url).unwrap();

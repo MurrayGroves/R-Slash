@@ -2,6 +2,7 @@ use std::{collections::HashMap, process::Command, io::Write};
 
 use anyhow::{Error, Context};
 use futures_util::StreamExt;
+use tracing::instrument;
 
 pub struct Client<'a> {
     path: &'a str,

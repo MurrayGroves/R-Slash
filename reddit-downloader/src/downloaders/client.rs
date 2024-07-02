@@ -4,6 +4,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{Context, Error, anyhow, Result};
+use base64::Engine;
 use reqwest::StatusCode;
 use sentry::Scope;
 use serde_json::json;
@@ -48,8 +49,8 @@ impl Token {
             json["token"].as_str().ok_or(Error::msg("Failed to parse token"))?.to_string()
         };
         debug!("Token: {}", token);
-        let tokenData = token.split(".").nth(1).ok_or(Error::msg("Failed to parse token"))?;
-        let decoded = base64::decode(tokenData)?;
+        let token_data = token.split(".").nth(1).ok_or(Error::msg("Failed to parse token"))?;
+        let decoded = base64::engine::general_purpose::STANDARD_NO_PAD.decode(token_data)?;
         let decoded = String::from_utf8(decoded)?;
         let json: Value = serde_json::from_str(&decoded)?;
         let expiry = json["exp"].as_i64().ok_or(Error::msg("Failed to parse expiry"))?;

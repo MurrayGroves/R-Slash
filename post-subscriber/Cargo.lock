@@ -1627,25 +1627,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d231b230927b5e4ad203db57bbcbee2802f6bce620b1e4a9024a07d94e2907ec"
 
 [[package]]
-name = "post-subscriber"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger 0.11.2",
- "futures",
- "log",
- "mongodb",
- "post_api",
- "posthog",
- "redis",
- "serde",
- "serde_derive",
- "serenity",
- "tarpc",
- "tokio",
-]
-
-[[package]]
 name = "post_api"
 version = "0.1.0"
 dependencies = [
@@ -1672,6 +1653,25 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "post_subscriber"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "env_logger 0.11.2",
+ "futures",
+ "log",
+ "mongodb",
+ "post_api",
+ "posthog",
+ "redis",
+ "serde",
+ "serde_derive",
+ "serenity",
+ "tarpc",
+ "tokio",
 ]
 
 [[package]]

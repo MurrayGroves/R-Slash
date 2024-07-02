@@ -1,11 +1,14 @@
 use futures::StreamExt;
 use itertools::Itertools;
+use post_subscriber::SubscriberClient;
+use stubborn_io::{ReconnectOptions, StubbornTcpStream};
+use tarpc::tokio_serde::formats::Bincode;
 use tracing::{debug, info, warn, error};
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use std::collections::HashMap;
-use std::iter::FromIterator;
+use std::iter::{self, FromIterator};
 use tokio::time::{sleep, Duration};
 use futures::lock::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +26,8 @@ use futures_util::TryStreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{ClientOptions, FindOptions};
 use serde_json::Value::Null;
+
+use tarpc::{client, context, serde_transport::Transport};
 
 mod downloaders;
 
@@ -222,7 +227,7 @@ async fn get_access_token(con: &mut redis::aio::MultiplexedConnection, reddit_cl
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
 #[tracing::instrument(skip(con, web_client, downloaders_client))]
-async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConnection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, imgur_client: String, mut after: Option<String>, pages: Option<u8>, downloaders_client: &downloaders::client::Client<'_>) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
+async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConnection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, imgur_client: String, mut after: Option<String>, pages: Option<u8>, downloaders_client: &downloaders::client::Client<'_>, subscriber: SubscriberClient) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
     debug!("Fetching subreddit: {:?}", subreddit);
 
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await?;
@@ -356,6 +361,7 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
             let existing_posts = Arc::clone(&existing_posts);
             let mut con = con.clone();
             let subreddit = Arc::clone(&subreddit);
+            let subscriber = subscriber.clone();
 
             async move {
                 let (i, post) = match result {
@@ -500,7 +506,15 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                     }
                 };
 
-
+                match subscriber.notify(context::current(), subreddit.to_string(), post["id"].to_string().replace('"', "")).await {
+                    Ok(_) => {},
+                    Err(x) => {
+                        let txt = format!("Failed to notify subscriber: {}", x);
+                        warn!("{}", txt);
+                        sentry::capture_message(&txt, sentry::Level::Warning);
+                    }
+                };
+                
                 // Subreddit has not been downloaded before, meaning we should try get posts into Redis ASAP to minimise the time before the user gets a response
                 if existing_posts.len() < 30 {
                     // Push post to list of posts
@@ -637,6 +651,14 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
 
     let downloaders_client = downloaders::client::Client::new("/data/media", Some(imgur_client_id), None).await?;
 
+    let reconnect_opts = ReconnectOptions::new()
+        .with_exit_if_first_connect_fails(false)
+        .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
+    let tcp_stream = StubbornTcpStream::connect_with_options("post-subscriber.discord-bot-shared.svc.cluster.local:50051", reconnect_opts).await?;
+    let transport = Transport::from((tcp_stream, Bincode::default()));
+
+    let subscriber = post_subscriber::SubscriberClient::new(client::Config::default(), transport).spawn();
+
     debug!("Entering loop");
     if do_custom == "true".to_string() {
         debug!("Starting custom subreddit loop");
@@ -716,7 +738,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
                 let fetched_up_to = &subreddit_state.fetched_up_to;
                 subreddit_state.fetched_up_to = get_subreddit(
                     subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(),
-                    None, imgur_client.clone(), fetched_up_to.clone(), Some(1), &downloaders_client).await?;
+                    None, imgur_client.clone(), fetched_up_to.clone(), Some(1), &downloaders_client, subscriber.clone()).await?;
 
                 subreddit_state.last_fetched = Some(get_epoch_ms()?);
                 subreddit_state.pages_left -= 1;
@@ -769,7 +791,7 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
             let last_updated = con.get(&subreddit).await.unwrap_or(0u64);
             debug!("{:?} was last updated at {:?}", &subreddit, last_updated);
 
-            get_subreddit(subreddit.to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, imgur_client.clone(), None, None, &downloaders_client).await?;
+            get_subreddit(subreddit.to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, imgur_client.clone(), None, None, &downloaders_client, subscriber.clone()).await?;
             let _:() = con.set(&subreddit, get_epoch_ms()?).await.unwrap();
             if !index_exists(&mut con, format!("idx:{}", subreddit)).await {
                 create_index(&mut con, format!("idx:{}", subreddit), format!("subreddit:{}:post:", subreddit)).await?;

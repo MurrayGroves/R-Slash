@@ -1,6 +1,6 @@
 [package]
-name = "post-subscriber"
-version = "0.1.0"
+name = "post_subscriber"
+version = "0.1.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -20,3 +20,7 @@ serde_derive = "*"
 serde = "*"
 
 post_api = {path = "../post-api"}
+
+[lib]
+name = "post_subscriber"
+path = "src/post_subscriber.rs"

@@ -25,5 +25,7 @@ posthog = {path = "../posthog"}
 dash-mpd = "*"
 metascraper = "*"
 base64 = "*"
+tarpc = {version="*", features = ["serde-transport", "tcp", "serde-transport-bincode"]}
+stubborn-io = "*"
 
-post-subscriber = {path = "../post-subscriber"}
+post_subscriber = {path = "../post-subscriber"}
