@@ -1,15 +1,20 @@
 use log::trace;
+use post_subscriber::{Bot, SubscriberClient};
 use serenity::all::{ActionRowComponent, AutocompleteChoice, ButtonStyle, CreateAutocompleteResponse, CreateButton, InputTextStyle};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
+use stubborn_io::{ReconnectOptions, StubbornTcpStream};
+use tarpc::context;
+use tarpc::serde_transport::Transport;
+use tarpc::tokio_serde::formats::Bincode;
 use tracing::{debug, info, warn, error};
 use rand::Rng;
 use serde_json::json;
 use tracing::instrument;
 use tracing_subscriber::{Layer, util::SubscriberInitExt, prelude::__tracing_subscriber_SubscriberExt};
 
-use types::ResponseFallbackMethod;
-use std::fs;
+use rslash_types::ResponseFallbackMethod;
+use std::{fs, iter};
 use std::io::Write;
 use std::collections::HashMap;
 use std::env;
@@ -46,13 +51,11 @@ use memberships::*;
 use connection_pooler::ResourceManager;
 
 mod poster;
-mod types;
-mod reddit;
 
-use crate::poster::AutoPostCommand;
-use crate::types::ConfigStruct;
-use crate::types::InteractionResponse;
-use crate::reddit::*;
+use rslash_types::AutoPostCommand;
+use rslash_types::ConfigStruct;
+use rslash_types::InteractionResponse;
+use post_api::*;
 
 
 /// Returns current milliseconds since the Epoch
@@ -124,7 +127,6 @@ async fn get_subreddit_cmd<'a>(command: &'a CommandInteraction, ctx: &'a Context
     capture_event(ctx.data.clone(), "subreddit_cmd", Some(tx),
                     Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "false".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())
                 ).await;
-
 
     if config.nsfw_subreddits.contains(&subreddit) {
         if let Some(channel) = command.channel_id.to_channel_cached(&ctx.cache) {
@@ -346,6 +348,93 @@ async fn info<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &se
 }
 
 
+async fn subscribe<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
+    if let Some(member) = &command.member {
+        if !member.permissions(&ctx).unwrap().manage_messages() {
+            return Ok(InteractionResponse {
+                embed: Some(CreateEmbed::default()
+                    .title("Permission Error")
+                    .description("You must have the 'Manage Messages' permission to setup a subscription.")
+                    .color(0xff0000).to_owned()
+                ),
+                ..Default::default()
+            });
+        }
+    }
+
+    let options = &command.data.options;
+    debug!("Command Options: {:?}", options);
+
+    let subreddit = options[0].value.clone();
+    let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
+
+    let data_lock = ctx.data.read().await;
+    let client = data_lock.get::<SubscriberClient>().ok_or(anyhow!("Subscriber client not found"))?.clone();
+
+    let bot = match get_namespace().as_str() {
+        "r-slash" => Bot::RS,
+        "booty-bot" => Bot::BB,
+        _ => Bot::RS,
+    };
+
+    let tx = parent_tx.start_child("subscribe_call", "subscribe");
+    client.register_subscription(context::current(), subreddit.clone(), command.channel_id.get(), bot).await?;
+    tx.finish();
+
+    return Ok(InteractionResponse {
+        embed: Some(CreateEmbed::default()
+            .title("Subscribed")
+            .description(format!("This channel has been subscribed to r/{}", subreddit))
+            .color(0x00ff00).to_owned()
+        ),
+        ..Default::default()
+    });
+}
+
+async fn unsubscribe<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
+    if let Some(member) = &command.member {
+        if !member.permissions(&ctx).unwrap().manage_messages() {
+            return Ok(InteractionResponse {
+                embed: Some(CreateEmbed::default()
+                    .title("Permission Error")
+                    .description("You must have the 'Manage Messages' permission to setup a subscription.")
+                    .color(0xff0000).to_owned()
+                ),
+                ..Default::default()
+            });
+        }
+    }
+
+    let options = &command.data.options;
+    debug!("Command Options: {:?}", options);
+
+    let subreddit = options[0].value.clone();
+    let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
+
+    let data_lock = ctx.data.read().await;
+    let client = data_lock.get::<SubscriberClient>().ok_or(anyhow!("Subscriber client not found"))?.clone();
+
+    let bot = match get_namespace().as_str() {
+        "r-slash" => Bot::RS,
+        "booty-bot" => Bot::BB,
+        _ => Bot::RS,
+    };
+
+    let tx = parent_tx.start_child("unsubscribe_call", "unsubscribe");
+    client.delete_subscription(context::current(), subreddit.clone(), command.channel_id.get(), bot).await?;
+    tx.finish();
+
+    return Ok(InteractionResponse {
+        embed: Some(CreateEmbed::default()
+            .title("Unsubscribed")
+            .description(format!("This channel has been unsubscribed from r/{}", subreddit))
+            .color(0x00ff00).to_owned()
+        ),
+        ..Default::default()
+    });
+}
+
+
 #[instrument(skip(command, ctx, tx))]
 async fn get_command_response<'a>(command: &'a CommandInteraction, ctx: &'a Context, tx: &'a sentry::Transaction) -> Result<InteractionResponse, anyhow::Error> {
     match command.data.name.as_str() {
@@ -404,6 +493,20 @@ async fn get_command_response<'a>(command: &'a CommandInteraction, ctx: &'a Cont
         "info" => {
             let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_info"));
             let resp = info(&command, &ctx, &cmd_tx).await;
+            cmd_tx.finish();
+            resp
+        },
+
+        "subscribe" => {
+            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_subscribe"));
+            let resp = subscribe(&command, &ctx, &cmd_tx).await;
+            cmd_tx.finish();
+            resp
+        },
+
+        "unsubscribe" => {
+            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_unsubscribe"));
+            let resp = unsubscribe(&command, &ctx, &cmd_tx).await;
             cmd_tx.finish();
             resp
         },
@@ -1078,7 +1181,7 @@ impl EventHandler for Handler {
                         }
                     };
 
-                    let post_request = poster::PostRequest {
+                    let post_request = rslash_types::PostRequest {
                         subreddit: custom_id["subreddit"].to_string().replace('"', ""),
                         interval,
                         search,
@@ -1323,6 +1426,14 @@ async fn main() {
             posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string())
         })))).await;
 
+        let reconnect_opts = ReconnectOptions::new()
+        .with_exit_if_first_connect_fails(false)
+        .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
+        let tcp_stream = StubbornTcpStream::connect_with_options("post-subscriber.discord-bot-shared.svc.cluster.local:50051", reconnect_opts).await.expect("Failed to connect to post subscriber");
+        let transport = Transport::from((tcp_stream, Bincode::default()));
+
+        let subscriber = post_subscriber::SubscriberClient::new(tarpc::client::Config::default(), transport).spawn();
+
         data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
         data.insert::<ResourceManager<posthog::Client>>(posthog_manager);
         data.insert::<ConfigStruct>(ConfigStruct {
@@ -1331,6 +1442,7 @@ async fn main() {
             auto_post_chan: auto_post_chan.0.clone(),
             redis: con,
         });
+        data.insert::<post_subscriber::SubscriberClient>(subscriber);
     }
 
     let shard_manager = client.shard_manager.clone();

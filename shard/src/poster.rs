@@ -9,22 +9,10 @@ use tokio::{sync::{mpsc::Receiver, RwLock}, time::Instant};
 use serenity::{all::{ButtonStyle, UserId}, builder::{CreateActionRow, CreateButton, CreateMessage}, model::id::ChannelId, prelude::TypeMap};
 use tokio::time::{Duration, sleep};
 
-use crate::types::ConfigStruct;
+use rslash_types::*;
 
-use super::{get_subreddit, get_subreddit_search};
+use post_api::{get_subreddit, get_subreddit_search};
 
-#[derive(Debug, Clone)]
-pub struct PostRequest {
-    pub channel: ChannelId,
-    pub subreddit: String,
-    pub search: Option<String>,
-    // Interval between posts in seconds
-    pub interval: Duration,
-    pub limit: Option<u32>,
-    pub current: u32,
-    pub last_post: Instant,
-    pub author: UserId,
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PostMemory {
@@ -37,11 +25,6 @@ pub struct PostMemory {
     pub author: UserId,
     pub shard_id: u64,
     pub bot: String,
-}
-
-pub enum AutoPostCommand {
-    Start(PostRequest),
-    Stop(ChannelId),
 }
 
 

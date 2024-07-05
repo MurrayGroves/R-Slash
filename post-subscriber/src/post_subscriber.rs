@@ -17,6 +17,10 @@ pub trait Subscriber {
     async fn watched_subreddits() -> Result<HashSet<String>, String>;
 }
 
+impl serenity::prelude::TypeMapKey for SubscriberClient {
+    type Value = SubscriberClient;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub subreddit: String,

@@ -120,19 +120,32 @@ impl Subscriber for SubscriberServer {
         info!("Notifying subscribers of post {} in subreddit {}", post_id, subreddit);
 
         let subscriptions = self.subscriptions.lock().await;
+        debug!("Lock acquired, checking subscriptions {:?}", subscriptions);
+
         let filtered = subscriptions.iter().filter(|sub| sub.subreddit == subreddit).collect::<Vec<&Subscription>>();
+
+        if filtered.len() == 0 {
+            return Ok(());
+        }
 
         let mut redis = self.redis.clone();
 
-        let mut post = match post_api::get_post_by_id(&post_id, None, &mut redis, None).await {
+        debug!("Getting post {}", post_id);
+        let mut post = match post_api::get_post_by_id(&format!("subreddit:{}:post:{}", subreddit, &post_id), None, &mut redis, None).await {
             Ok(post) => post,
-            Err(e) => return Err(e.to_string())
+            Err(e) => {
+                warn!("Failed to get post: {:?}", e);
+                return Err(e.to_string())
+            }
         };
+        debug!("Got post {:?}", post);
 
         // Remove the components because we don't want autopost and refresh options in this context
         post.components = None;
 
         let _ = self.posthog.capture("subreddit_new_post", json!([("subreddit", &subreddit)]), "").await;
+
+        debug!("Filtered subscriptions {:?}", filtered);
 
         for sub in filtered {
             info!("Notifying channel {} of post {} in subreddit {}", sub.channel, post_id, subreddit);

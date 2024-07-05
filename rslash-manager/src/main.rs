@@ -210,6 +210,49 @@ impl EventHandler for Handler {
             let _ = Command::create_global_command(&ctx.http, builder.add_option(options)).await;
         }
 
+        if command == "subscribe" || command == "all" {
+            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@localhost:27018/?tls=false&directConnection=true").await.unwrap();
+            client_options.app_name = Some("rslash-manager".to_string());
+
+            let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
+
+            let db = mongodb_client.database("config");
+            let coll = db.collection::<Document>("settings");
+
+            let filter = doc! {"id": "subreddit_list".to_string()};
+            let find_options = FindOptions::builder().build();
+            let mut cursor = coll.find(filter.clone(), find_options.clone()).await.unwrap();
+
+            let doc = cursor.try_next().await.unwrap().unwrap();
+            let sfw_subreddits: Vec<&str> = doc.get_array("sfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
+            let nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
+
+            let application_id: u64 = env::var("DISCORD_APPLICATION_ID").expect("DISCORD_APPLICATION_ID not set").parse().expect("Failed to convert application_id to u64");
+            let nsfw = application_id == 278550142356029441;
+            let builder = CreateCommand::new("subscribe")
+                .description("Subscribe to new posts from a specified subreddit");
+
+            let mut options = CreateCommandOption::new(
+                CommandOptionType::String,
+                "subreddit",
+                "The subreddit to subscribe to",
+            ).required(true);
+
+            if nsfw {
+                for subreddit in &nsfw_subreddits {
+                    options = options.add_string_choice(subreddit.to_string(), subreddit.to_string());
+                }
+            }
+            else {
+                for subreddit in &sfw_subreddits {
+                    options = options.add_string_choice(subreddit.to_string(), subreddit.to_string());
+                }
+            }
+
+            let _ = Command::create_global_command(&ctx.http, builder.add_option(options)).await;
+        }
+
+
         if command == "membership" || command == "all" {
             let _ = Command::create_global_command(&ctx.http,
                 CreateCommand::new("membership")
@@ -252,6 +295,20 @@ impl EventHandler for Handler {
                     )
             ).await.expect("Failed to register slash commands");
         }
+
+        if command == "subscribe_custom" || command == "all" {
+            let _ = Command::create_global_command(&ctx.http,
+                CreateCommand::new("subscribe_custom")
+                    .description("PREMIUM: Subscribe to posts from a custom subreddit")
+                    .add_option(
+                        CreateCommandOption::new(CommandOptionType::String, "subreddit", "The subreddit to subscribe to")
+                            .required(true)
+                            .set_autocomplete(true)
+                    )
+            ).await.expect("Failed to register slash commands");
+        }
+
+
         println!("Exiting");
         std::process::exit(0);
     }
