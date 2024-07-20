@@ -1,8 +1,15 @@
+#[macro_use]
+extern crate lazy_static;
+
 use futures::StreamExt;
+use indexmap::IndexSet;
 use itertools::Itertools;
+use ordermap::OrderMap;
 use post_subscriber::SubscriberClient;
+use sentry::{Hub, SentryFutureExt};
 use stubborn_io::{ReconnectOptions, StubbornTcpStream};
 use tarpc::tokio_serde::formats::Bincode;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn, error};
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
@@ -32,6 +39,11 @@ use tarpc::{client, context, serde_transport::Transport};
 mod downloaders;
 
 
+lazy_static! {
+    static ref MULTI_LOCK : Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+    static ref REDDIT_LIMITER : downloaders::client::Limiter = downloaders::client::Limiter::new(Some(100));
+}
+
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
 pub enum ConfigValue<'a> {
     U64(u64),
@@ -56,6 +68,10 @@ struct SubredditState {
     fetched_up_to: Option<String>,
     /// How many more pages of results to fetch.
     pages_left: u64,
+    /// Whether the subreddit should never stop being fetched.
+    always_fetch: bool,
+    /// Subreddit post list state
+    post_list: SubredditPostList,
 }
 
 /// Represents a Reddit post
@@ -123,12 +139,16 @@ async fn request_access_token(reddit_client: String, reddit_secret: String, web_
         None => "grant_type=client_credentials".to_string(),
     };
 
+    REDDIT_LIMITER.wait().await;
+    REDDIT_LIMITER.update().await;
+
     let res = web_client
         .post("https://www.reddit.com/api/v1/access_token")
         .body(post_data)
         .basic_auth(reddit_client, Some(reddit_secret))
         .send()
         .await?;
+
 
     let text = match res.text().await {
         Ok(x) => x,
@@ -178,7 +198,6 @@ async fn get_access_token(con: &mut redis::aio::MultiplexedConnection, reddit_cl
         _ => "default".to_string(),
     };
 
-
     let token = con.hget("reddit_tokens", token_name.clone()).await;
     let token = match token {
         Ok(x) => x,
@@ -193,6 +212,8 @@ async fn get_access_token(con: &mut redis::aio::MultiplexedConnection, reddit_cl
             format!("{},{}", access_token, expires_at)
         }
     };
+
+    debug!("Token raw: {}", token);
 
     let expires_at:u64 = token.split(",").collect::<Vec<&str>>()[1].parse()?;
     let mut access_token:String = token.split(",").collect::<Vec<&str>>()[0].parse::<String>()?.replace('"', "");
@@ -210,6 +231,106 @@ async fn get_access_token(con: &mut redis::aio::MultiplexedConnection, reddit_cl
     return Ok(access_token);
 }
 
+
+#[derive(Debug)]
+struct PostStatus {
+    failed: bool,
+    finished: bool,
+}
+
+
+#[derive(Clone, Debug)]
+struct SubredditPostList {
+    subreddit: String,
+    posts: Arc<RwLock<OrderMap<String, PostStatus>>>,
+    existing_posts: Arc<IndexSet<String>>,
+    con: redis::aio::MultiplexedConnection,
+}
+
+impl SubredditPostList {
+    fn new(subreddit: String, con: redis::aio::MultiplexedConnection) -> Self {
+        Self {
+            subreddit,
+            posts: Arc::new(RwLock::new(OrderMap::new())),
+            existing_posts: Arc::new(IndexSet::new()),
+            con,
+        }
+    }
+
+
+    // Wait for all posts to be finished processing - means if the subreddit is being fetched again before the previous run has finished, it will wait for the previous run to finish before starting the new one
+    // This is to stop ordering issues
+    // When it's finished, it will reset its state so the next run can start
+    #[tracing::instrument(skip(self, existing_posts))]
+    async fn wait_all_finished_and_reset(&mut self, existing_posts: IndexSet<String>) {
+        self.existing_posts = Arc::new(existing_posts);
+    }
+
+    async fn add_post(&self, id: &str, finished: bool) {
+        let mut posts = self.posts.write().await;
+        let post = PostStatus {
+            failed: false,
+            finished,
+        };
+        posts.insert(id.to_string(), post);
+    }
+
+    async fn set_failed(&self, id: &str) {
+        let mut posts = self.posts.write().await;
+        let post = posts.get_mut(id).unwrap();
+        (*post).failed = true;
+    }
+
+    // Set given post ID as finished processing and update vector of finished posts in Redis
+    #[tracing::instrument(skip(self))]
+    async fn set_finished(&self, id: &str) -> Result<(), anyhow::Error>{
+        debug!("Setting post as finished: {:?}", id);
+        let mut posts = self.posts.write().await;
+        debug!("Acquired mutex for setting post as finished: {:?}", id);
+        let post = posts.get_mut(id).unwrap();
+        (*post).finished = true;
+        (*post).failed = false;
+
+        let existing_posts: IndexSet<&String> = (*self.existing_posts).iter().collect();
+        // Generate list of finished posts including existing posts
+        let finished_posts: Vec<&String> = posts.iter().filter(|x| x.1.finished).map(|x| x.0).collect::<IndexSet<&String>>()
+            .union(
+                &existing_posts
+            ).map(|x| *x).collect();
+    
+
+        if finished_posts.len() != 0 {
+            let parent_span = sentry::configure_scope(|scope| scope.get_span());
+            let span: sentry::TransactionOrSpan = match &parent_span {
+                Some(parent) => parent.start_child("redis_push", "pushing new post list to redis").into(),
+                None => {
+                    let ctx = sentry::TransactionContext::new("redis_push", "pushing new post list to redis");
+                    sentry::start_transaction(ctx).into()
+                }
+            };
+            let mut con = self.con.clone();
+            redis::pipe()
+                .atomic()
+                .del::<String>(format!("subreddit:{}:posts", self.subreddit))
+                .rpush::<String, Vec<&String>>(format!("subreddit:{}:posts", self.subreddit), finished_posts)
+                .query_async::<redis::aio::MultiplexedConnection, ()>(&mut con).await?;
+
+            span.finish();
+        };
+
+        debug!("Finished setting post as finished: {:?}", id);
+        Ok(())
+    }
+
+
+    async fn exists(&self, id: &str) -> bool {
+        let posts = self.posts.read().await;
+        posts.iter().any(|x| x.0 == id && !x.1.failed) || self.existing_posts.iter().any(|x| *x == id)
+    }
+
+}
+
+
 /// Get the top 1000 most recent media posts and store them in the DB
 /// Returns the ID of the last post processed, or None if there were no posts.
 /// 
@@ -226,38 +347,47 @@ async fn get_access_token(con: &mut redis::aio::MultiplexedConnection, reddit_cl
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-#[tracing::instrument(skip(con, web_client, downloaders_client))]
-async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConnection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>, imgur_client: String, mut after: Option<String>, pages: Option<u8>, downloaders_client: &downloaders::client::Client<'_>, subscriber: SubscriberClient) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
+#[tracing::instrument(skip(con, web_client, downloaders_client, reddit_client, reddit_secret, device_id, subscriber, post_list))]
+async fn get_subreddit(
+                        subreddit: String, con: &mut redis::aio::MultiplexedConnection, web_client: &reqwest::Client, reddit_client: String, reddit_secret: String, device_id: Option<String>,
+                        mut after: Option<String>, pages: Option<u8>, downloaders_client: downloaders::client::Client<'static>, subscriber: SubscriberClient,
+                        mut post_list: SubredditPostList
+                    ) -> Result<Option<String>, anyhow::Error> { // Get the top 1000 most recent posts and store them in the DB
     debug!("Fetching subreddit: {:?}", subreddit);
 
     let access_token = get_access_token(con, reddit_client.clone(), reddit_secret.clone(), web_client, device_id).await?;
 
     let url_base = format!("https://oauth.reddit.com/r/{}/hot.json?limit=100", subreddit);
-    let mut url = String::new();
-
+    
     let existing_posts: Vec<String> = redis::cmd("LRANGE").arg(format!("subreddit:{}:posts", subreddit.clone())).arg(0i64).arg(-1i64).query_async(con).await
         .context("Getting existing posts")?;
-    debug!("Existing posts: {:?}", existing_posts);
-    
-    // Wrap data that needs to be shared between threads in Arcs
-    let existing_posts = Arc::new(existing_posts);
+
+
+    post_list.wait_all_finished_and_reset(existing_posts.into_iter().collect()).await;
+
     let subreddit = Arc::new(subreddit);
+
+    debug!("get_subreddit called with subreddit: {}, after: {:?}", subreddit, after);
 
     // Fetch pages of posts
     for x in 0..pages.unwrap_or(10) {
         debug!("Making {}th request to reddit", x);
 
-        // If we haven't constructed the URL yet
-        if url.len() == 0 {
-            url = url_base.clone();
-            // If we aren't on the first page, add the after parameter to specify the last post we processed
-            match &after {
-                Some(x) => {
-                    url = format!("{}&after={}", url, x.clone());
-                },
-                None => {},
-            }
+        if (after.is_none() || after == Some("".into()) || after == Some("null".into())) && x != 0 {
+            debug!("No more posts to fetch");
+            break;
         }
+
+        let url = match &after {
+            Some(x) => {
+                format!("{}&after={}", url_base, x.clone())
+            },
+            None => {
+                url_base.clone()
+            },
+        };
+
+        debug!("URL: {}", url);
 
         // Set headers to tell Reddit who we are
         let mut headers = HeaderMap::new();
@@ -267,6 +397,9 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
         debug!("{}", url);
         debug!("{:?}", headers);
 
+        REDDIT_LIMITER.wait().await;
+        REDDIT_LIMITER.update().await;
+
         let res = web_client
             .get(&url)
             .headers(headers)
@@ -275,9 +408,6 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
 
         debug!("Finished request");
         debug!("Response Headers: {:?}", res.headers());
-
-        // Get current time, so we know when next to fetch this subreddit
-        let last_requested = get_epoch_ms()?;
 
         // Process text response from Reddit
         let text = match res.text().await {
@@ -303,23 +433,27 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
             }
         };
 
+
         // Extract the array of posts from the JSON
         let results = match results.get("data") {
-            Some(x) => match x.get("children") {
-                Some(x) => match x.as_array() {
-                    Some(x) => x,
+            Some(x) => {
+                after = x.get("after").map(|x| x.to_string().replace('"', ""));
+                match x.get("children") {
+                    Some(x) => match x.as_array() {
+                        Some(x) => x,
+                        None => {
+                            let txt = format!("Failed to convert field `children` in reddit response to array: {}", text);
+                            warn!("{}", txt);
+                            sentry::capture_message(&txt, sentry::Level::Warning);
+                            return Ok(after);
+                        }
+                    },
                     None => {
-                        let txt = format!("Failed to convert field `children` in reddit response to array: {}", text);
+                        let txt = format!("Failed to get field `children` in reddit response: {}", text);
                         warn!("{}", txt);
                         sentry::capture_message(&txt, sentry::Level::Warning);
                         return Ok(after);
                     }
-                },
-                None => {
-                    let txt = format!("Failed to get field `children` in reddit response: {}", text);
-                    warn!("{}", txt);
-                    sentry::capture_message(&txt, sentry::Level::Warning);
-                    return Ok(after);
                 }
             },
             None => {
@@ -335,14 +469,6 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
             break;
         }
 
-        // Store last post so we can resume from it next iteration
-        after = match results[results.len() -1 ]["data"]["id"].as_str() {
-            Some(x) => Some(x.to_string()),
-            None => {
-                None
-            }
-        };
-
         let mut posts: Vec<Result<(usize, serde_json::Map<String, serde_json::Value>), anyhow::Error>> = Vec::new();
 
         let mut count = 0;
@@ -353,18 +479,26 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
 
         let stream = futures::stream::iter(posts);
 
-        let posts: Arc<Mutex<HashMap<usize, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let parent_span = sentry::configure_scope(|scope| scope.get_span());
 
         stream.for_each_concurrent(5, |result| {
             // Clone Arcs so they can be moved into the async block and each thread gets its own reference
-            let posts = Arc::clone(&posts);
-            let existing_posts = Arc::clone(&existing_posts);
             let mut con = con.clone();
             let subreddit = Arc::clone(&subreddit);
             let subscriber = subscriber.clone();
+            let post_list = post_list.clone();
+            let downloaders_client = downloaders_client.clone();
+
+            // Create a new transaction as an independent continuation
+            let ctx = sentry::TransactionContext::continue_from_span(
+                "process subreddit post",
+                "process_post",
+                parent_span.clone(),
+            );
 
             async move {
-                let (i, post) = match result {
+                let transaction = sentry::start_transaction(ctx);
+                let (_, post) = match result {
                     Ok(x) => x,
                     Err(x) => {
                         let txt = format!("Failed to get post: {}", x);
@@ -375,35 +509,15 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                 };
                 debug!("{:?} - {:?}", post["title"], post["url"]);
 
-                // If the post has been removed by a moderator, skip it
-                if post.get("removed_by_category").unwrap_or(&Null) != &Null {
-                    debug!("Post removed by moderator");
-                    if existing_posts.contains(&format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))) {
-                        debug!("Removing post from DB");
-                        match con.lrem::<String, String, usize>(format!("subreddit:{}:posts", subreddit), 0, format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await {
-                            Ok(_) => {},
-                            Err(x) => {
-                                let txt = format!("Failed to remove post from DB: {}", x);
-                                warn!("{}", txt);
-                                sentry::capture_message(&txt, sentry::Level::Warning);
-                            }
-                        };
-                        match con.del::<String, usize>(format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await {
-                            Ok(_) => {},
-                            Err(x) => {
-                                let txt = format!("Failed to remove post from DB: {}", x);
-                                warn!("{}", txt);
-                                sentry::capture_message(&txt, sentry::Level::Warning);
-                            }
-                        };
-                    }
-                    return;
-                }
-    
-                // If the post has been removed by the author, skip it
-                if post["author"].to_string().replace('"', "") == "[deleted]" {
-                    debug!("Post removed by author");
-                    if existing_posts.contains(&format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))) {
+                // Redis key for this post
+                let key: String = format!("subreddit:{}:post:{}", post["subreddit"].to_string().replace("\"", ""), &post["id"].to_string().replace('"', ""));
+
+                let exists = post_list.exists(&key).await;
+
+                // If the post has been removed by a moderator, remove it from the DB and skip it
+                if post.get("removed_by_category").unwrap_or(&Null) != &Null || post["author"].to_string().replace('"', "") == "[deleted]" {
+                    debug!("Post is deleted");
+                    if exists {
                         debug!("Removing post from DB");
                         match con.lrem::<String, String, usize>(format!("subreddit:{}:posts", subreddit), 0, format!("subreddit:{}:post:{}", subreddit, &post["id"].to_string().replace('"', ""))).await {
                             Ok(_) => {},
@@ -429,149 +543,112 @@ async fn get_subreddit(subreddit: String, con: &mut redis::aio::MultiplexedConne
                     return;
                 }
 
-                // Redis key for this post
-                let key: String = format!("subreddit:{}:post:{}", post["subreddit"].to_string().replace("\"", ""), &post["id"].to_string().replace('"', ""));
-
-                let exists = existing_posts.contains(&key);
-
                 if exists {
                     debug!("Post already exists in DB");
-                }
+                    post_list.add_post(&key, true).await;
 
-                // Fetch URL if this is a new post
-                let url = if exists {
-                    None
-                } else {
-                    let url = post["url"].to_string().replace('"', "");
-                    let url = if url.contains("v.redd.it") {
-                        post["media"]["reddit_video"]["dash_url"].to_string().replace('"', "")
-                    } else {
-                        url
-                    };
-
-                    // If URL is already embeddable, no further processing is needed
-                    if (url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg")) && !url.contains("redgifs.com") {
-                        Some(url)
-                    } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") || url.contains(".mpd") {
-                        debug!("URL is not embeddable, but we have the ability to turn it into one");
-                        let mut res = match downloaders_client.request(&url, &post["id"].to_string().replace('"', "")).await {
-                            Ok(x) => {
-                                debug!("Downloaded media: {}", x);
-                                x
-                            },
-                            Err(x) => {
-                                let txt = format!("Failed to download media: {}", x);
-                                warn!("{}", txt);
-                                sentry::capture_message(&txt, sentry::Level::Warning);
-                                return;
-                            }
-                        };
-                        if !res.starts_with("http") {
-                            res = format!("https://r-slash.b-cdn.net/gifs/{}", res);
-                        }
-                        Some(res)
-                    } else {
-                        debug!("URL is not embeddable, and we do not have the ability to turn it into one.");
-                        return;
-                    }
-                };
-
-                let timestamp = post["created_utc"].as_f64().unwrap() as u64;
-                let mut title = post["title"].to_string().replace('"', "").replace("&amp;", "&");
-                // Truncate title length to 256 chars (Discord embed title limit)
-                title = (*title.as_str()).truncate_to_boundary(256).to_string();
-
-
-                let post_object = Post {
-                    score: post["score"].as_i64().unwrap_or(0),
-                    url: format!("https://reddit.com{}", post["permalink"].to_string().replace('"', "")),
-                    title: title,
-                    embed_url: url,
-                    author: post["author"].to_string().replace('"', ""),
-                    id: post["id"].to_string().replace('"', ""),
-                    timestamp: timestamp,
-                };
-
-                debug!("Adding to redis {:?}", post_object);
-
-                // Push post to Redis
-                let value = Vec::from(post_object);
-
-                match con.hset_multiple::<&str, String, String, redis::Value>(&key, &value).await {
-                    Ok(_) => {},
-                    Err(x) => {
-                        let txt = format!("Failed to set post in redis: {}", x);
-                        warn!("{}", txt);
-                        sentry::capture_message(&txt, sentry::Level::Warning);
-                    }
-                };
-
-                match subscriber.notify(context::current(), subreddit.to_string(), post["id"].to_string().replace('"', "")).await {
-                    Ok(_) => {},
-                    Err(x) => {
-                        let txt = format!("Failed to notify subscriber: {}", x);
-                        warn!("{}", txt);
-                        sentry::capture_message(&txt, sentry::Level::Warning);
-                    }
-                };
-                
-                // Subreddit has not been downloaded before, meaning we should try get posts into Redis ASAP to minimise the time before the user gets a response
-                if existing_posts.len() < 30 {
-                    // Push post to list of posts
-                    debug!("Pushing key: {}", key);
-                    match con.rpush::<String, &str, redis::Value>(format!("subreddit:{}:posts", subreddit), &key).await {
+                    // Update post's score with new score
+                    match con.hset::<&str, &str, i64, redis::Value>(&key, "score", post["score"].as_i64().unwrap_or(0)).await {
                         Ok(_) => {},
                         Err(x) => {
-                            let txt = format!("Failed to push post to list: {}", x);
+                            let txt = format!("Failed to update score in redis: {}", x);
                             warn!("{}", txt);
                             sentry::capture_message(&txt, sentry::Level::Warning);
                         }
                     };
+                } else {
+                    debug!("Post does not exist in DB");
+
+                    tokio::spawn(async move {
+                        let mut url = post["url"].to_string().replace('"', "");
+                        if url.contains("v.redd.it") {
+                            url = post["media"]["reddit_video"]["dash_url"].to_string().replace('"', "")
+                        };
+    
+                        post_list.add_post(&key, false).await;
+    
+                        // If URL is already embeddable, no further processing is needed
+                        if (url.ends_with(".gif") || url.ends_with(".png") || url.ends_with(".jpg") || url.ends_with(".jpeg")) && !url.contains("redgifs.com") {
+                            debug!("URL is embeddable");
+                        } else if url.ends_with(".mp4") || url.contains("imgur.com") || url.contains("redgifs.com") || url.contains(".mpd") {
+                            debug!("URL is not embeddable, but we have the ability to turn it into one");
+    
+                            let mut res = match downloaders_client.request(&url, &post["id"].to_string().replace('"', "")).await {
+                                Ok(x) => {
+                                    debug!("Downloaded media: {}", x);
+                                    x
+                                },
+                                Err(x) => {
+                                    let txt = format!("Failed to download media: {}", x);
+                                    warn!("{}", txt);
+                                    sentry::capture_message(&txt, sentry::Level::Warning);
+                                    post_list.set_failed(&key).await;
+                                    return;
+                                }
+                            };
+    
+                            if !res.starts_with("http") {
+                                res = format!("https://r-slash.b-cdn.net/gifs/{}", res);
+                            }
+                            
+                            url = res;
+                        } else {
+                            debug!("URL is not embeddable, and we do not have the ability to turn it into one.");
+                            return;
+                        }
+    
+                        let timestamp = post["created_utc"].as_f64().unwrap() as u64;
+                        let mut title = post["title"].to_string().replace('"', "").replace("&amp;", "&");
+                        // Truncate title length to 256 chars (Discord embed title limit)
+                        title = (*title.as_str()).truncate_to_boundary(256).to_string();
+    
+                        let post_object = Post {
+                            score: post["score"].as_i64().unwrap_or(0),
+                            url: format!("https://reddit.com{}", post["permalink"].to_string().replace('"', "")),
+                            title: title,
+                            embed_url: Some(url),
+                            author: post["author"].to_string().replace('"', ""),
+                            id: post["id"].to_string().replace('"', ""),
+                            timestamp: timestamp,
+                        };
+    
+                        debug!("Adding to redis {:?}", post_object);
+    
+                        // Push post to Redis
+                        let value = Vec::from(post_object);
+    
+                        match con.hset_multiple::<&str, String, String, redis::Value>(&key, &value).await {
+                            Ok(_) => {},
+                            Err(x) => {
+                                let txt = format!("Failed to set post in redis: {}", x);
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                            }
+                        };
+
+                        match post_list.set_finished(&key).await {
+                            Ok(_) => {},
+                            Err(x) => {
+                                let txt = format!("Failed to set post as finished: {}", x);
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                            }
+                        };
+    
+                        match subscriber.notify(context::current(), subreddit.to_string(), post["id"].to_string().replace('"', "")).await {
+                            Ok(_) => {},
+                            Err(x) => {
+                                let txt = format!("Failed to notify subscriber: {}", x);
+                                warn!("{}", txt);
+                                sentry::capture_message(&txt, sentry::Level::Warning);
+                            }
+                        };
+                    });
                 }
-                
-                // Push post to thread-safe hashmap
-                let mut posts = posts.lock().await;
-                posts.insert(i, key);
-            }
+                transaction.finish();
+            }.bind_hub(Hub::new_from_top(Hub::current()))
         }
         ).await;
-
-        // Create new list of all posts in 
-        let mut keys = Vec::new();
-        let posts = match Arc::try_unwrap(posts) {
-            Ok(x) => x,
-            Err(_) => {
-                let txt = format!("Failed to unwrap Arc");
-                warn!("{}", txt);
-                sentry::capture_message(&txt, sentry::Level::Warning);
-                return Ok(after);
-            }
-        }.into_inner();
-        for index in posts.keys().sorted() {
-            keys.push(posts[index].clone());
-        }
-
-
-        // Push existing posts to the end of the list so they are not removed from the cache
-        for key in &*existing_posts {
-            if !keys.contains(&key) {
-                keys.push(key.to_string());
-            }
-        }
-
-        if keys.len() != 0 {
-            redis::cmd("MULTI").query_async(con).await?;
-            con.del(format!("subreddit:{}:posts", subreddit)).await?;
-            con.rpush(format!("subreddit:{}:posts", subreddit), keys.clone()).await?;
-            redis::cmd("EXEC").query_async(con).await?;
-        };
-
-
-        let time_since_request = get_epoch_ms()? - last_requested;
-        if time_since_request < 2000 {
-            debug!("Waiting {:?}ms", 2000 - time_since_request);
-            sleep(Duration::from_millis(2000 - time_since_request)).await; // Reddit rate limit is 30 requests per minute, so must wait at least 2 seconds between requests
-        }
     }   
 
     return Ok(after);
@@ -619,12 +696,12 @@ async fn create_index(con: &mut redis::aio::MultiplexedConnection, index: String
 /// # Arguments
 /// ## data
 /// A thread-safe wrapper of the [Config](ConfigStruct)
-async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Result<(), anyhow::Error>{
+async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Result<(), anyhow::Error>{
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     let mut con = db_client.get_multiplexed_async_connection().await.expect("Can't connect to redis");
 
     let web_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
         .user_agent("Discord:RSlash:v1.0.1 (by /u/murrax2)")
         .build().expect("Failed to build client");
 
@@ -639,7 +716,6 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
         _ => panic!("Failed to get reddit_client")
     }.clone();
 
-    let imgur_client = env::var("IMGUR_CLIENT").expect("IMGUR_CLIENT not set");
     let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
 
     let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
@@ -659,118 +735,9 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
 
     let subscriber = post_subscriber::SubscriberClient::new(client::Config::default(), transport).spawn();
 
-    debug!("Entering loop");
-    if do_custom == "true".to_string() {
-        debug!("Starting custom subreddit loop");
-        let mut subreddits: HashMap<String, SubredditState> = HashMap::new();
-        loop {
-            // Populate subreddits with any new subreddit requests
-            let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(-1i64).query_async(&mut con).await.unwrap_or(Vec::new());
-            for subreddit in custom_subreddits {
-                if !subreddits.contains_key(&subreddit) {
-                    let last_fetched: Option<u64> = con.get(&subreddit).await?;
-                    subreddits.insert(subreddit.clone(), SubredditState {
-                        name: subreddit.clone(),
-                        fetched_up_to: None,
-                        last_fetched,
-                        pages_left: 10,
-                    });
-                }
-            }
-
-            if subreddits.len() > 0 {
-                debug!("Subreddits: {:?}", subreddits);
-            }
-
-            let mut next_subreddit = None;
-
-            // If there's a subreddit that hasn't been fetched yet, make that the next one
-            for subreddit in subreddits.values() {
-                if subreddit.last_fetched.is_none() {
-                    next_subreddit = Some(subreddit.name.clone());
-                    debug!("Found subreddit that hasn't been fetched yet: {}", subreddit.name);
-                    break;
-                }
-            }
-
-            // If there's no subreddit that hasn't been fetched yet, find the one fetched least recently and make that the next one
-            match next_subreddit {
-                Some(_) => {},
-                None => {
-                    let mut min = None;
-                    // Find the minimum last_fetched
-                    for subreddit in subreddits.values() {
-                        match min {
-                            Some(x) => {
-                                if subreddit.last_fetched.unwrap() < x {
-                                    min = subreddit.last_fetched;
-                                }
-                            },
-                            None => {
-                                min = subreddit.last_fetched;
-                            }
-                        }
-                    }
-
-                    // Find subreddit with the correct last_fetched
-                    for subreddit in subreddits.values() {
-                        if subreddit.last_fetched == min {
-                            next_subreddit = Some(subreddit.name.clone());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if next_subreddit.is_some() {
-                debug!("Next subreddit: {:?}", next_subreddit);
-            }
-
-            if next_subreddit.is_some() {
-                let subreddit = next_subreddit.unwrap();
-                info!("Fetching subreddit {}", &subreddit);
-                if !index_exists(&mut con, format!("idx:{}", &subreddit)).await {
-                    create_index(&mut con, format!("idx:{}", &subreddit), format!("subreddit:{}:post:", &subreddit)).await?;
-                }
-
-                // Fetch a page and update state
-                let subreddit_state = subreddits.get_mut(&subreddit).unwrap();
-                let fetched_up_to = &subreddit_state.fetched_up_to;
-                subreddit_state.fetched_up_to = get_subreddit(
-                    subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(),
-                    None, imgur_client.clone(), fetched_up_to.clone(), Some(1), &downloaders_client, subscriber.clone()).await?;
-
-                subreddit_state.last_fetched = Some(get_epoch_ms()?);
-                subreddit_state.pages_left -= 1;
-
-                debug!("Subreddit has {} pages left", subreddit_state.pages_left);
-                
-                if subreddit_state.fetched_up_to.is_none() {
-                    debug!("Subreddit has no more pages left: {}", &subreddit);
-                    subreddit_state.pages_left = 0;
-                }
-
-                // If we've fetched all the pages, remove the subreddit from the list
-                if subreddit_state.pages_left == 0 {
-                    subreddits.remove(&subreddit);
-                    con.set(&subreddit, get_epoch_ms()?).await?;
-                    info!("Got custom subreddit: {:?}", &subreddit);
-                    con.lrem("custom_subreddits_queue", 0, &subreddit).await?;
-                }
-            }
-
-            sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    let mut last_run = 0;
-    loop {
-        if last_run > (get_epoch_ms()? - 10000*60) { // Only download every 10 minutes, to avoid rate limiting (and also it's just not necessary)
-            sleep(Duration::from_millis(100)).await;
-            continue;
-        }
-        last_run = get_epoch_ms()?;
-
+    debug!("Starting subreddit loop");
+    let mut subreddits: HashMap<String, SubredditState> = HashMap::new();
+    if do_custom != "true".to_string() {
         let db = mongodb_client.database("config");
         let coll = db.collection::<Document>("settings");
 
@@ -782,25 +749,129 @@ async fn download_loop(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -> Re
         let mut sfw_subreddits: Vec<&str> = doc.get_array("sfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
         let mut nsfw_subreddits: Vec<&str> = doc.get_array("nsfw").unwrap().into_iter().map(|x| x.as_str().unwrap()).collect();
 
-        let mut subreddits = Vec::new();
-        subreddits.append(&mut nsfw_subreddits);
-        subreddits.append(&mut sfw_subreddits);
+        let mut subreddits_vec = Vec::new();
+        subreddits_vec.append(&mut nsfw_subreddits);
+        subreddits_vec.append(&mut sfw_subreddits);
 
-        for subreddit in subreddits {
-            debug!("Getting subreddit: {:?}", subreddit);
-            let last_updated = con.get(&subreddit).await.unwrap_or(0u64);
-            debug!("{:?} was last updated at {:?}", &subreddit, last_updated);
-
-            get_subreddit(subreddit.to_string(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(), None, imgur_client.clone(), None, None, &downloaders_client, subscriber.clone()).await?;
-            let _:() = con.set(&subreddit, get_epoch_ms()?).await.unwrap();
-            if !index_exists(&mut con, format!("idx:{}", subreddit)).await {
-                create_index(&mut con, format!("idx:{}", subreddit), format!("subreddit:{}:post:", subreddit)).await?;
+        for subreddit in subreddits_vec {
+            subreddits.insert(subreddit.to_string(), SubredditState {
+                name: subreddit.to_string(),
+                fetched_up_to: None,
+                last_fetched: None,
+                pages_left: 10,
+                always_fetch: true,
+                post_list: SubredditPostList::new(subreddit.to_string(), con.clone()),
+            });
+        }
+    }
+    loop {
+        if do_custom == "true".to_string() {
+            // Populate subreddits with any new subreddit requests
+            let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(-1i64).query_async(&mut con).await.unwrap_or(Vec::new());
+            for subreddit in custom_subreddits {
+                if !subreddits.contains_key(&subreddit) {
+                    let last_fetched: Option<u64> = con.get(&subreddit).await?;
+                    subreddits.insert(subreddit.clone(), SubredditState {
+                        name: subreddit.clone(),
+                        fetched_up_to: None,
+                        last_fetched,
+                        pages_left: 10,
+                        always_fetch: false,
+                        post_list: SubredditPostList::new(subreddit.clone(), con.clone()),
+                    });
+                }
             }
-            info!("Got subreddit: {:?}", subreddit);
         }
 
-        info!("All subreddits updated");
+        if subreddits.len() > 0 {
+            debug!("Subreddits: {:?}", subreddits);
+        }
 
+        let mut next_subreddit = None;
+
+        // If there's a subreddit that hasn't been fetched yet, make that the next one
+        for subreddit in subreddits.values() {
+            if subreddit.last_fetched.is_none() {
+                next_subreddit = Some(subreddit.name.clone());
+                debug!("Found subreddit that hasn't been fetched yet: {}", subreddit.name);
+                break;
+            }
+        }
+
+        // If there's no subreddit that hasn't been fetched yet, find the one fetched least recently and make that the next one
+        match next_subreddit {
+            Some(_) => {},
+            None => {
+                let mut min = None;
+                // Find the minimum last_fetched
+                for subreddit in subreddits.values() {
+                    match min {
+                        Some(x) => {
+                            if subreddit.last_fetched.unwrap() < x {
+                                min = subreddit.last_fetched;
+                            }
+                        },
+                        None => {
+                            min = subreddit.last_fetched;
+                        }
+                    }
+                }
+
+                // Find subreddit with the correct last_fetched
+                for subreddit in subreddits.values() {
+                    if subreddit.last_fetched == min {
+                        next_subreddit = Some(subreddit.name.clone());
+                        break;
+                    }
+                }
+            }
+        }
+
+        if next_subreddit.is_some() {
+            debug!("Next subreddit: {:?}", next_subreddit);
+        }
+
+        if next_subreddit.is_some() {
+            let subreddit = next_subreddit.unwrap();
+            info!("Fetching subreddit {}", &subreddit);
+            if !index_exists(&mut con, format!("idx:{}", &subreddit)).await {
+                create_index(&mut con, format!("idx:{}", &subreddit), format!("subreddit:{}:post:", &subreddit)).await?;
+            }
+
+            // Fetch a page and update state
+            let subreddit_state = subreddits.get_mut(&subreddit).unwrap();
+            let fetched_up_to = &subreddit_state.fetched_up_to;
+            subreddit_state.fetched_up_to = get_subreddit(
+                subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(),
+                None, fetched_up_to.clone(), Some(1), downloaders_client.clone(), subscriber.clone(),
+                subreddit_state.post_list.clone()
+            ).await?;
+
+            subreddit_state.last_fetched = Some(get_epoch_ms()?);
+            subreddit_state.pages_left -= 1;
+
+            debug!("Subreddit has {} pages left", subreddit_state.pages_left);
+            
+            if subreddit_state.fetched_up_to.is_none() {
+                debug!("Subreddit has no more pages left: {}", &subreddit);
+                subreddit_state.pages_left = 0;
+            }
+
+            // If we've fetched all the pages, remove the subreddit from the list
+            if subreddit_state.pages_left == 0 && !subreddit_state.always_fetch {
+                subreddits.remove(&subreddit);
+                con.set(&subreddit, get_epoch_ms()?).await?;
+                info!("Got custom subreddit: {:?}", &subreddit);
+                con.lrem("custom_subreddits_queue", 0, &subreddit).await?;
+            } else if subreddit_state.pages_left == 0 {
+                subreddit_state.pages_left = 10;
+                subreddit_state.fetched_up_to = None;
+                let mut posts: tokio::sync::RwLockWriteGuard<OrderMap<String, PostStatus>> = subreddit_state.post_list.posts.write().await;
+                (*posts).retain(|_, value| value.finished == false);
+            }
+        }
+
+        sleep(Duration::from_millis(10)).await;
     }
 }
 

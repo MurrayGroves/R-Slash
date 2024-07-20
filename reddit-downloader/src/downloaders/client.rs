@@ -68,6 +68,7 @@ impl Token {
         })
     }
 
+    #[tracing::instrument(skip(self))]
     pub async fn get_token(&mut self) -> Result<&str> {
         if self.expiry < chrono::Utc::now().timestamp() - 60 {
             let (token, expiry) = Self::update_token(&self.url).await?;
@@ -85,6 +86,7 @@ struct LimitState {
 }
 
 // Struct for tracking rate limits
+#[derive(Clone)]
 pub struct Limiter {
     state: Arc<tokio::sync::Mutex<LimitState>>,
     per_minute: Option<u64>, // User can specify rate limit per minute, otherwise use the headers
@@ -147,6 +149,7 @@ impl Limiter {
     }
 
     // Wait until we are allowed to request again
+    #[tracing::instrument(skip(self))]
     pub async fn wait(&self) {
         let state = self.state.lock().await;
         if state.remaining == 0 && state.reset > chrono::Utc::now().timestamp() {
@@ -159,6 +162,7 @@ impl Limiter {
 }
 
 /// Client for downloading mp4s from various sources and converting them to gifs for embedding
+#[derive(Clone)]
 pub struct Client<'a> {
     imgur: Option<imgur::Client<'a>>,
     generic: generic::Client<'a>,
@@ -166,6 +170,7 @@ pub struct Client<'a> {
     posthog: Option<posthog::Client>,
     redgifs: Option<redgifs::Client<'a>>,
     path: &'a str,
+    process_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl <'a>Client<'a> {
@@ -184,12 +189,14 @@ impl <'a>Client<'a> {
             posthog: posthog_client,
             dash: Some(dash::Client::new(&path, Limiter::new(Some(60)))),
             redgifs: Some(redgifs::Client::new(&path, Limiter::new(Some(60))).await?),
+            process_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
     /// Convert a single mp4 to a gif, and return the path to the gif
     #[tracing::instrument(skip(self))]
     async fn process(&self, path: &str) -> Result<String, Error> {
+        let _lock = self.process_lock.lock().await;
         let parent_span = sentry::configure_scope(|scope| scope.get_span());
         let span: sentry::TransactionOrSpan = match &parent_span {
             Some(parent) => parent.start_child("subtask", "description").into(),
@@ -228,51 +235,44 @@ impl <'a>Client<'a> {
             span.finish();
         }
 
+        let size = std::fs::metadata(&new_full_path)?.len();
+        let output = Command::new("cp")
+        .arg(&new_full_path)
+        .arg("temp.gif")
+        .output()?;
 
-        let mut size = std::fs::metadata(&new_full_path)?.len();
-        let mut count = 0;
-        while count < 5 && size > 8 * 1024 * 1024 {
-            size = std::fs::metadata(&new_full_path)?.len();
-            let output = Command::new("mv")
-            .arg(&new_full_path)
+        if !output.status.success() {
+            warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
+        }
+
+        let span = span.start_child("gifsicle", "optimising gif");
+        let output = Command::new("gifsicle")
+            .arg("-O3")
+            .arg("--lossy=80")
+            .arg("--colors=128")
+            .arg("--batch")
             .arg("temp.gif")
             .output()?;
-    
-            if !output.status.success() {
-                warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
-            }
-    
-            let span = span.start_child("gifsicle", "optimising gif");
-            let output = Command::new("gifsicle")
-                .arg("-O3")
-                .arg("--lossy=80")
-                .arg("--colors=128")
-                .arg("--batch")
-                .arg("temp.gif")
-                .output()?;
 
-            if !output.status.success() {
-                warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
-            }
-            span.finish();
-            
-            if size < std::fs::metadata("temp.gif")?.len() {
-                debug!("Size increased, breaking");
-                break;
-            } else {
-                debug!("Old size: {}, new size: {}", size, std::fs::metadata("temp.gif")?.len());
-            }
-    
+        if !output.status.success() {
+            warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
+        }
+
+        drop(span);
+        
+        if size < std::fs::metadata("temp.gif")?.len() {
+            debug!("Size increased from {} to {}", size, std::fs::metadata("temp.gif")?.len());
+        } else {
+            debug!("Old size: {}, new size: {}", size, std::fs::metadata("temp.gif")?.len());
+
             let output = Command::new("mv")
                 .arg("temp.gif")
                 .arg(&new_full_path)
                 .output()?;
 
             if !output.status.success() {
-                warn!("Failed to optimise gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
-            }
-
-            count += 1;
+                warn!("Failed to moved optimised gif at : {}, with error: {}", full_path, String::from_utf8_lossy(&output.stderr));
+            }        
         }
 
         let output = Command::new("rm")

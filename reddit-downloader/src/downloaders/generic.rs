@@ -4,6 +4,7 @@ use anyhow::{Error, Context};
 use futures_util::StreamExt;
 use tracing::instrument;
 
+#[derive(Clone)]
 pub struct Client<'a> {
     path: &'a str,
     client: reqwest::Client,

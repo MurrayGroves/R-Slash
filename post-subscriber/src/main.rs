@@ -9,7 +9,7 @@ use serenity::{all::EventHandler, async_trait};
 
 use log::{debug, error, info, warn};
 use tarpc::server::incoming::Incoming;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::env;
@@ -31,7 +31,7 @@ use post_subscriber::{Subscriber, Subscription, Bot};
 struct SubscriberServer {
     socket_addr: SocketAddr,
     db: Arc<Mutex<mongodb::Client>>,
-    subscriptions: Arc<Mutex<Vec<Subscription>>>,
+    subscriptions: Arc<RwLock<Vec<Subscription>>>,
     discord_bb: Arc<Http>,
     discord_rs: Arc<Http>,
     redis: redis::aio::MultiplexedConnection,
@@ -58,7 +58,7 @@ impl Subscriber for SubscriberServer {
             Err(e) => return Err(e.to_string())
         };
 
-        self.subscriptions.lock().await.push(subscription);
+        self.subscriptions.write().await.push(subscription);
         Ok(())
     }
 
@@ -81,7 +81,7 @@ impl Subscriber for SubscriberServer {
             Err(e) => return Err(e.to_string())
         
         };
-        self.subscriptions.lock().await.retain(|sub| sub.subreddit != subreddit || sub.channel != channel);
+        self.subscriptions.write().await.retain(|sub| sub.subreddit != subreddit || sub.channel != channel);
         Ok(())
     }
 
@@ -119,7 +119,7 @@ impl Subscriber for SubscriberServer {
     async fn notify(self, _: context::Context, subreddit: String, post_id: String) -> Result<(), String> {
         info!("Notifying subscribers of post {} in subreddit {}", post_id, subreddit);
 
-        let subscriptions = self.subscriptions.lock().await;
+        let subscriptions = self.subscriptions.read().await;
         debug!("Lock acquired, checking subscriptions {:?}", subscriptions);
 
         let filtered = subscriptions.iter().filter(|sub| sub.subreddit == subreddit).collect::<Vec<&Subscription>>();
@@ -190,7 +190,7 @@ impl Subscriber for SubscriberServer {
     }
 
     async fn watched_subreddits(self, _: context::Context) -> Result<HashSet<String>, String> {
-        let subscriptions = self.subscriptions.lock().await;
+        let subscriptions = self.subscriptions.read().await;
         let subreddits: HashSet<String> = subscriptions.iter().map(|sub| sub.subreddit.clone()).collect();
 
         info!("Listing watched subreddits {:?}", subreddits);
@@ -259,7 +259,7 @@ async fn main() {
         subscriptions
     };
 
-    let subscriptions = Arc::new(Mutex::new(existing_subs));
+    let subscriptions = Arc::new(RwLock::new(existing_subs));
 
     let redis_url = env::var("REDIS_URL").expect("REDIS_URL not set");
     let redis_client = redis::Client::open(redis_url).unwrap();
@@ -273,7 +273,7 @@ async fn main() {
 
     let mut listener = tarpc::serde_transport::tcp::listen("0.0.0.0:50051", Bincode::default).await.unwrap();
     listener.config_mut().max_frame_length(usize::MAX);
-    tokio::spawn(listener
+    let handle = tokio::spawn(listener
         // Ignore accept errors.
         .filter_map(|r| future::ready(r.ok()))
         .map(server::BaseChannel::with_defaults)
@@ -304,8 +304,12 @@ async fn main() {
         }
     });
 
-    if let Err(why) = client_rs.start_shard(0, total_shards_rs).await {
-        error!("Client error: {:?}", why);
-    }
-
+    tokio::spawn(async move {
+        if let Err(why) = client_rs.start_shard(0, total_shards_rs).await {
+            error!("Client error: {:?}", why);
+        }
+    });
+    
+    handle.await.expect("Failed to run server");
+    error!("Server stopped!");
 }

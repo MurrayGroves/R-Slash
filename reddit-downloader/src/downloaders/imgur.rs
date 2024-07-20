@@ -5,6 +5,7 @@ use anyhow::{Error, anyhow, Context, Result};
 use futures_util::StreamExt;
 use tracing::instrument;
 
+#[derive(Clone)]
 pub struct Client<'a> {
     path: &'a str,
     client_id: Arc<String>,

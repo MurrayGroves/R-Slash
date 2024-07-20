@@ -4,6 +4,7 @@ use anyhow::Error;
 use dash_mpd::fetch::DashDownloader;
 use tracing::instrument;
 
+#[derive(Clone)]
 pub struct Client<'a> {
     path: &'a str,
     client: reqwest::Client,

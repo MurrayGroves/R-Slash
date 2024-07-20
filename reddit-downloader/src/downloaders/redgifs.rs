@@ -3,8 +3,9 @@ use std::{hash::{Hash, Hasher}, io::Write, sync::Arc};
 use anyhow::{Error, Context, Result};
 use futures::StreamExt;
 use tokio::{io::AsyncWriteExt, sync::RwLock};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, span};
 
+#[derive(Clone)]
 pub struct Client<'a> {
     path: &'a str,
     client: reqwest::Client,
@@ -33,6 +34,7 @@ impl <'a>Client<'a> {
         let mut token_lock = self.token.write().await;
         let token = token_lock.get_token().await?.to_string();
         drop(token_lock);
+
         let resp = self.client.get(&url).header("authorization", format!("Bearer {}", token)).send().await?;
         self.limiter.update_headers(resp.headers(), resp.status()).await?;
 
@@ -47,10 +49,13 @@ impl <'a>Client<'a> {
         let path = format!("{}/{}.mp4", self.path, filename);
         debug!("Downloading {} to {}", download_url, path);
         self.limiter.wait().await;
+
         let req = self.client.get(download_url).send().await?;
+
         self.limiter.update_headers(req.headers(), req.status()).await?;
         let mut file = tokio::fs::File::create(&path).await?;
         let mut stream = req.bytes_stream();
+
         while let Some(item) = stream.next().await {
             let chunk = item?;
             file.write_all(&chunk).await?;
