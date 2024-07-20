@@ -765,21 +765,42 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -
         }
     }
     loop {
-        if do_custom == "true".to_string() {
-            // Populate subreddits with any new subreddit requests
-            let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(-1i64).query_async(&mut con).await.unwrap_or(Vec::new());
-            for subreddit in custom_subreddits {
-                if !subreddits.contains_key(&subreddit) {
-                    let last_fetched: Option<u64> = con.get(&subreddit).await?;
-                    subreddits.insert(subreddit.clone(), SubredditState {
-                        name: subreddit.clone(),
-                        fetched_up_to: None,
-                        last_fetched,
-                        pages_left: 10,
-                        always_fetch: false,
-                        post_list: SubredditPostList::new(subreddit.clone(), con.clone()),
-                    });
+        // Populate subreddits with any new subreddit requests
+        let custom_subreddits: Vec<String> = redis::cmd("LRANGE").arg("custom_subreddits_queue").arg(0i64).arg(-1i64).query_async(&mut con).await.unwrap_or(Vec::new());
+        for subreddit in custom_subreddits {
+            if !subreddits.contains_key(&subreddit) {
+                let last_fetched: Option<u64> = con.get(&subreddit).await?;
+                subreddits.insert(subreddit.clone(), SubredditState {
+                    name: subreddit.clone(),
+                    fetched_up_to: None,
+                    last_fetched,
+                    pages_left: 10,
+                    always_fetch: false,
+                    post_list: SubredditPostList::new(subreddit.clone(), con.clone()),
+                });
+            }
+        }
+
+        match subscriber.watched_subreddits(context::current()).await? {
+            Ok(watched_subreddits) => {
+                for subreddit in watched_subreddits {
+                    if !subreddits.contains_key(&subreddit) {
+                        let last_fetched: Option<u64> = con.get(&subreddit).await?;
+                        subreddits.insert(subreddit.clone(), SubredditState {
+                            name: subreddit.clone(),
+                            fetched_up_to: None,
+                            last_fetched,
+                            pages_left: 10,
+                            always_fetch: false,
+                            post_list: SubredditPostList::new(subreddit.clone(), con.clone()),
+                        });
+                    }
                 }
+            },
+            Err(x) => {
+                let txt = format!("Failed to get watched subreddits: {}", x);
+                error!("{}", txt);
+                sentry::capture_message(&txt, sentry::Level::Error);
             }
         }
 
