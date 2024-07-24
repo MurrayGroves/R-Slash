@@ -211,7 +211,7 @@ impl EventHandler for Handler {
         }
 
         if command == "subscribe" || command == "all" {
-            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@localhost:27018/?tls=false&directConnection=true").await.unwrap();
+            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@discord-bot-shared-mongodb-primary.tail1b5bc.ts.net:27017/?tls=false&directConnection=true").await.unwrap();
             client_options.app_name = Some("rslash-manager".to_string());
 
             let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
@@ -250,6 +250,13 @@ impl EventHandler for Handler {
             }
 
             let _ = Command::create_global_command(&ctx.http, builder.add_option(options)).await;
+        }
+
+        if command == "unsubscribe" || command == "all" {
+            let _ = Command::create_global_command(&ctx.http,
+                CreateCommand::new("unsubscribe")
+                    .description("Unsubscribe from a subreddit, using this command will allow you to select which one")
+            ).await.expect("Failed to register slash commands");
         }
 
 

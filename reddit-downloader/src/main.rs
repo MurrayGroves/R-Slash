@@ -287,9 +287,18 @@ impl SubredditPostList {
         debug!("Setting post as finished: {:?}", id);
         let mut posts = self.posts.write().await;
         debug!("Acquired mutex for setting post as finished: {:?}", id);
-        let post = posts.get_mut(id).unwrap();
-        (*post).finished = true;
-        (*post).failed = false;
+        match posts.get_mut(id) {
+            None => {
+                posts.insert(id.to_string(), PostStatus {
+                    failed: false,
+                    finished: true,
+                });
+            },
+            Some(x) => {
+                (*x).finished = true;
+                (*x).failed = false;
+            }
+        };
 
         let existing_posts: IndexSet<&String> = (*self.existing_posts).iter().collect();
         // Generate list of finished posts including existing posts

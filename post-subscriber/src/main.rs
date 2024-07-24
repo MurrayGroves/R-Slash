@@ -51,6 +51,7 @@ impl Subscriber for SubscriberServer {
             subreddit: subreddit,
             channel: channel,
             bot,
+            added_at: chrono::Utc::now().timestamp()
         };
 
         match coll.insert_one(&subscription, None).await {
@@ -87,7 +88,7 @@ impl Subscriber for SubscriberServer {
 
     // List subscriptions for a channel
     async fn list_subscriptions(self, _: context::Context, channel: u64, bot: Bot) -> Result<Vec<Subscription>, String> {
-        info!("Listing subscriptions");
+        info!("Listing subscriptions for channel {}", channel);
 
         let client = self.db.lock().await;
         let coll: mongodb::Collection<Subscription> = client.database("state").collection("subscriptions");
@@ -140,6 +141,14 @@ impl Subscriber for SubscriberServer {
         };
         debug!("Got post {:?}", post);
 
+        let timestamp: i64 = match redis.hget(&post_id, "timestamp").await {
+            Ok(ts) => ts,
+            Err(e) => {
+                warn!("Failed to get timestamp: {:?}", e);
+                return Err(e.to_string())
+            }
+        };
+
         // Remove the components because we don't want autopost and refresh options in this context
         post.components = None;
 
@@ -148,6 +157,11 @@ impl Subscriber for SubscriberServer {
         debug!("Filtered subscriptions {:?}", filtered);
 
         for sub in filtered {
+            if sub.added_at > timestamp {
+                info!("Skipping notification for post {} in subreddit {} to channel {} because it was added after the post", post_id, subreddit, sub.channel);
+                continue;
+            }
+
             info!("Notifying channel {} of post {} in subreddit {}", sub.channel, post_id, subreddit);
 
             let _ = self.posthog.capture("notify_new_post", json!([("subreddit", &subreddit)]), &sub.channel.to_string()).await;

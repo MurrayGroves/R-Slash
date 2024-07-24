@@ -25,7 +25,8 @@ impl serenity::prelude::TypeMapKey for SubscriberClient {
 pub struct Subscription {
     pub subreddit: String,
     pub channel: u64,
-    pub bot: Bot
+    pub bot: Bot,
+    pub added_at: i64
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

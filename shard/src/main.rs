@@ -1,6 +1,6 @@
 use log::trace;
 use post_subscriber::{Bot, SubscriberClient};
-use serenity::all::{ActionRowComponent, AutocompleteChoice, ButtonStyle, CreateAutocompleteResponse, CreateButton, InputTextStyle};
+use serenity::all::{ActionRowComponent, AutocompleteChoice, ButtonStyle, CreateAutocompleteResponse, CreateButton, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
 use stubborn_io::{ReconnectOptions, StubbornTcpStream};
@@ -51,6 +51,7 @@ use memberships::*;
 use connection_pooler::ResourceManager;
 
 mod poster;
+mod component_handlers;
 
 use rslash_types::AutoPostCommand;
 use rslash_types::ConfigStruct;
@@ -168,7 +169,7 @@ fn error_response(code: String) -> InteractionResponse {
         file: None,
         embed: Some(embed),
         content: None,
-        ephemeral: false,
+        ephemeral: true,
         components: None,
         fallback: ResponseFallbackMethod::Followup,
     }
@@ -348,6 +349,30 @@ async fn info<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &se
 }
 
 
+async fn subscribe_custom<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
+    {
+        let data_lock = ctx.data.read().await;
+        let mongodb_manager = data_lock.get::<ResourceManager<mongodb::Client>>().ok_or(anyhow!("Mongodb client manager not found"))?.clone();
+        let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
+        let mut mongodb_client = mongodb_client_mutex.lock().await;
+
+
+        let membership = get_user_tiers(command.user.id.get().to_string(), &mut *mongodb_client, Some(parent_tx)).await;
+        if !membership.bronze.active {
+            return Ok(InteractionResponse {
+                embed: Some(CreateEmbed::default()
+                    .title("Premium Feature")
+                    .description("You must have premium in order to use this command.
+                    Get it [here](https://ko-fi.com/rslash)")
+                    .color(0xff0000).to_owned()
+                ),
+                ..Default::default()
+            });
+        }
+    }
+    subscribe(command, ctx, parent_tx).await
+}
+
 async fn subscribe<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
     if let Some(member) = &command.member {
         if !member.permissions(&ctx).unwrap().manage_messages() {
@@ -381,6 +406,8 @@ async fn subscribe<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx
     client.register_subscription(context::current(), subreddit.clone(), command.channel_id.get(), bot).await?;
     tx.finish();
 
+    capture_event(ctx.data.clone(), "subscribe_subreddit", Some(parent_tx), Some(HashMap::from([("subreddit", subreddit.clone())])), &command.user.id.get().to_string()).await;
+
     return Ok(InteractionResponse {
         embed: Some(CreateEmbed::default()
             .title("Subscribed")
@@ -397,19 +424,13 @@ async fn unsubscribe<'a>(command: &'a CommandInteraction, ctx: &Context, parent_
             return Ok(InteractionResponse {
                 embed: Some(CreateEmbed::default()
                     .title("Permission Error")
-                    .description("You must have the 'Manage Messages' permission to setup a subscription.")
+                    .description("You must have the 'Manage Messages' permission to manage subscriptions.")
                     .color(0xff0000).to_owned()
                 ),
                 ..Default::default()
             });
         }
     }
-
-    let options = &command.data.options;
-    debug!("Command Options: {:?}", options);
-
-    let subreddit = options[0].value.clone();
-    let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
 
     let data_lock = ctx.data.read().await;
     let client = data_lock.get::<SubscriberClient>().ok_or(anyhow!("Subscriber client not found"))?.clone();
@@ -420,16 +441,37 @@ async fn unsubscribe<'a>(command: &'a CommandInteraction, ctx: &Context, parent_
         _ => Bot::RS,
     };
 
-    let tx = parent_tx.start_child("unsubscribe_call", "unsubscribe");
-    client.delete_subscription(context::current(), subreddit.clone(), command.channel_id.get(), bot).await?;
-    tx.finish();
+    let subreddits = match client.list_subscriptions(context::current(), command.channel_id.get(), bot).await? {
+        Ok(x) => x,
+        Err(_) => {
+            return Err(anyhow!("Error getting subscriptions"));
+        }
+    };
+
+    if subreddits.len() == 0 {
+        return Ok(InteractionResponse {
+            embed: Some(CreateEmbed::default()
+                .title("No Subscriptions")
+                .description("This channel has no subscriptions.")
+                .color(0xff0000).to_owned()
+            ),
+            ephemeral: true,    
+            ..Default::default()
+        });
+    }
+
+    let menu = CreateSelectMenu::new(json!({"command": "unsubscribe"}).to_string(), CreateSelectMenuKind::String {
+        options: subreddits.into_iter().map(|x| CreateSelectMenuOption::new("r/".to_owned() + &x.subreddit, x.subreddit)).collect(),
+    })
+        .placeholder("Select a subreddit to unsubscribe from")
+        .min_values(1)
+        .max_values(1);
+
+    let components = vec![CreateActionRow::SelectMenu(menu)];
 
     return Ok(InteractionResponse {
-        embed: Some(CreateEmbed::default()
-            .title("Unsubscribed")
-            .description(format!("This channel has been unsubscribed from r/{}", subreddit))
-            .color(0x00ff00).to_owned()
-        ),
+        ephemeral: true,
+        components: Some(components),
         ..Default::default()
     });
 }
@@ -500,6 +542,13 @@ async fn get_command_response<'a>(command: &'a CommandInteraction, ctx: &'a Cont
         "subscribe" => {
             let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_subscribe"));
             let resp = subscribe(&command, &ctx, &cmd_tx).await;
+            cmd_tx.finish();
+            resp
+        },
+
+        "subscribe_custom" => {
+            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_subscribe_custom"));
+            let resp = subscribe_custom(&command, &ctx, &cmd_tx).await;
             cmd_tx.finish();
             resp
         },
@@ -809,7 +858,7 @@ impl EventHandler for Handler {
                     let max_length = match is_premium {
                         true => 100,
                         false => 2,
-                    };
+                    };  
 
                     let components = vec![
                         CreateActionRow::InputText(
@@ -822,7 +871,7 @@ impl EventHandler for Handler {
 
                         CreateActionRow::InputText(
                             CreateInputText::new(InputTextStyle::Short, "Limit", "limit")
-                            .label("Times to post e.g. 10")
+                            .label("Times to post before stopping e.g. 10")
                             .placeholder("Can be \"infinite\" if you have premium")
                             .min_length(1)
                             .max_length(max_length)
@@ -884,8 +933,11 @@ impl EventHandler for Handler {
                     };
                     capture_event(ctx.data.clone(), "autopost_cancel", Some(&component_tx), None, &format!("channel_{}", &command.channel.clone().unwrap().id.get().to_string())).await;
                     None
-                }
-
+                },
+                "unsubscribe" => {
+                    Some(component_handlers::unsubscribe(&ctx, &command).await)
+                },
+                
                 _ => {
                     warn!("Unknown button command: {}", button_command);
                     return;
@@ -1431,6 +1483,8 @@ async fn main() {
         .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
         let tcp_stream = StubbornTcpStream::connect_with_options("post-subscriber.discord-bot-shared.svc.cluster.local:50051", reconnect_opts).await.expect("Failed to connect to post subscriber");
         let transport = Transport::from((tcp_stream, Bincode::default()));
+        
+        
 
         let subscriber = post_subscriber::SubscriberClient::new(tarpc::client::Config::default(), transport).spawn();
 
