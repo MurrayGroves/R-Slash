@@ -38,6 +38,7 @@ use tokio::sync::Mutex;
 
 use redis::{self, FromRedisValue};
 use redis::{AsyncCommands, from_redis_value};
+
 use mongodb::options::ClientOptions;
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
