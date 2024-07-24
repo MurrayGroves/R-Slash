@@ -169,7 +169,7 @@ impl EventHandler for Handler {
         }
 
         if command == "get" || command == "all" {
-            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@localhost:27018/?tls=false&directConnection=true").await.unwrap();
+            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@100.97.36.37:27017/?tls=false&directConnection=true").await.unwrap();
             client_options.app_name = Some("rslash-manager".to_string());
 
             let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
@@ -211,7 +211,7 @@ impl EventHandler for Handler {
         }
 
         if command == "subscribe" || command == "all" {
-            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@discord-bot-shared-mongodb-primary.tail1b5bc.ts.net:27017/?tls=false&directConnection=true").await.unwrap();
+            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@100.97.36.37:27017/?tls=false&directConnection=true").await.unwrap();
             client_options.app_name = Some("rslash-manager".to_string());
 
             let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
@@ -267,17 +267,11 @@ impl EventHandler for Handler {
             ).await.expect("Failed to register slash commands");
         }
 
-        if command == "ping" || command == "all" {
-            let _ = Command::create_global_command(&ctx.http, 
-                CreateCommand::new("ping")
-                    .description("Basic command to check if the bot is online")
-            ).await.expect("Failed to register slash command");
-        }
 
         if command == "support" || command == "all" {
             let _ = Command::create_global_command(&ctx.http,
                 CreateCommand::new("support")
-                    .description("Get help with the bot.")
+                        .description("Get help with the bot.")
             ).await.expect("Failed to register slash command");
         }
 

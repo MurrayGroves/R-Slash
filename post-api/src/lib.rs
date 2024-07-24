@@ -19,6 +19,20 @@ fn get_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn redis_sanitise(input: &str) -> String {
+    let special = vec![
+        ",", ".", "<", ">", "{", "}", "[", "]", "\"", "'", ":", ";", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "-", "+", "=", "~"
+    ];
+
+    let mut output = input.to_string();
+    for s in special {
+        output = output.replace(s, &("\\".to_owned() + s));
+    }
+
+    output
+}
+
+
 #[instrument(skip(con, parent_tx))]
 pub async fn get_length_of_search_results(search_index: String, search: String, con: &mut redis::aio::MultiplexedConnection, parent_tx: Option<&sentry::TransactionOrSpan>) -> Result<u16, anyhow::Error> {
     let span: sentry::TransactionOrSpan = match &parent_tx {
@@ -43,7 +57,7 @@ pub async fn get_length_of_search_results(search_index: String, search: String, 
     debug!("Getting length of search results for {} in {}", new_search, search_index);
     let results: Vec<u16> = redis::cmd("FT.SEARCH")
         .arg(search_index)
-        .arg(new_search)
+        .arg(redis_sanitise(&new_search))
         .arg("LIMIT")
         .arg(0) // Return no results, just number of results
         .arg(0)
@@ -81,7 +95,7 @@ pub async fn get_post_at_search_index(search_index: String, search: &str, index:
 
     let results: Vec<redis::Value> = redis::cmd("FT.SEARCH")
         .arg(search_index)
-        .arg(new_search)
+        .arg(redis_sanitise(&new_search))
         .arg("LIMIT")
         .arg(index)
         .arg(1)

@@ -70,7 +70,7 @@ impl Subscriber for SubscriberServer {
 
         let client = self.db.lock().await;
         let coll: mongodb::Collection<Subscription> = client.database("state").collection("subscriptions");
-
+        
         let filter = doc! {
             "subreddit": &subreddit,
             "channel": channel as i64,
@@ -141,7 +141,7 @@ impl Subscriber for SubscriberServer {
         };
         debug!("Got post {:?}", post);
 
-        let timestamp: i64 = match redis.hget(&post_id, "timestamp").await {
+        let timestamp: i64 = match redis.hget(format!("subreddit:{}:post:{}", subreddit, &post_id), "timestamp").await {
             Ok(ts) => ts,
             Err(e) => {
                 warn!("Failed to get timestamp: {:?}", e);
@@ -204,6 +204,7 @@ impl Subscriber for SubscriberServer {
     }
 
     async fn watched_subreddits(self, _: context::Context) -> Result<HashSet<String>, String> {
+        info!("Listing watched subreddits");
         let subscriptions = self.subscriptions.read().await;
         let subreddits: HashSet<String> = subscriptions.iter().map(|sub| sub.subreddit.clone()).collect();
 
@@ -303,10 +304,13 @@ async fn main() {
                 redis: redis.clone(),
                 posthog: posthog_client.clone()
             };
-            channel.execute(server.serve()).for_each(spawn)
+            channel.execute(server.serve()).for_each({
+                debug!("received connection");
+                spawn
+            })
         })
         // Max 10 channels.
-        .buffer_unordered(10)
+        .buffer_unordered(99999999)
         .for_each(|_| async {})
     );
 

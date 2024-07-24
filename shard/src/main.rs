@@ -68,6 +68,19 @@ fn get_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn redis_sanitise(input: &str) -> String {
+    let special = vec![
+        ",", ".", "<", ">", "{", "}", "[", "]", "\"", "'", ":", ";", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "-", "+", "=", "~"
+    ];
+
+    let mut output = input.to_string();
+    for s in special {
+        output = output.replace(s, &("\\".to_owned() + s));
+    }
+
+    output
+}
+
 #[instrument(skip(data, parent_tx))]
 async fn capture_event(data: Arc<RwLock<TypeMap>>, event: &str, parent_tx: Option<&sentry::TransactionOrSpan>, properties: Option<HashMap<&str, String>>, distinct_id: &str) {
     let span: sentry::TransactionOrSpan = match parent_tx {
@@ -442,6 +455,8 @@ async fn unsubscribe<'a>(command: &'a CommandInteraction, ctx: &Context, parent_
         _ => Bot::RS,
     };
 
+    debug!("Deadline: {:?}", context::current().deadline);
+    debug!("Now: {:?}", SystemTime::now());
     let subreddits = match client.list_subscriptions(context::current(), command.channel_id.get(), bot).await? {
         Ok(x) => x,
         Err(_) => {
@@ -1322,7 +1337,7 @@ impl EventHandler for Handler {
             debug!("Getting autocomplete results for {:?}", search);
             let results: Vec<redis::Value> = match redis::cmd("FT.SEARCH")
                 .arg(format!("{}_subs", selector))
-                .arg(format!("*{}*", search))
+                .arg(format!("*{}*", redis_sanitise(&search)))
                 .arg("LIMIT")
                 .arg(0)
                 .arg(10)
@@ -1334,23 +1349,21 @@ impl EventHandler for Handler {
                     }
             };
 
-            let mut skip_first = true;
             let mut option_names = Vec::new();
-            let mut skip = true;
             for result in results {
-                if skip_first {
-                    skip_first = false;
+                if let redis::Value::Int(_) = result {
                     continue
                 }
 
-                if skip {
-                    skip = false;
-                    continue;
+                if let Ok(x) = String::from_redis_value(&result) {
+                    if x.starts_with("custom_sub") {
+                        continue;
+                    }
                 }
 
                 let result: Vec<redis::Value> = match result.into_sequence() {
                     Ok(x) => x,
-                    Err(e) => {
+                    Err(e) => { 
                         error!("Error getting autocomplete result: {:?}", e);
                         continue;
                     }
@@ -1364,6 +1377,8 @@ impl EventHandler for Handler {
                 };
                 option_names.push(name);
             }
+
+            debug!("Autocomplete results: {:?}", option_names);
 
             let resp = CreateAutocompleteResponse::new()
                 .set_choices(option_names.into_iter().map(|x| AutocompleteChoice::new(x.clone(), x)).collect());
@@ -1485,8 +1500,6 @@ async fn main() {
         let tcp_stream = StubbornTcpStream::connect_with_options("post-subscriber.discord-bot-shared.svc.cluster.local:50051", reconnect_opts).await.expect("Failed to connect to post subscriber");
         let transport = Transport::from((tcp_stream, Bincode::default()));
         
-        
-
         let subscriber = post_subscriber::SubscriberClient::new(tarpc::client::Config::default(), transport).spawn();
 
         data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
