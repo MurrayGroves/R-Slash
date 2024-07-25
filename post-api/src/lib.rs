@@ -43,24 +43,17 @@ pub async fn get_length_of_search_results(search_index: String, search: String, 
         }
     };
 
-    let mut new_search = String::new();
-    for c in search.chars() {
-        if c.is_whitespace() && c != ' ' && c != '_' {
-            new_search.push('\\');
-            new_search.push(c);
-        }
-        else {
-            new_search.push(c);
-        }
-    }
+    let new_search = format!("w'*{}*'", redis_sanitise(&search));
 
     debug!("Getting length of search results for {} in {}", new_search, search_index);
     let results: Vec<u16> = redis::cmd("FT.SEARCH")
         .arg(search_index)
-        .arg(redis_sanitise(&new_search))
+        .arg(&new_search)
         .arg("LIMIT")
         .arg(0) // Return no results, just number of results
         .arg(0)
+        .arg("DIALECT")
+        .arg(2)
         .query_async(con).await?;
 
     span.finish();
@@ -79,29 +72,21 @@ pub async fn get_post_at_search_index(search_index: String, search: &str, index:
         }
     };
 
-    let mut new_search = String::new();
-    for c in search.chars() {
-        if c.is_whitespace() && c != ' ' && c != '_' {
-            new_search.push('\\');
-            new_search.push(c);
-        }
-        else {
-            new_search.push(c);
-        }
-    }
-
+    let new_search = format!("w'*{}*'", redis_sanitise(&search));
 
     debug!("Getting post at index {} in search results for {}", index, new_search);
 
     let results: Vec<redis::Value> = redis::cmd("FT.SEARCH")
         .arg(search_index)
-        .arg(redis_sanitise(&new_search))
+        .arg(&new_search)
         .arg("LIMIT")
         .arg(index)
         .arg(1)
         .arg("SORTBY")
         .arg("score")
         .arg("NOCONTENT") // Only show POST IDs not post content
+        .arg("DIALECT")
+        .arg(2)
         .query_async(con).await?;
 
     let to_return = from_redis_value::<String>(&results[1])?;
@@ -312,8 +297,7 @@ pub async fn get_subreddit_search<'a>(subreddit: String, search: String, con: &m
         }
     };
 
-    let mut search = search.replace('"', "\\");
-    search = search.replace(":", "\\:");
+    debug!("Getting post for search: {} in subreddit: {}", search, subreddit);
 
     let mut index: u16 = con.incr(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 1i16).await?;
     let _:() = con.expire(format!("subreddit:{}:search:{}:channels:{}:index", &subreddit, &search, channel), 60*60).await?;

@@ -30,6 +30,7 @@ async-recursion = "*"
 url = "*"
 tarpc = {version="*", features = ["serde-transport", "tcp", "serde-transport-bincode"]}
 stubborn-io = "*"
+sentry-anyhow = "*"
 
 posthog = {path = "../posthog"}
 memberships = {path = "../memberships"}

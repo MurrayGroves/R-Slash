@@ -47,6 +47,7 @@ use serenity::model::guild::{Guild, UnavailableGuild};
 use serenity::model::application::{Interaction, CommandInteraction};
 
 use anyhow::{anyhow, Error};
+use sentry_anyhow::capture_anyhow;
 
 use memberships::*;
 use connection_pooler::ResourceManager;
@@ -679,6 +680,8 @@ impl EventHandler for Handler {
             let command_response = match command_response {
                 Ok(embed) => embed,
                 Err(why) => {
+                    capture_anyhow(&why);
+
                     let why = why.to_string();
                     let code = rand::thread_rng().gen_range(0..10000);
 
@@ -1325,8 +1328,7 @@ impl EventHandler for Handler {
             let conf = data_read.get::<ConfigStruct>().unwrap();
             let mut con = conf.redis.clone();
 
-            let mut search = subreddit.replace('"', "\\");
-            search = search.replace(":", "\\:");        
+            let search = subreddit.replace(' ', "");
 
             let selector = if ctx.cache.current_user().id.get() == 278550142356029441 {
                 "nsfw"
@@ -1541,7 +1543,7 @@ async fn main() {
                 _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
             };
 
-            if (!md.target().contains("discord_shard")) || md.name().contains("serenity") || md.target().contains("serenity") {
+            if (!md.target().contains("discord_shard") && !md.target().contains("post_api")) || md.name().contains("serenity") || md.target().contains("serenity") {
                 return sentry::integrations::tracing::EventFilter::Ignore;
             } else {
                 return level_filter;
@@ -1549,7 +1551,7 @@ async fn main() {
 
         }))
         .with(tracing_subscriber::fmt::layer().compact().with_ansi(false).with_filter(tracing_subscriber::filter::LevelFilter::DEBUG).with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
-            if !meta.target().contains("discord_shard") || meta.name().contains("serenity") {
+            if (!meta.target().contains("discord_shard") && !meta.target().contains("post_api"))|| meta.name().contains("serenity") {
                 return false;
             };
             true

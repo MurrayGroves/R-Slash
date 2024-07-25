@@ -196,6 +196,12 @@ impl EventHandler for Handler {
                 "The subreddit to get a post from",
             ).required(true);
 
+            let search = CreateCommandOption::new(
+                CommandOptionType::String,
+                "search",
+                "Search by title"
+            );
+
             if nsfw {
                 for subreddit in &nsfw_subreddits {
                     options = options.add_string_choice(subreddit.to_string(), subreddit.to_string());
@@ -207,7 +213,7 @@ impl EventHandler for Handler {
                 }
             }
 
-            let _ = Command::create_global_command(&ctx.http, builder.add_option(options)).await;
+            let _ = Command::create_global_command(&ctx.http, builder.add_option(options).add_option(search)).await;
         }
 
         if command == "subscribe" || command == "all" {
