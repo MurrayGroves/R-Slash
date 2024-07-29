@@ -162,7 +162,7 @@ impl EventHandler for Handler {
             let id = serenity::model::id::CommandId::from(command);
             serenity::model::application::Command::delete_global_command(&ctx.http, id).await.expect("Failed to delete command");
         }
-
+        
         if command == "ping_delete" {
             let id = serenity::model::id::CommandId::from(1053326533651071067);
             Command::delete_global_command(&ctx.http, id).await.expect("Failed to delete command");

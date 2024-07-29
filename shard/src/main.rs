@@ -46,7 +46,7 @@ use mongodb::options::FindOptions;
 use serenity::model::guild::{Guild, UnavailableGuild};
 use serenity::model::application::{Interaction, CommandInteraction};
 
-use anyhow::{anyhow, Error};
+use anyhow::{anyhow, bail, Error};
 use sentry_anyhow::capture_anyhow;
 
 use memberships::*;
@@ -78,6 +78,8 @@ fn redis_sanitise(input: &str) -> String {
     for s in special {
         output = output.replace(s, &("\\".to_owned() + s));
     }
+
+    output = output.trim().to_string();
 
     output
 }
@@ -418,7 +420,21 @@ async fn subscribe<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx
     };
 
     let tx = parent_tx.start_child("subscribe_call", "subscribe");
-    client.register_subscription(context::current(), subreddit.clone(), command.channel_id.get(), bot).await?;
+    if let Err(x) = client.register_subscription(context::current(), subreddit.clone(), command.channel_id.get(), bot).await {
+        tx.finish();
+        if format!("{}", x).contains("Already subscribed") {
+            return Ok(InteractionResponse {
+                embed: Some(CreateEmbed::default()
+                    .title("Already Subscribed")
+                    .description(format!("This channel is already subscribed to r/{}", subreddit))
+                    .color(0xff0000).to_owned()
+                ),
+                ..Default::default()
+            });
+        } else {
+            bail!(x);
+        }
+    };
     tx.finish();
 
     capture_event(ctx.data.clone(), "subscribe_subreddit", Some(parent_tx), Some(HashMap::from([("subreddit", subreddit.clone())])), &command.user.id.get().to_string()).await;
@@ -784,6 +800,9 @@ impl EventHandler for Handler {
 
                                 ResponseFallbackMethod::None => {}
                             };
+                        } else {
+                            error!("Cannot respond to slash command: {}", e);
+                            sentry::capture_error(&e);
                         }
                     }
 
@@ -1318,7 +1337,7 @@ impl EventHandler for Handler {
                 }
             };
 
-            if subreddit.len() < 2 {
+            if redis_sanitise(&subreddit).len() < 2 {
                 return;
             }
 

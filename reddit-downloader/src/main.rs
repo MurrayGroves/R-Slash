@@ -813,10 +813,6 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -
             }
         }
 
-        if subreddits.len() > 0 {
-            debug!("Subreddits: {:?}", subreddits);
-        }
-
         let mut next_subreddit = None;
 
         // If there's a subreddit that hasn't been fetched yet, make that the next one
@@ -871,11 +867,18 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue<'_>>>>) -
             // Fetch a page and update state
             let subreddit_state = subreddits.get_mut(&subreddit).unwrap();
             let fetched_up_to = &subreddit_state.fetched_up_to;
-            subreddit_state.fetched_up_to = get_subreddit(
+            subreddit_state.fetched_up_to = match get_subreddit(
                 subreddit.clone(), &mut con, &web_client, reddit_client.clone(), reddit_secret.clone(),
                 None, fetched_up_to.clone(), Some(1), downloaders_client.clone(), subscriber.clone(),
                 subreddit_state.post_list.clone()
-            ).await?;
+            ).await {
+                Ok(x) => x,
+                Err(x) => {
+                    let txt = format!("Failed to get subreddit: {}", x);
+                    error!("{}", txt);
+                    continue;
+                }
+            };
 
             subreddit_state.last_fetched = Some(get_epoch_ms()?);
             subreddit_state.pages_left -= 1;

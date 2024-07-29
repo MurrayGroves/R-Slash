@@ -42,7 +42,12 @@ impl Subscriber for SubscriberServer {
     async fn register_subscription(self, _: context::Context, subreddit: String, channel: u64, bot: Bot) -> Result<(), String> {
         info!("Registering subscription for subreddit {} to channel {}", subreddit, channel);
 
-        let _ = self.posthog.capture("subscription_create", json!([("subreddit", &subreddit)]), &channel.to_string()).await;
+        // If this channel is already subscribed to this subreddit, return an error
+        let subscriptions = self.subscriptions.read().await;
+        if subscriptions.iter().any(|sub| sub.subreddit == subreddit && sub.channel == channel) {
+            return Err("Already subscribed".to_string());
+        }
+        drop(subscriptions);
 
         let client = self.db.lock().await;
         let coll: mongodb::Collection<Subscription> = client.database("state").collection("subscriptions");
@@ -65,8 +70,6 @@ impl Subscriber for SubscriberServer {
 
     async fn delete_subscription(self, _: context::Context, subreddit: String, channel: u64, bot: Bot) -> Result<(), String> {
         info!("Deleting subscription for subreddit {} to channel {}", subreddit, channel);
-
-        let _ = self.posthog.capture("subscription_delete", json!([("subreddit", &subreddit)]), &channel.to_string()).await;
 
         let client = self.db.lock().await;
         let coll: mongodb::Collection<Subscription> = client.database("state").collection("subscriptions");

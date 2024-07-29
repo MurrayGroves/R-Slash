@@ -29,6 +29,8 @@ fn redis_sanitise(input: &str) -> String {
         output = output.replace(s, &("\\".to_owned() + s));
     }
 
+    output = output.replace("\n", " ");
+
     output
 }
 
