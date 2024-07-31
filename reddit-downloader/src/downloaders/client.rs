@@ -106,6 +106,9 @@ impl Limiter {
     // Update the rate limit based on the headers from the last request
     pub async fn update_headers(&self, headers: &reqwest::header::HeaderMap, status: StatusCode) -> Result<(), Error>{
         let mut state = self.state.lock().await;
+
+        debug!("Updating rate limit headers: {:?}", headers);
+
         if let Some(per_minute) = self.per_minute {
             if state.remaining != 0 {state.remaining -= 1};
             if state.reset < chrono::Utc::now().timestamp() {

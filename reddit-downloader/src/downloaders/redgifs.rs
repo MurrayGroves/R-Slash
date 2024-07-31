@@ -24,8 +24,13 @@ impl <'a>Client<'a> {
     }
     
     #[instrument(skip(self))]
-    pub async fn request(&self, url: &str, filename: &str) -> Result<String, Error> {
+    pub async fn request(&self, mut url: &str, filename: &str) -> Result<String, Error> {
         self.limiter.wait().await;
+
+        // Remove trailing slash
+        if url.ends_with("/") {
+            url = &url[..url.len() - 1];
+        }
 
         let mut id = url.split("/").last().ok_or(Error::msg("No ID in url"))?;
         id = id.split(".").next().ok_or(Error::msg("No ID in url"))?;

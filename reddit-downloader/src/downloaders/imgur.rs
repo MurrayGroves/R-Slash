@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use anyhow::{Error, anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Error, Result};
 
 use futures_util::StreamExt;
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 #[derive(Clone)]
 pub struct Client<'a> {
@@ -38,6 +38,7 @@ impl <'a>Client<'a> {
             .json::<serde_json::Value>()
             .await.context("failed json decode when requesting gallery")?;
 
+        debug!("Imgur gallery response: {:?}", response);
         Ok(response["data"]["images"][0]["link"].as_str().ok_or(Error::msg("Failed to extract image link from Imgur response"))?.to_string())
     }
 
@@ -53,7 +54,13 @@ impl <'a>Client<'a> {
         self.limiter.update_headers(response.headers(), response.status()).await?;
 
         let txt = response.text().await?;
-        let json = serde_json::from_str::<serde_json::Value>(&txt).context(txt)?;
+        let json = match serde_json::from_str::<serde_json::Value>(&txt) {
+            Ok(json) => json,
+            Err(e) => {
+                debug!("Imgur album response: {}", txt);
+                bail!(e);
+            }
+        };
 
         Ok(json["data"]["images"][0]["link"].as_str().ok_or(Error::msg("Failed to extract image link from Imgur response"))?.to_string())
     }
@@ -62,7 +69,9 @@ impl <'a>Client<'a> {
     async fn request_image(&self, id: &str) -> Result<String, Error> {
         self.limiter.wait().await;
         let gif = format!("https://i.imgur.com/{}.gif", id);
-        let head = self.client.head(&gif).send().await?;
+        let head = self.client.head(&gif)
+            .header("Authorization", format!("Client-ID {}", self.client_id))
+            .send().await?;
         self.limiter.update_headers(head.headers(), head.status()).await?;
 
         if head.headers().get("Content-Type").ok_or(Error::msg("Failed to get content type"))?.to_str()? == "image/gif" {
@@ -70,7 +79,9 @@ impl <'a>Client<'a> {
         }
 
         let mp4 = format!("https://i.imgur.com/{}.mp4", id);
-        let exists = self.client.head(&mp4).send().await?.status().is_success();
+        let exists = self.client.head(&mp4)
+            .header("Authorization", format!("Client-ID {}", self.client_id))
+            .send().await?.status().is_success();
         if exists {
             return Ok(mp4);
         }
@@ -81,9 +92,15 @@ impl <'a>Client<'a> {
 
     /// Download a single image from a url, and return the path to the image, or URL if no conversion is needed
     #[instrument(skip(self))]
-    pub async fn request(&self, url: &str) -> Result<String, Error> {
+    pub async fn request(&self, mut url: &str) -> Result<String, Error> {
+        if url.ends_with("/") {
+            url = &url[..url.len() - 1];
+        }
+
         let id = url.split("/").last().ok_or(Error::msg("Failed to extract imgur ID"))?
         .split(".").next().ok_or(Error::msg("Failed to extract imgur ID"))?;
+
+        let id = id.split("-").last().ok_or(anyhow!("Failed to extract imgur ID"))?;
 
         let download_url = if url.contains("/gallery/") {
             self.request_gallery(id).await?
