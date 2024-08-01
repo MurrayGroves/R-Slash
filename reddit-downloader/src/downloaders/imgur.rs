@@ -13,82 +13,125 @@ pub struct Client<'a> {
     limiter: super::client::Limiter,
 }
 
-impl <'a>Client<'a> {
+impl<'a> Client<'a> {
     pub fn new(path: &'a str, client_id: Arc<String>, limiter: super::client::Limiter) -> Self {
         Self {
             path,
-            client_id: client_id,
+            client_id,
             client: reqwest::Client::new(),
-            limiter: limiter,
+            limiter,
         }
     }
-    
+
     #[instrument(skip(self))]
     async fn request_gallery(&self, id: &str) -> Result<String, Error> {
         self.limiter.wait().await;
 
-        let response = self.client.get(&format!("https://api.imgur.com/3/gallery/{}", id))
+        let response = self
+            .client
+            .get(&format!("https://api.imgur.com/3/gallery/{}", id))
             .header("Authorization", format!("Client-ID {}", self.client_id))
             .send()
             .await?;
 
-        self.limiter.update_headers(response.headers(), response.status()).await?;
+        self.limiter
+            .update_headers(response.headers(), response.status())
+            .await?;
+
+        if response.status() == 404 {
+            bail!("Deleted")
+        }
 
         let response = response
             .json::<serde_json::Value>()
-            .await.context("failed json decode when requesting gallery")?;
+            .await
+            .context("failed json decode when requesting gallery")?;
 
         debug!("Imgur gallery response: {:?}", response);
-        Ok(response["data"]["images"][0]["link"].as_str().ok_or(Error::msg("Failed to extract image link from Imgur response"))?.to_string())
+        Ok(response["data"]["images"][0]["link"]
+            .as_str()
+            .ok_or(Error::msg(
+                "Failed to extract image link from Imgur response",
+            ))?
+            .to_string())
     }
 
     #[instrument(skip(self))]
     async fn request_album(&self, id: &str) -> Result<String, Error> {
         self.limiter.wait().await;
 
-        let response = self.client.get(&format!("https://api.imgur.com/3/album/{}", id))
+        let response = self
+            .client
+            .get(&format!("https://api.imgur.com/3/album/{}", id))
             .header("Authorization", format!("Client-ID {}", self.client_id))
             .send()
             .await?;
 
-        self.limiter.update_headers(response.headers(), response.status()).await?;
+        self.limiter
+            .update_headers(response.headers(), response.status())
+            .await?;
+
+        if response.status() == 404 {
+            bail!("Deleted")
+        }
 
         let txt = response.text().await?;
         let json = match serde_json::from_str::<serde_json::Value>(&txt) {
             Ok(json) => json,
             Err(e) => {
-                debug!("Imgur album response: {}", txt);
+                debug!("Imgur album response for id {}: {}", id, txt);
                 bail!(e);
             }
         };
 
-        Ok(json["data"]["images"][0]["link"].as_str().ok_or(Error::msg("Failed to extract image link from Imgur response"))?.to_string())
+        Ok(json["data"]["images"][0]["link"]
+            .as_str()
+            .ok_or(Error::msg(
+                "Failed to extract image link from Imgur response",
+            ))?
+            .to_string())
     }
 
     #[instrument(skip(self))]
     async fn request_image(&self, id: &str) -> Result<String, Error> {
         self.limiter.wait().await;
         let gif = format!("https://i.imgur.com/{}.gif", id);
-        let head = self.client.head(&gif)
+        let head = self
+            .client
+            .head(&gif)
             .header("Authorization", format!("Client-ID {}", self.client_id))
-            .send().await?;
-        self.limiter.update_headers(head.headers(), head.status()).await?;
+            .send()
+            .await?;
 
-        if head.headers().get("Content-Type").ok_or(Error::msg("Failed to get content type"))?.to_str()? == "image/gif" {
+        self.limiter
+            .update_headers(head.headers(), head.status())
+            .await?;
+
+        if head
+            .headers()
+            .get("Content-Type")
+            .ok_or(Error::msg("Failed to get content type"))?
+            .to_str()?
+            == "image/gif"
+        {
             return Ok(gif);
         }
 
         let mp4 = format!("https://i.imgur.com/{}.mp4", id);
-        let exists = self.client.head(&mp4)
+        let exists = self
+            .client
+            .head(&mp4)
             .header("Authorization", format!("Client-ID {}", self.client_id))
-            .send().await?.status().is_success();
+            .send()
+            .await?
+            .status()
+            .is_success();
         if exists {
             return Ok(mp4);
         }
 
         Ok(format!("https://i.imgur.com/{}.jpg", id))
     }
-
 
     /// Download a single image from a url, and return the path to the image, or URL if no conversion is needed
     #[instrument(skip(self))]
@@ -97,25 +140,40 @@ impl <'a>Client<'a> {
             url = &url[..url.len() - 1];
         }
 
-        let id = url.split("/").last().ok_or(Error::msg("Failed to extract imgur ID"))?
-        .split(".").next().ok_or(Error::msg("Failed to extract imgur ID"))?;
+        let id = url
+            .split("/")
+            .last()
+            .ok_or(Error::msg("Failed to extract imgur ID"))?
+            .split(".")
+            .next()
+            .ok_or(Error::msg("Failed to extract imgur ID"))?;
 
-        let id = id.split("-").last().ok_or(anyhow!("Failed to extract imgur ID"))?;
+        let id = id
+            .split("-")
+            .last()
+            .ok_or(anyhow!("Failed to extract imgur ID"))?;
 
-        let download_url = if url.contains("/gallery/") {
-            self.request_gallery(id).await?
-        } else if url.contains("/a/") || url.contains("/album/") {
+        let download_url = if url.contains("/a/") || url.contains("/album/") {
             self.request_album(id).await?
+        } else if url.contains("/gallery/") {
+            self.request_gallery(id).await?
         } else {
             self.request_image(id).await?
         };
 
         // JPGs, PNGs and GIFs dont need to be converted
-        if download_url.ends_with(".jpg") || download_url.ends_with(".png") || download_url.ends_with(".gif") {
+        if download_url.ends_with(".jpg")
+            || download_url.ends_with(".png")
+            || download_url.ends_with(".gif")
+        {
             return Ok(download_url);
         }
 
+        self.limiter.wait().await;
         let resp = self.client.get(&download_url).send().await?;
+        self.limiter
+            .update_headers(resp.headers(), resp.status())
+            .await?;
 
         let write_path = format!("{}/{}.mp4", self.path, id);
 
@@ -136,9 +194,16 @@ mod tests {
     #[tokio::test]
     async fn check_for_file_gallery() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", Arc::new(client_id), super::super::client::Limiter::new(Some(60)));
+        let client = Client::new(
+            "test-data",
+            Arc::new(client_id),
+            super::super::client::Limiter::new(Some(60)),
+        );
         // Gallery that contains a GIF
-        let path = format!("test-data/{}", client.request("https://imgur.com/gallery/bXw2p90").await?);
+        let path = format!(
+            "test-data/{}",
+            client.request("https://imgur.com/gallery/bXw2p90").await?
+        );
         let file = tokio::fs::read(&path).await?;
         assert_ne!(file.len(), 0);
 
@@ -148,7 +213,11 @@ mod tests {
     #[tokio::test]
     async fn check_for_link_gallery() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", Arc::new(client_id), super::super::client::Limiter::new(Some(60)));
+        let client = Client::new(
+            "test-data",
+            Arc::new(client_id),
+            super::super::client::Limiter::new(Some(60)),
+        );
         // Gallery that contains a JPG
         let path = client.request("https://imgur.com/gallery/u1tFRrk").await?;
         assert_eq!(path, "https://i.imgur.com/GUvTNyl.jpg");
@@ -159,9 +228,16 @@ mod tests {
     #[tokio::test]
     async fn check_for_file_album() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", Arc::new(client_id), super::super::client::Limiter::new(Some(60)));
+        let client = Client::new(
+            "test-data",
+            Arc::new(client_id),
+            super::super::client::Limiter::new(Some(60)),
+        );
         // Album that contains a GIF
-        let path = format!("test-data/{}", client.request("https://imgur.com/a/Xz70QCa").await?);
+        let path = format!(
+            "test-data/{}",
+            client.request("https://imgur.com/a/Xz70QCa").await?
+        );
         let file = tokio::fs::read(&path).await?;
         assert_ne!(file.len(), 0);
 
@@ -171,7 +247,11 @@ mod tests {
     #[tokio::test]
     async fn check_for_link_album() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", Arc::new(client_id), super::super::client::Limiter::new(Some(60)));
+        let client = Client::new(
+            "test-data",
+            Arc::new(client_id),
+            super::super::client::Limiter::new(Some(60)),
+        );
         // Album that contains a JPG
         let path = client.request("https://imgur.com/a/w6uDYLW").await?;
         assert_eq!(path, "https://i.imgur.com/LIcehKQ.jpg");
@@ -182,7 +262,11 @@ mod tests {
     #[tokio::test]
     async fn check_for_link_album_gif() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", Arc::new(client_id), super::super::client::Limiter::new(Some(60)));
+        let client = Client::new(
+            "test-data",
+            Arc::new(client_id),
+            super::super::client::Limiter::new(Some(60)),
+        );
         // Album that contains a JPG
         let path = client.request("https://imgur.com/a/ErqxbAa").await?;
         assert_eq!(path, "https://i.imgur.com/su3kGzS.gif");
@@ -190,11 +274,14 @@ mod tests {
         Ok(())
     }
 
-
     #[tokio::test]
     async fn check_for_link_image() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", Arc::new(client_id), super::super::client::Limiter::new(Some(60)));
+        let client = Client::new(
+            "test-data",
+            Arc::new(client_id),
+            super::super::client::Limiter::new(Some(60)),
+        );
         // Single JPG image
         let path = client.request("https://imgur.com/GUvTNyl").await?;
         assert_eq!(path, "https://i.imgur.com/GUvTNyl.jpg");
@@ -205,9 +292,16 @@ mod tests {
     #[tokio::test]
     async fn check_for_file_image() -> Result<(), Error> {
         let client_id = std::env::var("IMGUR_CLIENT_ID")?;
-        let client = Client::new("test-data", Arc::new(client_id), super::super::client::Limiter::new(Some(60)));
+        let client = Client::new(
+            "test-data",
+            Arc::new(client_id),
+            super::super::client::Limiter::new(Some(60)),
+        );
         // Single GIF image
-        let path = format!("test-data/{}", client.request("https://imgur.com/K2sN8du").await?);
+        let path = format!(
+            "test-data/{}",
+            client.request("https://imgur.com/K2sN8du").await?
+        );
         let file = tokio::fs::read(&path).await?;
         assert_ne!(file.len(), 0);
 
