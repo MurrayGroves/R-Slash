@@ -2,7 +2,9 @@ use std::{collections::HashMap, process::Command, io::Write};
 
 use anyhow::{Error, Context};
 use futures_util::StreamExt;
+use tracing::instrument;
 
+#[derive(Clone)]
 pub struct Client<'a> {
     path: &'a str,
     client: reqwest::Client,
@@ -19,6 +21,7 @@ impl <'a>Client<'a> {
     }
 
     /// Download a single mp4 from a url, and return the path to the mp4, or URL if no conversion is needed
+    #[instrument(skip(self))]
     pub async fn request(&self, url: &str) -> Result<String, Error> {
         let id = url.split("/").last().ok_or(Error::msg("No ID in url"))?;
         let write_path = format!("{}/{}", self.path, id);

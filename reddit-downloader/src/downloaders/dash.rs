@@ -2,7 +2,9 @@ use std::hash::{Hash, Hasher};
 
 use anyhow::Error;
 use dash_mpd::fetch::DashDownloader;
+use tracing::instrument;
 
+#[derive(Clone)]
 pub struct Client<'a> {
     path: &'a str,
     client: reqwest::Client,
@@ -18,7 +20,7 @@ impl <'a>Client<'a> {
         }
     }
     
-
+    #[instrument(skip(self))]
     pub async fn request(&self, url: &str) -> Result<String, Error> {
         self.limiter.wait().await;
 

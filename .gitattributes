@@ -1,0 +1,15 @@
+shard/Cargo.lock linguist-generated
+post-api/Cargo.lock linguist-generated
+rslash_types/Cargo.lock linguist-generated
+rslash-manager/Cargo.lock linguist-generated
+reddit-downloader/Cargo.lock linguist-generated
+post-subscriber/Cargo.lock linguist-generated
+mp4-opengraph/Cargo.lock linguist-generated
+stats-uploader/Cargo.lock linguist-generated
+discord-roles/Cargo.lock linguist-generated
+k8s-interface/Cargo.lock linguist-generated
+posthog/Cargo.lock linguist-generated
+badge-server/Cargo.lock linguist-generated
+connection-pooler/Cargo.lock linguist-generated
+discord-interface/Cargo.lock linguist-generated
+memberships/Cargo.lock linguist-generated

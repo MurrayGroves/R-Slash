@@ -1,6 +1,6 @@
 [package]
-name = "post-subscriber"
-version = "0.1.0"
+name = "post_subscriber"
+version = "0.1.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -10,3 +10,18 @@ serenity = "0.12"
 redis = "0.24"
 tokio = {version="1.36", features = ["rt-multi-thread"]}
 env_logger = "0.11"
+log = "*"
+posthog = {path = "../posthog"}
+mongodb = "*"
+tarpc = {version="*", features = ["serde-transport", "tcp", "serde-transport-bincode"]}
+anyhow = "*"
+futures = "*"
+serde_derive = "*"
+serde = "*"
+chrono = "*"
+
+post_api = {path = "../post-api"}
+
+[lib]
+name = "post_subscriber"
+path = "src/post_subscriber.rs"

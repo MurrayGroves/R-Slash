@@ -1,6 +1,6 @@
 [package]
-name = "discord-shard"
-version = "1.2.0"
+name = "post_api"
+version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -28,22 +28,5 @@ compile-time = "*"
 chrono = "*"
 async-recursion = "*"
 url = "*"
-tarpc = {version="*", features = ["serde-transport", "tcp", "serde-transport-bincode"]}
-stubborn-io = "*"
-sentry-anyhow = "*"
 
-posthog = {path = "../posthog"}
-memberships = {path = "../memberships"}
 rslash_types = {path = "../rslash_types"}
-connection_pooler = {path = "../connection-pooler"}
-post_api = {path = "../post-api"}
-post_subscriber = {path = "../post-subscriber"}
-
-[[bin]]
-name = "discord-shard"
-path = "src/main.rs"
-
-[profile.release]
-debug = 0
-split-debuginfo = "packed"
-lto = "thin"

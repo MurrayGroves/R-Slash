@@ -1,15 +1,20 @@
 use log::trace;
-use serenity::all::{ActionRowComponent, AutocompleteChoice, ButtonStyle, CreateAutocompleteResponse, CreateButton, InputTextStyle};
+use post_subscriber::{Bot, SubscriberClient};
+use serenity::all::{ActionRowComponent, AutocompleteChoice, ButtonStyle, CreateAutocompleteResponse, CreateButton, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
+use stubborn_io::{ReconnectOptions, StubbornTcpStream};
+use tarpc::context;
+use tarpc::serde_transport::Transport;
+use tarpc::tokio_serde::formats::Bincode;
 use tracing::{debug, info, warn, error};
 use rand::Rng;
 use serde_json::json;
 use tracing::instrument;
 use tracing_subscriber::{Layer, util::SubscriberInitExt, prelude::__tracing_subscriber_SubscriberExt};
 
-use types::ResponseFallbackMethod;
-use std::fs;
+use rslash_types::ResponseFallbackMethod;
+use std::{fs, iter};
 use std::io::Write;
 use std::collections::HashMap;
 use std::env;
@@ -33,6 +38,7 @@ use tokio::sync::Mutex;
 
 use redis::{self, FromRedisValue};
 use redis::{AsyncCommands, from_redis_value};
+
 use mongodb::options::ClientOptions;
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
@@ -40,19 +46,19 @@ use mongodb::options::FindOptions;
 use serenity::model::guild::{Guild, UnavailableGuild};
 use serenity::model::application::{Interaction, CommandInteraction};
 
-use anyhow::{anyhow, Error};
+use anyhow::{anyhow, bail, Error};
+use sentry_anyhow::capture_anyhow;
 
 use memberships::*;
 use connection_pooler::ResourceManager;
 
 mod poster;
-mod types;
-mod reddit;
+mod component_handlers;
 
-use crate::poster::AutoPostCommand;
-use crate::types::ConfigStruct;
-use crate::types::InteractionResponse;
-use crate::reddit::*;
+use rslash_types::AutoPostCommand;
+use rslash_types::ConfigStruct;
+use rslash_types::InteractionResponse;
+use post_api::*;
 
 
 /// Returns current milliseconds since the Epoch
@@ -61,6 +67,21 @@ fn get_epoch_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+fn redis_sanitise(input: &str) -> String {
+    let special = vec![
+        ",", ".", "<", ">", "{", "}", "[", "]", "\"", "'", ":", ";", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "-", "+", "=", "~"
+    ];
+
+    let mut output = input.to_string();
+    for s in special {
+        output = output.replace(s, &("\\".to_owned() + s));
+    }
+
+    output = output.trim().to_string();
+
+    output
 }
 
 #[instrument(skip(data, parent_tx))]
@@ -125,7 +146,6 @@ async fn get_subreddit_cmd<'a>(command: &'a CommandInteraction, ctx: &'a Context
                     Some(HashMap::from([("subreddit", subreddit.clone()), ("button", "false".to_string()), ("search_enabled", search_enabled.to_string())])), &format!("user_{}", command.user.id.get().to_string())
                 ).await;
 
-
     if config.nsfw_subreddits.contains(&subreddit) {
         if let Some(channel) = command.channel_id.to_channel_cached(&ctx.cache) {
             if !channel.is_nsfw() {
@@ -166,7 +186,7 @@ fn error_response(code: String) -> InteractionResponse {
         file: None,
         embed: Some(embed),
         content: None,
-        ephemeral: false,
+        ephemeral: true,
         components: None,
         fallback: ResponseFallbackMethod::Followup,
     }
@@ -346,6 +366,150 @@ async fn info<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &se
 }
 
 
+async fn subscribe_custom<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
+    {
+        let data_lock = ctx.data.read().await;
+        let mongodb_manager = data_lock.get::<ResourceManager<mongodb::Client>>().ok_or(anyhow!("Mongodb client manager not found"))?.clone();
+        let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
+        let mut mongodb_client = mongodb_client_mutex.lock().await;
+
+
+        let membership = get_user_tiers(command.user.id.get().to_string(), &mut *mongodb_client, Some(parent_tx)).await;
+        if !membership.bronze.active {
+            return Ok(InteractionResponse {
+                embed: Some(CreateEmbed::default()
+                    .title("Premium Feature")
+                    .description("You must have premium in order to use this command.
+                    Get it [here](https://ko-fi.com/rslash)")
+                    .color(0xff0000).to_owned()
+                ),
+                ..Default::default()
+            });
+        }
+    }
+    subscribe(command, ctx, parent_tx).await
+}
+
+async fn subscribe<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
+    if let Some(member) = &command.member {
+        if !member.permissions(&ctx).unwrap().manage_messages() {
+            return Ok(InteractionResponse {
+                embed: Some(CreateEmbed::default()
+                    .title("Permission Error")
+                    .description("You must have the 'Manage Messages' permission to setup a subscription.")
+                    .color(0xff0000).to_owned()
+                ),
+                ..Default::default()
+            });
+        }
+    }
+
+    let options = &command.data.options;
+    debug!("Command Options: {:?}", options);
+
+    let subreddit = options[0].value.clone();
+    let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
+
+    let data_lock = ctx.data.read().await;
+    let client = data_lock.get::<SubscriberClient>().ok_or(anyhow!("Subscriber client not found"))?.clone();
+
+    let bot = match get_namespace().as_str() {
+        "r-slash" => Bot::RS,
+        "booty-bot" => Bot::BB,
+        _ => Bot::RS,
+    };
+
+    let tx = parent_tx.start_child("subscribe_call", "subscribe");
+    if let Err(x) = client.register_subscription(context::current(), subreddit.clone(), command.channel_id.get(), bot).await {
+        tx.finish();
+        if format!("{}", x).contains("Already subscribed") {
+            return Ok(InteractionResponse {
+                embed: Some(CreateEmbed::default()
+                    .title("Already Subscribed")
+                    .description(format!("This channel is already subscribed to r/{}", subreddit))
+                    .color(0xff0000).to_owned()
+                ),
+                ..Default::default()
+            });
+        } else {
+            bail!(x);
+        }
+    };
+    tx.finish();
+
+    capture_event(ctx.data.clone(), "subscribe_subreddit", Some(parent_tx), Some(HashMap::from([("subreddit", subreddit.clone())])), &command.user.id.get().to_string()).await;
+
+    return Ok(InteractionResponse {
+        embed: Some(CreateEmbed::default()
+            .title("Subscribed")
+            .description(format!("This channel has been subscribed to r/{}", subreddit))
+            .color(0x00ff00).to_owned()
+        ),
+        ..Default::default()
+    });
+}
+
+async fn unsubscribe<'a>(command: &'a CommandInteraction, ctx: &Context, parent_tx: &sentry::TransactionOrSpan) -> Result<InteractionResponse, anyhow::Error> {
+    if let Some(member) = &command.member {
+        if !member.permissions(&ctx).unwrap().manage_messages() {
+            return Ok(InteractionResponse {
+                embed: Some(CreateEmbed::default()
+                    .title("Permission Error")
+                    .description("You must have the 'Manage Messages' permission to manage subscriptions.")
+                    .color(0xff0000).to_owned()
+                ),
+                ..Default::default()
+            });
+        }
+    }
+
+    let data_lock = ctx.data.read().await;
+    let client = data_lock.get::<SubscriberClient>().ok_or(anyhow!("Subscriber client not found"))?.clone();
+
+    let bot = match get_namespace().as_str() {
+        "r-slash" => Bot::RS,
+        "booty-bot" => Bot::BB,
+        _ => Bot::RS,
+    };
+
+    debug!("Deadline: {:?}", context::current().deadline);
+    debug!("Now: {:?}", SystemTime::now());
+    let subreddits = match client.list_subscriptions(context::current(), command.channel_id.get(), bot).await? {
+        Ok(x) => x,
+        Err(_) => {
+            return Err(anyhow!("Error getting subscriptions"));
+        }
+    };
+
+    if subreddits.len() == 0 {
+        return Ok(InteractionResponse {
+            embed: Some(CreateEmbed::default()
+                .title("No Subscriptions")
+                .description("This channel has no subscriptions.")
+                .color(0xff0000).to_owned()
+            ),
+            ephemeral: true,    
+            ..Default::default()
+        });
+    }
+
+    let menu = CreateSelectMenu::new(json!({"command": "unsubscribe"}).to_string(), CreateSelectMenuKind::String {
+        options: subreddits.into_iter().map(|x| CreateSelectMenuOption::new("r/".to_owned() + &x.subreddit, x.subreddit)).collect(),
+    })
+        .placeholder("Select a subreddit to unsubscribe from")
+        .min_values(1)
+        .max_values(1);
+
+    let components = vec![CreateActionRow::SelectMenu(menu)];
+
+    return Ok(InteractionResponse {
+        ephemeral: true,
+        components: Some(components),
+        ..Default::default()
+    });
+}
+
+
 #[instrument(skip(command, ctx, tx))]
 async fn get_command_response<'a>(command: &'a CommandInteraction, ctx: &'a Context, tx: &'a sentry::Transaction) -> Result<InteractionResponse, anyhow::Error> {
     match command.data.name.as_str() {
@@ -404,6 +568,27 @@ async fn get_command_response<'a>(command: &'a CommandInteraction, ctx: &'a Cont
         "info" => {
             let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_info"));
             let resp = info(&command, &ctx, &cmd_tx).await;
+            cmd_tx.finish();
+            resp
+        },
+
+        "subscribe" => {
+            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_subscribe"));
+            let resp = subscribe(&command, &ctx, &cmd_tx).await;
+            cmd_tx.finish();
+            resp
+        },
+
+        "subscribe_custom" => {
+            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_subscribe_custom"));
+            let resp = subscribe_custom(&command, &ctx, &cmd_tx).await;
+            cmd_tx.finish();
+            resp
+        },
+
+        "unsubscribe" => {
+            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child("interaction.slash_command.get_response", "cmd_unsubscribe"));
+            let resp = unsubscribe(&command, &ctx, &cmd_tx).await;
             cmd_tx.finish();
             resp
         },
@@ -511,6 +696,8 @@ impl EventHandler for Handler {
             let command_response = match command_response {
                 Ok(embed) => embed,
                 Err(why) => {
+                    capture_anyhow(&why);
+
                     let why = why.to_string();
                     let code = rand::thread_rng().gen_range(0..10000);
 
@@ -613,6 +800,9 @@ impl EventHandler for Handler {
 
                                 ResponseFallbackMethod::None => {}
                             };
+                        } else {
+                            error!("Cannot respond to slash command: {}", e);
+                            sentry::capture_error(&e);
                         }
                     }
 
@@ -706,7 +896,7 @@ impl EventHandler for Handler {
                     let max_length = match is_premium {
                         true => 100,
                         false => 2,
-                    };
+                    };  
 
                     let components = vec![
                         CreateActionRow::InputText(
@@ -719,7 +909,7 @@ impl EventHandler for Handler {
 
                         CreateActionRow::InputText(
                             CreateInputText::new(InputTextStyle::Short, "Limit", "limit")
-                            .label("Times to post e.g. 10")
+                            .label("Times to post before stopping e.g. 10")
                             .placeholder("Can be \"infinite\" if you have premium")
                             .min_length(1)
                             .max_length(max_length)
@@ -781,8 +971,11 @@ impl EventHandler for Handler {
                     };
                     capture_event(ctx.data.clone(), "autopost_cancel", Some(&component_tx), None, &format!("channel_{}", &command.channel.clone().unwrap().id.get().to_string())).await;
                     None
-                }
-
+                },
+                "unsubscribe" => {
+                    Some(component_handlers::unsubscribe(&ctx, &command).await)
+                },
+                
                 _ => {
                     warn!("Unknown button command: {}", button_command);
                     return;
@@ -1078,7 +1271,7 @@ impl EventHandler for Handler {
                         }
                     };
 
-                    let post_request = poster::PostRequest {
+                    let post_request = rslash_types::PostRequest {
                         subreddit: custom_id["subreddit"].to_string().replace('"', ""),
                         interval,
                         search,
@@ -1144,7 +1337,7 @@ impl EventHandler for Handler {
                 }
             };
 
-            if subreddit.len() < 2 {
+            if redis_sanitise(&subreddit).len() < 2 {
                 return;
             }
 
@@ -1154,8 +1347,7 @@ impl EventHandler for Handler {
             let conf = data_read.get::<ConfigStruct>().unwrap();
             let mut con = conf.redis.clone();
 
-            let mut search = subreddit.replace('"', "\\");
-            search = search.replace(":", "\\:");        
+            let search = subreddit.replace(' ', "");
 
             let selector = if ctx.cache.current_user().id.get() == 278550142356029441 {
                 "nsfw"
@@ -1166,7 +1358,7 @@ impl EventHandler for Handler {
             debug!("Getting autocomplete results for {:?}", search);
             let results: Vec<redis::Value> = match redis::cmd("FT.SEARCH")
                 .arg(format!("{}_subs", selector))
-                .arg(format!("*{}*", search))
+                .arg(format!("*{}*", redis_sanitise(&search)))
                 .arg("LIMIT")
                 .arg(0)
                 .arg(10)
@@ -1178,23 +1370,21 @@ impl EventHandler for Handler {
                     }
             };
 
-            let mut skip_first = true;
             let mut option_names = Vec::new();
-            let mut skip = true;
             for result in results {
-                if skip_first {
-                    skip_first = false;
+                if let redis::Value::Int(_) = result {
                     continue
                 }
 
-                if skip {
-                    skip = false;
-                    continue;
+                if let Ok(x) = String::from_redis_value(&result) {
+                    if x.starts_with("custom_sub") {
+                        continue;
+                    }
                 }
 
                 let result: Vec<redis::Value> = match result.into_sequence() {
                     Ok(x) => x,
-                    Err(e) => {
+                    Err(e) => { 
                         error!("Error getting autocomplete result: {:?}", e);
                         continue;
                     }
@@ -1208,6 +1398,8 @@ impl EventHandler for Handler {
                 };
                 option_names.push(name);
             }
+
+            debug!("Autocomplete results: {:?}", option_names);
 
             let resp = CreateAutocompleteResponse::new()
                 .set_choices(option_names.into_iter().map(|x| AutocompleteChoice::new(x.clone(), x)).collect());
@@ -1323,6 +1515,14 @@ async fn main() {
             posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string())
         })))).await;
 
+        let reconnect_opts = ReconnectOptions::new()
+        .with_exit_if_first_connect_fails(false)
+        .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
+        let tcp_stream = StubbornTcpStream::connect_with_options("post-subscriber.discord-bot-shared.svc.cluster.local:50051", reconnect_opts).await.expect("Failed to connect to post subscriber");
+        let transport = Transport::from((tcp_stream, Bincode::default()));
+        
+        let subscriber = post_subscriber::SubscriberClient::new(tarpc::client::Config::default(), transport).spawn();
+
         data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
         data.insert::<ResourceManager<posthog::Client>>(posthog_manager);
         data.insert::<ConfigStruct>(ConfigStruct {
@@ -1331,6 +1531,7 @@ async fn main() {
             auto_post_chan: auto_post_chan.0.clone(),
             redis: con,
         });
+        data.insert::<post_subscriber::SubscriberClient>(subscriber);
     }
 
     let shard_manager = client.shard_manager.clone();
@@ -1361,7 +1562,7 @@ async fn main() {
                 _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
             };
 
-            if (!md.target().contains("discord_shard")) || md.name().contains("serenity") || md.target().contains("serenity") {
+            if (!md.target().contains("discord_shard") && !md.target().contains("post_api")) || md.name().contains("serenity") || md.target().contains("serenity") {
                 return sentry::integrations::tracing::EventFilter::Ignore;
             } else {
                 return level_filter;
@@ -1369,7 +1570,7 @@ async fn main() {
 
         }))
         .with(tracing_subscriber::fmt::layer().compact().with_ansi(false).with_filter(tracing_subscriber::filter::LevelFilter::DEBUG).with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
-            if !meta.target().contains("discord_shard") || meta.name().contains("serenity") {
+            if (!meta.target().contains("discord_shard") && !meta.target().contains("post_api"))|| meta.name().contains("serenity") {
                 return false;
             };
             true
