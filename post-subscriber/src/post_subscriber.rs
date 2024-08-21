@@ -1,12 +1,12 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, hash::Hash, hash::Hasher};
 
 use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize};
 
-
 #[tarpc::service]
 pub trait Subscriber {
-    async fn register_subscription(subreddit: String, channel: u64, bot: Bot) -> Result<(), String>;
+    async fn register_subscription(subreddit: String, channel: u64, bot: Bot)
+        -> Result<(), String>;
 
     async fn delete_subscription(subreddit: String, channel: u64, bot: Bot) -> Result<(), String>;
 
@@ -26,20 +26,38 @@ pub struct Subscription {
     pub subreddit: String,
     pub channel: u64,
     pub bot: Bot,
-    pub added_at: i64
+    pub added_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+impl PartialEq for Subscription {
+    fn eq(&self, other: &Self) -> bool {
+        return self.subreddit == other.subreddit
+            && self.channel == other.channel
+            && self.bot == other.bot;
+    }
+}
+
+impl Eq for Subscription {}
+
+impl Hash for Subscription {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.subreddit.hash(state);
+        self.channel.hash(state);
+        self.bot.hash(state);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Hash)]
 pub enum Bot {
     BB,
-    RS
+    RS,
 }
 
 impl Into<Bson> for Bot {
     fn into(self) -> Bson {
         match self {
             Bot::BB => Bson::String("BB".to_string()),
-            Bot::RS => Bson::String("RS".to_string())
+            Bot::RS => Bson::String("RS".to_string()),
         }
     }
 }
