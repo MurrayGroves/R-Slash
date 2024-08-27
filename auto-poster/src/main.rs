@@ -13,7 +13,6 @@ use timer::{Guard, Timer};
 use tokio::runtime::Handle;
 use tokio::time::{Duration, Instant};
 
-use log::{debug, error, info, warn};
 use std::cell::{SyncUnsafeCell, UnsafeCell};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::env;
@@ -33,6 +32,11 @@ use tarpc::{
 };
 
 use anyhow::anyhow;
+use tracing::instrument;
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::{
+    prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, Layer,
+};
 
 use auto_poster::{AutoPoster, PostMemory};
 
@@ -107,6 +111,7 @@ struct AutoPostServer {
 }
 
 impl AutoPostServer {
+    #[instrument(skip(self))]
     pub async fn add_autopost(self, autopost: Arc<UnsafeMemory>) {
         info!("Adding autopost {:?}", autopost);
 
@@ -137,6 +142,7 @@ impl AutoPostServer {
         debug!("Finished adding autopost");
     }
 
+    #[instrument(skip(self))]
     pub async fn delete_autopost(self, id: i64) -> Result<PostMemory, String> {
         info!("Deleting autopost {}", id);
 
@@ -193,6 +199,7 @@ impl AutoPostServer {
     }
 
     #[async_recursion]
+    #[instrument(skip(self))]
     async fn update_timer(self) {
         let mut timer_guard = self.timer_guard.lock().await;
         let autoposts = self.autoposts.write().await;
@@ -315,11 +322,12 @@ impl AutoPostServer {
 }
 
 impl AutoPoster for AutoPostServer {
+    #[instrument(skip(self))]
     async fn register_autopost(
         self,
         _: tarpc::context::Context,
         subreddit: String,
-        channel: ChannelId,
+        channel: u64,
         interval: Duration,
         limit: Option<u32>,
         search: Option<String>,
@@ -332,7 +340,7 @@ impl AutoPoster for AutoPostServer {
 
         let mut memory = PostMemory {
             subreddit,
-            channel,
+            channel: ChannelId::new(channel),
             interval,
             limit,
             search,
@@ -352,7 +360,7 @@ impl AutoPoster for AutoPostServer {
         autoposts.by_id.insert(memory.id, memory.clone());
         autoposts
             .by_channel
-            .entry(channel)
+            .entry(channel.into())
             .or_insert_with(HashSet::new)
             .insert(memory.clone());
 
@@ -362,6 +370,7 @@ impl AutoPoster for AutoPostServer {
         Ok(id)
     }
 
+    #[instrument(skip(self))]
     async fn delete_autopost(
         self,
         _: tarpc::context::Context,
@@ -370,15 +379,16 @@ impl AutoPoster for AutoPostServer {
         self.delete_autopost(id).await
     }
 
+    #[instrument(skip(self))]
     async fn list_autoposts(
         self,
         _: ::tarpc::context::Context,
-        channel: ChannelId,
+        channel: u64,
         bot: u64,
     ) -> Result<Vec<PostMemory>, String> {
         info!("Listing autoposts for {}", channel);
         let autoposts = self.autoposts.read().await;
-        let to_return = match autoposts.by_channel.get(&channel) {
+        let to_return = match autoposts.by_channel.get(&channel.into()) {
             Some(x) => x
                 .iter()
                 .filter(|x| x.bot == bot)
@@ -392,6 +402,7 @@ impl AutoPoster for AutoPostServer {
         Ok(to_return)
     }
 
+    #[instrument(skip(self))]
     async fn ping(self, _: tarpc::context::Context) -> Result<(), String> {
         info!("Ping received");
         Ok(())
@@ -409,11 +420,65 @@ impl EventHandler for Handler {}
 
 #[tokio::main]
 async fn main() {
-    env_logger::builder()
-        .format(|buf, record| writeln!(buf, "{}: {}", record.level(), record.args()))
+    debug!("Starting...");
+
+    tracing_subscriber::Registry::default()
+        .with(
+            sentry::integrations::tracing::layer()
+                .span_filter(|md| {
+                    if md.name().contains("recv")
+                        || md.name().contains("recv_event")
+                        || md.name().contains("dispatch")
+                        || md.name().contains("handle_event")
+                        || md.name().contains("check_heartbeat")
+                        || md.name().contains("headers")
+                    {
+                        return false;
+                    } else {
+                        return true;
+                    }
+                })
+                .event_filter(|md| {
+                    let level_filter = match md.level() {
+                        &tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
+                        &tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
+                        &tracing::Level::TRACE => {
+                            sentry::integrations::tracing::EventFilter::Ignore
+                        }
+                        _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
+                    };
+
+                    if (!md.target().contains("auto_poster") && !md.target().contains("post_api"))
+                        || md.name().contains("serenity")
+                        || md.target().contains("serenity")
+                    {
+                        return sentry::integrations::tracing::EventFilter::Ignore;
+                    } else {
+                        return level_filter;
+                    }
+                }),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .compact()
+                .with_ansi(false)
+                .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG)
+                .with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
+                    if meta.name().contains("serenity") {
+                        return false;
+                    };
+                    true
+                })),
+        )
         .init();
 
-    debug!("Starting...");
+    let _guard = sentry::init(("https://07bd85d599d280093efda1eb9bd65a3c@o4504774745718784.ingest.us.sentry.io/4507850989436928", sentry::ClientOptions {
+        release: sentry::release_name!(),
+        traces_sample_rate: 0.2,
+        environment: None,
+        server_name: None,
+        ..Default::default()
+    }));
 
     let posthog_key: String = env::var("POSTHOG_API_KEY")
         .expect("POSTHOG_API_KEY not set")
@@ -431,7 +496,8 @@ async fn main() {
 
     let existing_subs = {
         let client = mongodb_client.lock().await;
-        let coll: mongodb::Collection<PostMemory> = client.database("state").collection("autopost");
+        let coll: mongodb::Collection<PostMemory> =
+            client.database("state").collection("autoposts");
 
         let mut cursor = coll
             .find(Document::new())

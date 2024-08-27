@@ -176,6 +176,7 @@ dependencies = [
  "post_api",
  "posthog",
  "redis",
+ "sentry",
  "serde",
  "serde_derive",
  "serde_json",
@@ -184,6 +185,8 @@ dependencies = [
  "tarpc",
  "timer",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -396,6 +399,8 @@ dependencies = [
 [[package]]
 name = "command_attr"
 version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88da8d7e9fe6f30d8e3fcf72d0f84102b49de70fece952633e8439e89bdc7631"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -424,9 +429,9 @@ checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
 
 [[package]]
 name = "cookie"
-version = "0.17.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7efb37c3e1ccb1ff97164ad95ac1606e8ccd35b3fa0a7d99a304c7f4a428cc24"
+checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
 dependencies = [
  "percent-encoding",
  "time",
@@ -435,12 +440,12 @@ dependencies = [
 
 [[package]]
 name = "cookie_store"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "387461abbc748185c3a6e1673d826918b450b87ff22639429c694619a83b6cf6"
+checksum = "4934e6b7e8419148b6ef56950d277af8561060b56afd59e2aadf98b59fce6baa"
 dependencies = [
  "cookie",
- "idna 0.3.0",
+ "idna 0.5.0",
  "log",
  "publicsuffix",
  "serde",
@@ -1864,7 +1869,7 @@ dependencies = [
  "async-recursion",
  "chrono",
  "compile-time",
- "env_logger 0.10.2",
+ "env_logger 0.11.5",
  "futures",
  "futures-util",
  "log",
@@ -1872,7 +1877,7 @@ dependencies = [
  "pretty_env_logger",
  "rand",
  "redis",
- "reqwest 0.11.27",
+ "reqwest 0.12.7",
  "rslash_types",
  "sentry",
  "serde",
@@ -2126,8 +2131,6 @@ checksum = "dd67538700a17451e7cba03ac727fb961abb7607553461627b97de0b89cf4a62"
 dependencies = [
  "base64 0.21.7",
  "bytes",
- "cookie",
- "cookie_store",
  "encoding_rs",
  "futures-core",
  "futures-util",
@@ -2175,6 +2178,8 @@ checksum = "f8f4955649ef5c38cc7f9e8aa41761d48fb9677197daea9984dc54f56aad5e63"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "cookie",
+ "cookie_store",
  "encoding_rs",
  "futures-core",
  "futures-util",
@@ -2695,6 +2700,8 @@ dependencies = [
 [[package]]
 name = "serenity"
 version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "880a04106592d0a8f5bdacb1d935889bfbccb4a14f7074984d9cd857235d34ac"
 dependencies = [
  "arrayvec",
  "async-trait",

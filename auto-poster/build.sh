@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 
 cargo build --release
 docker build -t registry.murraygrov.es/auto-poster -f Dockerfile target/release

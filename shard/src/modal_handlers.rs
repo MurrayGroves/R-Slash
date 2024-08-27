@@ -189,7 +189,7 @@ pub async fn autopost_create(
         .register_autopost(
             tarpc::context::current(),
             custom_id["subreddit"].to_string().replace('"', ""),
-            modal.channel_id,
+            modal.channel_id.get(),
             interval,
             limit,
             search,

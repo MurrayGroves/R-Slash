@@ -7,13 +7,19 @@ edition = "2021"
 
 [dependencies]
 serenity = "0.12"
-redis = {version = "0.26", feautures = "aio"}
-tokio = {version="1.36", features = ["rt-multi-thread"]}
+redis = { version = "0.26", feautures = "aio" }
+tokio = { version = "1.36", features = ["rt-multi-thread"] }
 env_logger = "0.11"
 log = "*"
-posthog = {path = "../posthog"}
+posthog = { path = "../posthog" }
 mongodb = "*"
-tarpc = {version="*", features = ["serde-transport", "tcp", "serde-transport-bincode", "tokio1", "tokio-serde"]}
+tarpc = { version = "*", features = [
+    "serde-transport",
+    "tcp",
+    "serde-transport-bincode",
+    "tokio1",
+    "tokio-serde",
+] }
 anyhow = "*"
 futures = "*"
 serde_derive = "*"
@@ -24,11 +30,14 @@ chrono = "*"
 timer = "*"
 async-recursion = "*"
 integer-hasher = "*"
+sentry = { version = "*", features = ["tracing", "anyhow", "debug-images"] }
+tracing = "*"
+tracing-subscriber = { version = "*" }
 
-post_api = {path = "../post-api"}
+post_api = { path = "../post-api" }
 
-[patch.crates-io]
-serenity = { path = "../../serenity" }
+#[patch.crates-io]
+#serenity = { path = "../../serenity" }
 
 [lib]
 name = "auto_poster"

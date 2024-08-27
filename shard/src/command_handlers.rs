@@ -659,7 +659,7 @@ pub async fn autopost_stop<'a>(
     let bot = ctx.http.application_id().unwrap().get();
 
     let autoposts = match match client
-        .list_autoposts(context::current(), command.channel_id, bot)
+        .list_autoposts(context::current(), command.channel_id.get(), bot)
         .await
     {
         Ok(x) => x,

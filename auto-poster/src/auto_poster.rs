@@ -6,6 +6,7 @@ use std::{
 
 use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize, Serializer};
+use serde_json::Value;
 use serde_with::{serde_as, DisplayFromStr};
 use serenity::all::ChannelId;
 use tokio::{
@@ -17,7 +18,7 @@ use tokio::{
 pub trait AutoPoster {
     async fn register_autopost(
         subreddit: String,
-        channel: ChannelId,
+        channel: u64,
         interval: Duration,
         limit: Option<u32>,
         search: Option<String>,
@@ -26,7 +27,7 @@ pub trait AutoPoster {
 
     async fn delete_autopost(id: i64) -> Result<PostMemory, String>;
 
-    async fn list_autoposts(channel: ChannelId, bot: u64) -> Result<Vec<PostMemory>, String>;
+    async fn list_autoposts(channel: u64, bot: u64) -> Result<Vec<PostMemory>, String>;
 
     async fn ping() -> Result<(), String>;
 }
@@ -50,13 +51,6 @@ pub struct PostMemory {
     pub id: i64,
 }
 
-fn id_serialize<S>(x: &i64, s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    s.serialize_some(&Some(x))
-}
-
 impl From<PostMemoryIntermediate> for PostMemory {
     fn from(value: PostMemoryIntermediate) -> Self {
         Self {
@@ -68,7 +62,13 @@ impl From<PostMemoryIntermediate> for PostMemory {
             interval: value.interval,
             limit: value.limit,
             current: value.current,
-            bot: value.bot,
+            bot: match value.bot {
+                Value::Number(x) => x.as_u64().unwrap(),
+                Value::String(x) => x.parse().unwrap(),
+                _ => {
+                    panic!("Invalid bot value");
+                }
+            },
         }
     }
 }
@@ -82,7 +82,7 @@ impl From<PostMemory> for PostMemoryIntermediate {
             interval: value.interval,
             limit: value.limit,
             current: value.current,
-            bot: value.bot,
+            bot: Value::Number(value.bot.into()),
             id: Some(value.id),
         }
     }
@@ -97,8 +97,7 @@ pub struct PostMemoryIntermediate {
     pub interval: Duration,
     pub limit: Option<u32>,
     pub current: u32,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
-    pub bot: u64,
+    pub bot: Value,
     pub id: Option<i64>,
 }
 
