@@ -3,11 +3,11 @@ use mongodb::bson::{doc, Bson};
 use mongodb::options::ClientOptions;
 use redis::AsyncCommands;
 use serde_derive::{Deserialize, Serialize};
-use serenity::all::{ChannelId, CreateMessage, GatewayIntents, Http};
+use serenity::all::{ChannelId, CreateMessage, DiscordJsonError, GatewayIntents, Http, HttpError};
 use serenity::json::json;
 use serenity::{all::EventHandler, async_trait};
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -243,6 +243,8 @@ impl Subscriber for SubscriberServer {
 
         debug!("Filtered subscriptions {:?}", filtered);
 
+        let mut subs_to_delete = Vec::new();
+
         for sub in filtered {
             if sub.added_at > timestamp {
                 info!("Skipping notification for post {} in subreddit {} to channel {} because it was added after the post", post_id, subreddit, sub.channel);
@@ -275,12 +277,44 @@ impl Subscriber for SubscriberServer {
             match sub.bot {
                 Bot::BB => match channel.send_message(&self.discord_bb, resp).await {
                     Ok(_) => (),
-                    Err(e) => return Err(e.to_string()),
+                    Err(e) => {
+                        if let serenity::Error::Http(e) = e {
+                            if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
+                                if e.error.code == 10003 {
+                                    debug!("Channel doesn't exist anymore, deleting subscription");
+                                    subs_to_delete.push(sub.clone());
+                                }
+                            }
+                        }
+                    }
                 },
                 Bot::RS => match channel.send_message(&self.discord_rs, resp).await {
                     Ok(_) => (),
-                    Err(e) => return Err(e.to_string()),
+                    Err(e) => warn!("Failed to send message: {:?}", e),
                 },
+            }
+        }
+
+        if subs_to_delete.len() > 0 {
+            drop(subscriptions);
+            for sub in subs_to_delete {
+                let mut subscriptions = self.subscriptions.write().await;
+                match subscriptions.by_channel.get_mut(&sub.channel) {
+                    Some(x) => {
+                        x.remove(&sub);
+                    }
+                    None => {
+                        warn!("Tried to delete subscription by channel that already didn't exist!");
+                    }
+                };
+                match subscriptions.by_subreddit.get_mut(&sub.subreddit) {
+                    Some(x) => {
+                        x.remove(&sub);
+                    }
+                    None => {
+                        warn!("Tried to delete subscription by sub that already didn't exist!");
+                    }
+                }
             }
         }
 

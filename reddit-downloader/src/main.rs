@@ -1139,7 +1139,7 @@ async fn main() {
         "https://75873f85a862465795299365b603fbb5@us.sentry.io/4504774760660992",
         sentry::ClientOptions {
             release: sentry::release_name!(),
-            traces_sample_rate: 1.0,
+            traces_sample_rate: 0.01,
             ..Default::default()
         },
     ));

@@ -1,0 +1,35 @@
+[package]
+name = "auto_poster"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serenity = "0.12"
+redis = {version = "0.26", feautures = "aio"}
+tokio = {version="1.36", features = ["rt-multi-thread"]}
+env_logger = "0.11"
+log = "*"
+posthog = {path = "../posthog"}
+mongodb = "*"
+tarpc = {version="*", features = ["serde-transport", "tcp", "serde-transport-bincode", "tokio1", "tokio-serde"]}
+anyhow = "*"
+futures = "*"
+serde_derive = "*"
+serde = "*"
+serde_json = "*"
+serde_with = "*"
+chrono = "*"
+timer = "*"
+async-recursion = "*"
+integer-hasher = "*"
+
+post_api = {path = "../post-api"}
+
+[patch.crates-io]
+serenity = { path = "../../serenity" }
+
+[lib]
+name = "auto_poster"
+path = "src/auto_poster.rs"

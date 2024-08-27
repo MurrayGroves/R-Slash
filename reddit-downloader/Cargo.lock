@@ -564,6 +564,17 @@ checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
 
 [[package]]
 name = "cookie"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7efb37c3e1ccb1ff97164ad95ac1606e8ccd35b3fa0a7d99a304c7f4a428cc24"
+dependencies = [
+ "percent-encoding",
+ "time",
+ "version_check",
+]
+
+[[package]]
+name = "cookie"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
@@ -575,11 +586,28 @@ dependencies = [
 
 [[package]]
 name = "cookie_store"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "387461abbc748185c3a6e1673d826918b450b87ff22639429c694619a83b6cf6"
+dependencies = [
+ "cookie 0.17.0",
+ "idna 0.3.0",
+ "log",
+ "publicsuffix",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "time",
+ "url",
+]
+
+[[package]]
+name = "cookie_store"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4934e6b7e8419148b6ef56950d277af8561060b56afd59e2aadf98b59fce6baa"
 dependencies = [
- "cookie",
+ "cookie 0.18.1",
  "idna 0.5.0",
  "log",
  "publicsuffix",
@@ -2315,21 +2343,21 @@ checksum = "7170ef9988bc169ba16dd36a7fa041e5c4cbeb6a35b76d4c03daded371eae7c0"
 
 [[package]]
 name = "post_api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-recursion",
  "chrono",
  "compile-time",
- "env_logger 0.11.3",
+ "env_logger 0.10.2",
  "futures",
  "futures-util",
  "log",
  "mongodb 2.8.2",
  "pretty_env_logger",
  "rand",
- "redis 0.25.4",
- "reqwest 0.12.5",
+ "redis 0.24.0",
+ "reqwest 0.11.27",
  "rslash_types",
  "sentry",
  "serde",
@@ -2708,12 +2736,21 @@ version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c580d9cbbe1d1b479e8d67cf9daf6a62c957e6846048408b80b43ac3f6af84cd"
 dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bytes",
  "combine",
+ "futures",
+ "futures-util",
  "itoa",
  "percent-encoding",
+ "pin-project-lite",
  "ryu",
  "sha1_smol",
  "socket2 0.4.10",
+ "tokio",
+ "tokio-retry",
+ "tokio-util",
  "url",
 ]
 
@@ -2802,6 +2839,8 @@ checksum = "dd67538700a17451e7cba03ac727fb961abb7607553461627b97de0b89cf4a62"
 dependencies = [
  "base64 0.21.7",
  "bytes",
+ "cookie 0.17.0",
+ "cookie_store 0.20.0",
  "encoding_rs",
  "futures-core",
  "futures-util",
@@ -2850,8 +2889,8 @@ dependencies = [
  "async-compression",
  "base64 0.22.1",
  "bytes",
- "cookie",
- "cookie_store",
+ "cookie 0.18.1",
+ "cookie_store 0.21.0",
  "encoding_rs",
  "futures-core",
  "futures-util",

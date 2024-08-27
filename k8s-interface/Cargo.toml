@@ -11,5 +11,4 @@ k8s-openapi = { version = "0.15.0", features = ["v1_24"] }
 reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"]}
 serde_json = "1.0"
 redis = { version = "*", features = ["aio", "tokio-comp"] }
-env = "*"
 tokio = "*"

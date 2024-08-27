@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auto-poster
+  namespace: discord-bot-shared
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: auto-poster
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: auto-poster
+    spec:
+      containers:
+        - name: auto-poster
+          image: registry.murraygrov.es/auto-poster
+          imagePullPolicy: Always
+          tty: true
+          ports:
+            - containerPort: 50051
+              name: rpc
+          env:
+            - name: DISCORD_TOKEN_278550142356029441
+              valueFrom:
+                secretKeyRef:
+                  name: discord-credentials
+                  key: DISCORD_TOKEN_BB
+
+            - name: DISCORD_TOKEN_282921751141285888
+              valueFrom:
+                secretKeyRef:
+                  name: discord-credentials
+                  key: DISCORD_TOKEN_RS
+
+            - name: MONGO_URL
+              value: mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false
+
+            - name: REDIS_URL
+              value: redis://redis.discord-bot-shared.svc.cluster.local/
+
+            - name: POSTHOG_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: posthog-credentials
+                  key: POSTHOG_API_KEY
+
+          resources:
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+            requests:
+              cpu: "100m"
+              memory: "50Mi"
+
+      imagePullSecrets:
+        - name: murraygroves-registry-secret
