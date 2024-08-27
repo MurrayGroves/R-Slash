@@ -67,7 +67,7 @@ impl<'a> Client<'a> {
                     if let Some(code) = e.get("code") {
                         if let Some(description) = e.get("description") {
                             debug!("Description: {:?}", description);
-                            if description == "gif not ready" {
+                            if description == "gif not ready" || description == "gif not found" {
                                 // Ok I think technically this happens when the user clicks share before the gif is ready?? Idk they have different URLs in the wrong format too
                                 return Error::msg("Deleted");
                             }

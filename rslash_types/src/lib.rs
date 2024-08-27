@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-
 #[derive(Debug, Clone)]
 pub struct PostRequest {
     pub channel: ChannelId,
@@ -22,13 +21,11 @@ pub enum AutoPostCommand {
 use serenity::all::{ChannelId, CreateActionRow, UserId};
 use tokio::time::Instant;
 
-
 /// Stores config values required for operation of the shard
 #[derive(Debug, Clone)]
 pub struct ConfigStruct {
     pub shard_id: u32,
     pub nsfw_subreddits: Vec<String>,
-    pub auto_post_chan: tokio::sync::mpsc::Sender<AutoPostCommand>,
     pub redis: redis::aio::MultiplexedConnection,
 }
 
@@ -54,7 +51,7 @@ impl Default for InteractionResponse {
             content: None,
             ephemeral: false,
             components: None,
-            fallback: ResponseFallbackMethod::Error
+            fallback: ResponseFallbackMethod::Error,
         }
     }
 }
@@ -69,6 +66,5 @@ pub enum ResponseFallbackMethod {
     /// Return an error
     Error,
     /// Do nothing
-    None
+    None,
 }
-
