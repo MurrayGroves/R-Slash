@@ -3,7 +3,7 @@ use log::{error, trace};
 use post_subscriber::{Bot, SubscriberClient};
 use serde_json::json;
 use serenity::all::{
-    CommandDataOptionValue, CreateButton, CreateInputText, CreateInteractionResponse,
+    ChannelId, CommandDataOptionValue, CreateButton, CreateInputText, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateModal, CreateSelectMenu, CreateSelectMenuKind,
     CreateSelectMenuOption, InputTextStyle,
 };
@@ -33,10 +33,38 @@ use connection_pooler::ResourceManager;
 use memberships::*;
 
 use post_api::*;
-use rslash_types::ConfigStruct;
 use rslash_types::InteractionResponse;
+use rslash_types::{ConfigStruct, InteractionResponseMessage};
 
 use crate::{capture_event, get_epoch_ms, get_namespace};
+
+// Return error interaction response from current function if bot doesn't have permission to send messages in the channel
+macro_rules! error_if_no_send_message_perm {
+    ($ctx:expr, $channel:expr) => {
+        let channel = $channel.to_channel(&$ctx.http).await?;
+        if let Some(channel) = channel.guild() {
+            if let Ok(perms) =
+                channel.permissions_for_user(&$ctx.cache, $ctx.cache.current_user().id)
+            {
+                if !perms.send_messages() {
+                    return Ok(InteractionResponse::Message(InteractionResponseMessage {
+                        embed: Some(
+                            CreateEmbed::default()
+                                .title("Permission Error")
+                                .description(
+                                    "I don't have permission to send messages in this channel.",
+                                )
+                                .color(0xff0000)
+                                .to_owned(),
+                        ),
+                        ephemeral: true,
+                        ..Default::default()
+                    }));
+                }
+            }
+        }
+    };
+}
 
 #[instrument(skip(command, ctx, tx))]
 pub async fn get_subreddit_cmd<'a>(
@@ -71,7 +99,7 @@ pub async fn get_subreddit_cmd<'a>(
     if config.nsfw_subreddits.contains(&subreddit) {
         if let Some(channel) = command.channel_id.to_channel_cached(&ctx.cache) {
             if !channel.nsfw {
-                return Ok(InteractionResponse {
+                return Ok(InteractionResponse::Message(InteractionResponseMessage {
                     embed: Some(CreateEmbed::default()
                         .title("NSFW subreddits can only be used in NSFW channels")
                         .description("Discord requires NSFW content to only be sent in NSFW channels, find out how to fix this [here](https://support.discord.com/hc/en-us/articles/115000084051-NSFW-Channels-and-Content)")
@@ -79,7 +107,7 @@ pub async fn get_subreddit_cmd<'a>(
                         .to_owned()
                     ),
                     ..Default::default()
-                });
+                }));
             }
         }
     }
@@ -134,7 +162,7 @@ pub async fn cmd_get_user_tiers<'a>(
     )
     .await;
 
-    return Ok(InteractionResponse {
+    return Ok(InteractionResponse::Message(InteractionResponseMessage {
         embed: Some(
             CreateEmbed::default()
                 .title("Your membership tiers")
@@ -142,8 +170,9 @@ pub async fn cmd_get_user_tiers<'a>(
                 .field("Premium", bronze, false)
                 .to_owned(),
         ),
+        ephemeral: true,
         ..Default::default()
-    });
+    }));
 }
 
 #[instrument(skip(command, ctx, parent_tx))]
@@ -167,7 +196,7 @@ pub async fn get_custom_subreddit<'a>(
     )
     .await;
     if !membership.bronze.active {
-        return Ok(InteractionResponse {
+        return Ok(InteractionResponse::Message(InteractionResponseMessage {
             embed: Some(
                 CreateEmbed::default()
                     .title("Premium Feature")
@@ -179,7 +208,7 @@ pub async fn get_custom_subreddit<'a>(
                     .to_owned(),
             ),
             ..Default::default()
-        });
+        }));
     }
 
     let options = &command.data.options;
@@ -200,7 +229,7 @@ pub async fn get_custom_subreddit<'a>(
 
     if res.status() != 200 {
         debug!("Subreddit response not 200: {}", res.text().await?);
-        return Ok(InteractionResponse {
+        return Ok(InteractionResponse::Message(InteractionResponseMessage {
             embed: Some(
                 CreateEmbed::default()
                     .title("Subreddit Inaccessible")
@@ -209,7 +238,7 @@ pub async fn get_custom_subreddit<'a>(
                     .to_owned(),
             ),
             ..Default::default()
-        });
+        }));
     }
 
     let conf = data_lock.get::<ConfigStruct>().unwrap();
@@ -307,7 +336,7 @@ pub async fn info<'a>(
 
     let id = ctx.cache.current_user().id.get();
 
-    return Ok(InteractionResponse {
+    return Ok(InteractionResponse::Message(InteractionResponseMessage {
         embed: Some(CreateEmbed::default()
             .title("Info")
             .color(0x00ff00).to_owned()
@@ -334,7 +363,7 @@ pub async fn info<'a>(
             ]
     )]),
         ..Default::default()
-    });
+    }));
 }
 
 pub async fn subscribe_custom<'a>(
@@ -358,7 +387,7 @@ pub async fn subscribe_custom<'a>(
         )
         .await;
         if !membership.bronze.active {
-            return Ok(InteractionResponse {
+            return Ok(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(
                     CreateEmbed::default()
                         .title("Premium Feature")
@@ -370,7 +399,7 @@ pub async fn subscribe_custom<'a>(
                         .to_owned(),
                 ),
                 ..Default::default()
-            });
+            }));
         }
     }
     subscribe(command, ctx, parent_tx).await
@@ -383,16 +412,19 @@ pub async fn subscribe<'a>(
 ) -> Result<InteractionResponse, anyhow::Error> {
     if let Some(member) = &command.member {
         if !member.permissions(&ctx).unwrap().manage_messages() {
-            return Ok(InteractionResponse {
+            return Ok(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(CreateEmbed::default()
                     .title("Permission Error")
                     .description("You must have the 'Manage Messages' permission to setup a subscription.")
                     .color(0xff0000).to_owned()
                 ),
+                ephemeral: true,
                 ..Default::default()
-            });
+            }));
         }
     }
+
+    error_if_no_send_message_perm!(ctx, command.channel_id);
 
     let options = &command.data.options;
     debug!("Command Options: {:?}", options);
@@ -424,7 +456,7 @@ pub async fn subscribe<'a>(
     {
         tx.finish();
         if format!("{}", x).contains("Already subscribed") {
-            return Ok(InteractionResponse {
+            return Ok(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(
                     CreateEmbed::default()
                         .title("Already Subscribed")
@@ -436,7 +468,7 @@ pub async fn subscribe<'a>(
                         .to_owned(),
                 ),
                 ..Default::default()
-            });
+            }));
         } else {
             bail!(x);
         }
@@ -452,7 +484,7 @@ pub async fn subscribe<'a>(
     )
     .await;
 
-    return Ok(InteractionResponse {
+    return Ok(InteractionResponse::Message(InteractionResponseMessage {
         embed: Some(
             CreateEmbed::default()
                 .title("Subscribed")
@@ -464,7 +496,7 @@ pub async fn subscribe<'a>(
                 .to_owned(),
         ),
         ..Default::default()
-    });
+    }));
 }
 
 pub async fn unsubscribe<'a>(
@@ -474,14 +506,15 @@ pub async fn unsubscribe<'a>(
 ) -> Result<InteractionResponse, anyhow::Error> {
     if let Some(member) = &command.member {
         if !member.permissions(&ctx).unwrap().manage_messages() {
-            return Ok(InteractionResponse {
+            return Ok(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(CreateEmbed::default()
                     .title("Permission Error")
                     .description("You must have the 'Manage Messages' permission to manage subscriptions.")
                     .color(0xff0000).to_owned()
                 ),
+                ephemeral: true,
                 ..Default::default()
-            });
+            }));
         }
     }
 
@@ -510,7 +543,7 @@ pub async fn unsubscribe<'a>(
     };
 
     if subreddits.len() == 0 {
-        return Ok(InteractionResponse {
+        return Ok(InteractionResponse::Message(InteractionResponseMessage {
             embed: Some(
                 CreateEmbed::default()
                     .title("No Subscriptions")
@@ -520,7 +553,7 @@ pub async fn unsubscribe<'a>(
             ),
             ephemeral: true,
             ..Default::default()
-        });
+        }));
     }
 
     let menu = CreateSelectMenu::new(
@@ -538,11 +571,11 @@ pub async fn unsubscribe<'a>(
 
     let components = vec![CreateActionRow::SelectMenu(menu)];
 
-    return Ok(InteractionResponse {
+    return Ok(InteractionResponse::Message(InteractionResponseMessage {
         ephemeral: true,
         components: Some(components),
         ..Default::default()
-    });
+    }));
 }
 
 async fn autopost_start<'a>(
@@ -553,7 +586,7 @@ async fn autopost_start<'a>(
 ) -> Result<InteractionResponse> {
     if let Some(member) = &command.member {
         if !member.permissions(&ctx).unwrap().manage_channels() {
-            return Ok(InteractionResponse {
+            return Ok(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(
                     CreateEmbed::default()
                         .title("Permission Error")
@@ -563,10 +596,13 @@ async fn autopost_start<'a>(
                         .color(0xff0000)
                         .to_owned(),
                 ),
+                ephemeral: true,
                 ..Default::default()
-            });
+            }));
         }
     }
+
+    error_if_no_send_message_perm!(ctx, command.channel_id);
 
     let is_premium = {
         let data_read = ctx.data.read().await;
@@ -635,7 +671,7 @@ pub async fn autopost_stop<'a>(
     trace!("autopost_stop command handler");
     if let Some(member) = &command.member {
         if !member.permissions(&ctx).unwrap().manage_messages() {
-            return Ok(InteractionResponse {
+            return Ok(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(
                     CreateEmbed::default()
                         .title("Permission Error")
@@ -646,7 +682,7 @@ pub async fn autopost_stop<'a>(
                         .to_owned(),
                 ),
                 ..Default::default()
-            });
+            }));
         }
     }
 
@@ -675,7 +711,7 @@ pub async fn autopost_stop<'a>(
     };
 
     if autoposts.len() == 0 {
-        return Ok(InteractionResponse {
+        return Ok(InteractionResponse::Message(InteractionResponseMessage {
             embed: Some(
                 CreateEmbed::default()
                     .title("No Autoposts")
@@ -685,7 +721,7 @@ pub async fn autopost_stop<'a>(
             ),
             ephemeral: true,
             ..Default::default()
-        });
+        }));
     }
 
     let mut fancy_texts = Vec::new();
@@ -721,11 +757,11 @@ pub async fn autopost_stop<'a>(
     let components = vec![CreateActionRow::SelectMenu(menu)];
 
     trace!("Sending select menu");
-    return Ok(InteractionResponse {
+    return Ok(InteractionResponse::Message(InteractionResponseMessage {
         ephemeral: true,
         components: Some(components),
         ..Default::default()
-    });
+    }));
 }
 
 pub async fn autopost<'a>(

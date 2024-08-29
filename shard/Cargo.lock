@@ -176,6 +176,7 @@ dependencies = [
  "post_api",
  "posthog",
  "redis 0.26.1",
+ "rslash_types",
  "sentry 0.34.0",
  "serde",
  "serde_derive",
@@ -416,7 +417,7 @@ dependencies = [
  "once_cell",
  "proc-macro2",
  "quote",
- "rustc_version 0.4.0",
+ "rustc_version 0.4.1",
  "semver 1.0.23",
  "time",
 ]
@@ -654,7 +655,7 @@ dependencies = [
  "convert_case",
  "proc-macro2",
  "quote",
- "rustc_version 0.4.0",
+ "rustc_version 0.4.1",
  "syn 2.0.76",
 ]
 
@@ -2433,9 +2434,9 @@ dependencies = [
 
 [[package]]
 name = "rustc_version"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfa0f585226d2e68097d4f95d113b15b83a82e819ab25717ec0590d9584ef366"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver 1.0.23",
 ]
@@ -2741,7 +2742,7 @@ dependencies = [
  "hostname 0.3.1",
  "libc",
  "os_info",
- "rustc_version 0.4.0",
+ "rustc_version 0.4.1",
  "sentry-core 0.29.3",
  "uname",
 ]
@@ -2755,7 +2756,7 @@ dependencies = [
  "hostname 0.4.0",
  "libc",
  "os_info",
- "rustc_version 0.4.0",
+ "rustc_version 0.4.1",
  "sentry-core 0.34.0",
  "uname",
 ]

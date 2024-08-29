@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail};
 use auto_poster::AutoPosterClient;
 use post_subscriber::{Bot, SubscriberClient};
-use rslash_types::InteractionResponse;
-use serenity::all::{ComponentInteraction, ComponentInteractionDataKind, ComponentType, Context};
+use rslash_types::{InteractionResponse, InteractionResponseMessage};
+use serenity::all::{ComponentInteraction, ComponentInteractionDataKind, Context};
 use tarpc::context;
 
 use crate::{capture_event, get_namespace};
@@ -59,11 +59,11 @@ pub async fn unsubscribe(
     )
     .await;
 
-    Ok(InteractionResponse {
+    Ok(InteractionResponse::Message(InteractionResponseMessage {
         content: Some(format!("Unsubscribed from r/{}", subreddit)),
         ephemeral: true,
         ..Default::default()
-    })
+    }))
 }
 
 pub async fn autopost_cancel(
@@ -117,9 +117,9 @@ pub async fn autopost_cancel(
     )
     .await;
 
-    Ok(InteractionResponse {
+    Ok(InteractionResponse::Message(InteractionResponseMessage {
         content: Some(format!("Stopped Autopost: {}", fancy_text)),
         ephemeral: true,
         ..Default::default()
-    })
+    }))
 }

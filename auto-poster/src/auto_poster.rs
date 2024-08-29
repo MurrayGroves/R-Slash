@@ -1,18 +1,10 @@
-use std::{
-    collections::HashSet,
-    fmt::Display,
-    hash::{Hash, Hasher},
-};
+use std::hash::{Hash, Hasher};
 
-use mongodb::bson::Bson;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::serde_as;
 use serenity::all::ChannelId;
-use tokio::{
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use tokio::time::{Duration, Instant};
 
 #[tarpc::service]
 pub trait AutoPoster {
@@ -55,34 +47,29 @@ impl From<PostMemoryIntermediate> for PostMemory {
     fn from(value: PostMemoryIntermediate) -> Self {
         Self {
             id: value.id.unwrap_or(value.channel as i64),
-            next_post: Instant::now() + value.interval,
+            next_post: Instant::now() + Duration::from_secs(value.interval.try_into().unwrap()),
             channel: ChannelId::new(value.channel),
             subreddit: value.subreddit,
             search: value.search,
-            interval: value.interval,
+            interval: Duration::from_secs(value.interval.try_into().unwrap()),
             limit: value.limit,
             current: value.current,
-            bot: match value.bot {
-                Value::Number(x) => x.as_u64().unwrap(),
-                Value::String(x) => x.parse().unwrap(),
-                _ => {
-                    panic!("Invalid bot value");
-                }
-            },
+            bot: value.bot.try_into().unwrap(),
         }
     }
 }
 
 impl From<PostMemory> for PostMemoryIntermediate {
     fn from(value: PostMemory) -> Self {
+        println!("Converting postmemory");
         Self {
             channel: value.channel.get(),
             subreddit: value.subreddit,
             search: value.search,
-            interval: value.interval,
+            interval: value.interval.as_secs().try_into().unwrap(),
             limit: value.limit,
             current: value.current,
-            bot: Value::Number(value.bot.into()),
+            bot: value.bot.try_into().unwrap(),
             id: Some(value.id),
         }
     }
@@ -94,10 +81,10 @@ pub struct PostMemoryIntermediate {
     pub channel: u64,
     pub subreddit: String,
     pub search: Option<String>,
-    pub interval: Duration,
+    pub interval: i64,
     pub limit: Option<u32>,
     pub current: u32,
-    pub bot: Value,
+    pub bot: i64,
     pub id: Option<i64>,
 }
 

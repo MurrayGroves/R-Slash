@@ -18,7 +18,7 @@ pub enum AutoPostCommand {
     Stop(ChannelId),
 }
 
-use serenity::all::{ChannelId, CreateActionRow, UserId};
+use serenity::all::{ChannelId, CreateActionRow, CreateModal, UserId};
 use tokio::time::Instant;
 
 /// Stores config values required for operation of the shard
@@ -34,7 +34,7 @@ impl serenity::prelude::TypeMapKey for ConfigStruct {
 }
 
 #[derive(Debug, Clone)]
-pub struct InteractionResponse {
+pub struct InteractionResponseMessage {
     pub file: Option<serenity::builder::CreateAttachment>,
     pub embed: Option<serenity::all::CreateEmbed>,
     pub content: Option<String>,
@@ -43,9 +43,28 @@ pub struct InteractionResponse {
     pub fallback: ResponseFallbackMethod,
 }
 
+#[derive(Debug, Clone)]
+pub enum InteractionResponse {
+    Message(InteractionResponseMessage),
+    Modal(CreateModal),
+    None,
+}
 impl Default for InteractionResponse {
     fn default() -> Self {
-        InteractionResponse {
+        InteractionResponse::Message(InteractionResponseMessage {
+            file: None,
+            embed: None,
+            content: None,
+            ephemeral: false,
+            components: None,
+            fallback: ResponseFallbackMethod::Error,
+        })
+    }
+}
+
+impl Default for InteractionResponseMessage {
+    fn default() -> Self {
+        InteractionResponseMessage {
             file: None,
             embed: None,
             content: None,

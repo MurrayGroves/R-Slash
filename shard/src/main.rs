@@ -1,28 +1,21 @@
-use auto_poster::AutoPosterClient;
 use futures::FutureExt;
 use log::trace;
-use post_subscriber::{Bot, SubscriberClient};
 use rand::Rng;
-use serenity::all::{
-    ActionRowComponent, AutocompleteChoice, ButtonStyle, CreateAutocompleteResponse, CreateButton,
-    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
-};
+use serenity::all::{AutocompleteChoice, CreateAutocompleteResponse};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
 use stubborn_io::tokio::{StubbornIo, UnderlyingIo};
 use stubborn_io::{ReconnectOptions, StubbornTcpStream};
-use tarpc::context;
 use tarpc::serde_transport::Transport;
 use tarpc::tokio_serde::formats::Bincode;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
 use tracing::instrument;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{
     prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, Layer,
 };
 
-use rslash_types::ResponseFallbackMethod;
+use rslash_types::{InteractionResponseMessage, ResponseFallbackMethod};
 use std::collections::HashMap;
 use std::env;
 use std::io::Write;
@@ -31,8 +24,8 @@ use std::task::Poll;
 use std::{fs, iter};
 
 use serenity::builder::{
-    CreateActionRow, CreateEmbed, CreateEmbedFooter, CreateInputText, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, CreateModal, EditInteractionResponse,
+    CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    EditInteractionResponse,
 };
 use serenity::model::gateway::GatewayIntents;
 use serenity::model::id::ShardId;
@@ -44,7 +37,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
-use tokio::time::{sleep, timeout, Duration, Instant};
+use tokio::time::{sleep, timeout, Duration};
 
 use redis::AsyncCommands;
 use redis::{self, FromRedisValue};
@@ -56,19 +49,16 @@ use mongodb::options::FindOptions;
 use serenity::model::application::{CommandInteraction, Interaction};
 use serenity::model::guild::{Guild, UnavailableGuild};
 
-use anyhow::{anyhow, bail, Error};
+use anyhow::{anyhow, Error};
 use sentry_anyhow::capture_anyhow;
 
 use connection_pooler::ResourceManager;
-use memberships::*;
 
 mod command_handlers;
 mod component_handlers;
 mod modal_handlers;
-mod poster;
 
 use post_api::*;
-use rslash_types::AutoPostCommand;
 use rslash_types::ConfigStruct;
 use rslash_types::InteractionResponse;
 
@@ -166,14 +156,14 @@ fn error_response(code: String) -> InteractionResponse {
         .color(Colour::from_rgb(255, 0, 0))
         .to_owned();
 
-    return InteractionResponse {
+    return InteractionResponse::Message(InteractionResponseMessage  {
         file: None,
         embed: Some(embed),
         content: None,
         ephemeral: true,
         components: None,
         fallback: ResponseFallbackMethod::Followup,
-    };
+    });
 }
 
 #[instrument(skip(command, ctx, tx))]
@@ -183,7 +173,7 @@ async fn get_command_response<'a>(
     tx: &'a sentry::Transaction,
 ) -> Result<InteractionResponse, anyhow::Error> {
     match command.data.name.as_str() {
-        "ping" => Ok(InteractionResponse {
+        "ping" => Ok(InteractionResponse::Message(InteractionResponseMessage {
             content: None,
             embed: Some(
                 CreateEmbed::default()
@@ -195,9 +185,9 @@ async fn get_command_response<'a>(
             file: None,
             ephemeral: false,
             fallback: ResponseFallbackMethod::Error,
-        }),
+        })),
 
-        "support" => Ok(InteractionResponse {
+        "support" => Ok(InteractionResponse::Message(InteractionResponseMessage {
             content: None,
             embed: Some(
                 CreateEmbed::default()
@@ -214,7 +204,7 @@ async fn get_command_response<'a>(
             file: None,
             ephemeral: false,
             fallback: ResponseFallbackMethod::Error,
-        }),
+        })),
 
         "get" => {
             let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child(
@@ -420,609 +410,564 @@ impl EventHandler for Handler {
         let tx = sentry::start_transaction(tx_ctx);
         sentry::configure_scope(|scope| scope.set_span(Some(tx.clone().into())));
 
-        if let Interaction::Command(command) = interaction.clone() {
-            let slash_command_tx =
-                tx.start_child("interaction.slash_command", "handle slash command");
-            match command.guild_id {
-                Some(guild_id) => {
-                    info!(
-                        "{:?} ({:?}) > {:?} ({:?}) : /{} {:?}",
-                        guild_id
-                            .name(&ctx.cache)
-                            .unwrap_or("Name Unavailable".into()),
-                        guild_id.get(),
-                        command.user.name,
-                        command.user.id.get(),
-                        command.data.name,
-                        command.data.options
-                    );
-                    info!("Sent at {:?}", command.id.created_at());
+        let interaction_response = match &interaction {
+            Interaction::Command(command) => {
+                match command.guild_id {
+                    Some(guild_id) => {
+                        info!(
+                            "{:?} ({:?}) > {:?} ({:?}) : /{} {:?}",
+                            guild_id
+                                .name(&ctx.cache)
+                                .unwrap_or("Name Unavailable".into()),
+                            guild_id.get(),
+                            command.user.name,
+                            command.user.id.get(),
+                            command.data.name,
+                            command.data.options
+                        );
+                        info!("Sent at {:?}", command.id.created_at());
+                    }
+                    None => {
+                        info!(
+                            "{:?} ({:?}) : /{} {:?}",
+                            command.user.name,
+                            command.user.id.get(),
+                            command.data.name,
+                            command.data.options
+                        );
+                        info!("Sent at {:?}", command.id.created_at());
+                    }
                 }
-                None => {
-                    info!(
-                        "{:?} ({:?}) : /{} {:?}",
-                        command.user.name,
-                        command.user.id.get(),
-                        command.data.name,
-                        command.data.options
-                    );
-                    info!("Sent at {:?}", command.id.created_at());
+                get_command_response(&command, &ctx, &tx).await
+            },
+            Interaction::Component(command) => {
+                let component_tx = sentry::TransactionOrSpan::from(
+                    tx.start_child("interaction.component", "handle component interaction"),
+                );
+    
+                match command.guild_id {
+                    Some(guild_id) => {
+                        info!(
+                            "{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}",
+                            guild_id
+                                .name(&ctx.cache)
+                                .unwrap_or("Name Unavailable".into()),
+                            guild_id.get(),
+                            command.user.name,
+                            command.user.id.get(),
+                            command.data.custom_id,
+                            command.data.kind
+                        );
+                        info!("Sent at {:?}", command.id.created_at());
+                    }
+                    None => {
+                        info!(
+                            "{:?} ({:?}) : Button {} {:?}",
+                            command.user.name,
+                            command.user.id.get(),
+                            command.data.custom_id,
+                            command.data.kind
+                        );
+                        info!("Sent at {:?}", command.id.created_at());
+                    }
                 }
-            }
-            let command_response = get_command_response(&command, &ctx, &tx).await;
-            let command_response = match command_response {
-                Ok(embed) => embed,
-                Err(why) => {
-                    capture_anyhow(&why);
-
-                    let why = why.to_string();
-                    let code = rand::thread_rng().gen_range(0..10000);
-
-                    info!("Error code {} getting command response: {:?}", code, why);
-
-                    capture_event(
-                        ctx.data.clone(),
-                        "command_error",
-                        None,
-                        Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])),
-                        &format!("user_{}", command.user.id),
-                    )
-                    .await;
-                    sentry::capture_message(
-                        &format!("Error getting command response: {:?}", why),
-                        sentry::Level::Error,
-                    );
-
-                    let map = HashMap::from([(
-                        "content",
-                        format!("Error code {} getting command response: {:?}", code, why),
-                    )]);
-                    let client = reqwest::Client::new();
-                    let _ = client.post("https://discord.com/api/webhooks/1065290872729649293/RmbUroqyxn6RXQythEdDtjIq4ztiYZ4dt1ZPSTxxwYK42GL0TB46E1rkRdG5xeVg7YfF")
-                        .json(&map)
-                        .send()
-                        .await;
-
-                    error_response(code.to_string())
-                }
-            };
-
-            debug!("Sending response: {:?}", command_response);
-
-            // Try to send response
-            if let Err(why) = {
-                let api_span =
-                    slash_command_tx.start_child("discord.api", "create slash command response");
-
-                let mut resp = CreateInteractionResponseMessage::new();
-                if let Some(embed) = command_response.embed.clone() {
-                    resp = resp.embed(embed);
+    
+                // If custom_id uses invalid data structure (old version of bot), ignore interaction
+                let custom_id: HashMap<String, serde_json::Value> =
+                    if let Ok(custom_id) = serde_json::from_str(&command.data.custom_id) {
+                        custom_id
+                    } else {
+                        return;
+                    };
+    
+                let button_command = match custom_id.get("command") {
+                    Some(command) => command.to_string().replace('"', ""),
+                    None => "again".to_string(),
                 };
-
-                if let Some(components) = command_response.components.clone() {
-                    resp = resp.components(components);
-                };
-
-                if let Some(content) = command_response.content.clone() {
-                    resp = resp.content(content);
-                };
-
-                resp = resp.ephemeral(command_response.ephemeral);
-                let to_return = command
-                    .create_response(&ctx.http, CreateInteractionResponse::Message(resp))
-                    .await;
-
-                api_span.finish();
-                to_return
-            } {
-                match why {
-                    serenity::Error::Http(e) => {
-                        if format!("{}", e) == "Interaction has already been acknowledged." {
-                            debug!(
-                                "Interaction already acknowledged, fallback is: {:?}",
-                                command_response.fallback
-                            );
-
-                            // Interaction has already been responded to, we either need to edit the response, send a followup, error, or do nothing
-                            // depending on the fallback method specified
-                            match command_response.fallback {
-                                ResponseFallbackMethod::Edit => {
-                                    let api_span = slash_command_tx
-                                        .start_child("discord.api", "edit slash command response");
-                                    let mut resp = EditInteractionResponse::new();
-                                    if let Some(embed) = command_response.embed.clone() {
-                                        resp = resp.embed(embed);
-                                    };
-
-                                    if let Some(components) = command_response.components.clone() {
-                                        resp = resp.components(components);
-                                    };
-
-                                    if let Some(content) = command_response.content.clone() {
-                                        resp = resp.content(content);
-                                    };
-
-                                    if let Err(why) = command.edit_response(&ctx.http, resp).await {
-                                        warn!("Cannot edit slash command response: {}", why);
-                                    };
-                                    api_span.finish();
-                                }
-
-                                ResponseFallbackMethod::Followup => {
-                                    let followup_span = slash_command_tx
-                                        .start_child("discord.api", "send followup");
-                                    let mut resp = CreateMessage::new();
-                                    if let Some(embed) = command_response.embed.clone() {
-                                        resp = resp.embed(embed);
-                                    };
-
-                                    if let Some(components) = command_response.components.clone() {
-                                        resp = resp.components(components);
-                                    };
-
-                                    if let Some(content) = command_response.content.clone() {
-                                        resp = resp.content(content);
-                                    };
-
-                                    if let Err(why) =
-                                        command.channel_id.send_message(&ctx.http, resp).await
-                                    {
-                                        warn!("Cannot send followup to slash command: {}", why);
-                                    }
-                                    followup_span.finish();
-                                }
-
-                                ResponseFallbackMethod::Error => {
-                                    error!("Cannot respond to slash command: {}", e);
-                                }
-
-                                ResponseFallbackMethod::None => {}
+    
+                let component_response: Option<Result<InteractionResponse, Error>> =
+                    match button_command.as_str() {
+                        "again" => {
+                            let subreddit = custom_id["subreddit"].to_string().replace('"', "");
+                            debug!("Search, {:?}", custom_id["search"]);
+                            let search_enabled = match custom_id["search"] {
+                                serde_json::Value::String(_) => true,
+                                _ => false,
                             };
-                        } else {
-                            error!("Cannot respond to slash command: {}", e);
-                            sentry::capture_error(&e);
-                        }
-                    }
-
-                    _ => {
-                        warn!("Cannot respond to slash command: {}", why);
-                    }
-                };
-                slash_command_tx.finish();
-            }
-        }
-
-        if let Interaction::Component(command) = interaction.clone() {
-            let component_tx = sentry::TransactionOrSpan::from(
-                tx.start_child("interaction.component", "handle component interaction"),
-            );
-
-            match command.guild_id {
-                Some(guild_id) => {
-                    info!(
-                        "{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}",
-                        guild_id
-                            .name(&ctx.cache)
-                            .unwrap_or("Name Unavailable".into()),
-                        guild_id.get(),
-                        command.user.name,
-                        command.user.id.get(),
-                        command.data.custom_id,
-                        command.data.kind
-                    );
-                    info!("Sent at {:?}", command.id.created_at());
-                }
-                None => {
-                    info!(
-                        "{:?} ({:?}) : Button {} {:?}",
-                        command.user.name,
-                        command.user.id.get(),
-                        command.data.custom_id,
-                        command.data.kind
-                    );
-                    info!("Sent at {:?}", command.id.created_at());
-                }
-            }
-
-            // If custom_id uses invalid data structure (old version of bot), ignore interaction
-            let custom_id: HashMap<String, serde_json::Value> =
-                if let Ok(custom_id) = serde_json::from_str(&command.data.custom_id) {
-                    custom_id
-                } else {
-                    return;
-                };
-
-            let button_command = match custom_id.get("command") {
-                Some(command) => command.to_string().replace('"', ""),
-                None => "again".to_string(),
-            };
-
-            let component_response: Option<Result<InteractionResponse, Error>> =
-                match button_command.as_str() {
-                    "again" => {
-                        let subreddit = custom_id["subreddit"].to_string().replace('"', "");
-                        debug!("Search, {:?}", custom_id["search"]);
-                        let search_enabled = match custom_id["search"] {
-                            serde_json::Value::String(_) => true,
-                            _ => false,
-                        };
-
-                        capture_event(
-                            ctx.data.clone(),
-                            "subreddit_cmd",
-                            Some(&component_tx),
-                            Some(HashMap::from([
-                                ("subreddit", subreddit.clone().to_lowercase()),
-                                ("button", "true".to_string()),
-                                ("search_enabled", search_enabled.to_string()),
-                            ])),
-                            &format!("user_{}", command.user.id.get().to_string()),
-                        )
-                        .await;
-
-                        let data_read = ctx.data.read().await;
-                        let conf = data_read.get::<ConfigStruct>().unwrap();
-                        let mut con = conf.redis.clone();
-
-                        let component_response = match search_enabled {
-                            true => {
-                                let search = custom_id["search"].to_string().replace('"', "");
-                                match timeout(
-                                    Duration::from_secs(30),
-                                    get_subreddit_search(
-                                        subreddit,
-                                        search,
-                                        &mut con,
-                                        command.channel_id,
-                                        Some(&component_tx),
-                                    ),
-                                )
-                                .await
-                                {
-                                    Ok(x) => x,
-                                    Err(x) => {
-                                        Err(anyhow!("Timeout getting search results: {:?}", x))
+    
+                            capture_event(
+                                ctx.data.clone(),
+                                "subreddit_cmd",
+                                Some(&component_tx),
+                                Some(HashMap::from([
+                                    ("subreddit", subreddit.clone().to_lowercase()),
+                                    ("button", "true".to_string()),
+                                    ("search_enabled", search_enabled.to_string()),
+                                ])),
+                                &format!("user_{}", command.user.id.get().to_string()),
+                            )
+                            .await;
+    
+                            let data_read = ctx.data.read().await;
+                            let conf = data_read.get::<ConfigStruct>().unwrap();
+                            let mut con = conf.redis.clone();
+    
+                            let component_response = match search_enabled {
+                                true => {
+                                    let search = custom_id["search"].to_string().replace('"', "");
+                                    match timeout(
+                                        Duration::from_secs(30),
+                                        get_subreddit_search(
+                                            subreddit,
+                                            search,
+                                            &mut con,
+                                            command.channel_id,
+                                            Some(&component_tx),
+                                        ),
+                                    )
+                                    .await
+                                    {
+                                        Ok(x) => x,
+                                        Err(x) => {
+                                            Err(anyhow!("Timeout getting search results: {:?}", x))
+                                        }
                                     }
                                 }
-                            }
-                            false => {
-                                match timeout(
-                                    Duration::from_secs(30),
-                                    get_subreddit(
-                                        subreddit,
-                                        &mut con,
-                                        command.channel_id,
-                                        Some(&component_tx),
-                                    ),
-                                )
-                                .await
-                                {
-                                    Ok(x) => x,
-                                    Err(x) => Err(anyhow!("Timeout getting subreddit: {:?}", x)),
+                                false => {
+                                    match timeout(
+                                        Duration::from_secs(30),
+                                        get_subreddit(
+                                            subreddit,
+                                            &mut con,
+                                            command.channel_id,
+                                            Some(&component_tx),
+                                        ),
+                                    )
+                                    .await
+                                    {
+                                        Ok(x) => x,
+                                        Err(x) => Err(anyhow!("Timeout getting subreddit: {:?}", x)),
+                                    }
                                 }
-                            }
-                        };
-
-                        Some(component_response)
+                            };
+    
+                            Some(component_response)
+                        }
+    
+                        "unsubscribe" => Some(component_handlers::unsubscribe(&ctx, &command).await),
+                        "autopost_cancel" => {
+                            Some(component_handlers::autopost_cancel(&ctx, &command).await)
+                        }
+                        "where-autopost" => Some(Ok(InteractionResponse::Message(InteractionResponseMessage {
+                            content: Some("Auto-post setup has been moved to the `/autopost start` command to reduce clutter on the post view\nand because only users with Manage Channels can setup auto-posts so it doesn't make much sense to show to everyone.".to_string()),
+                            ephemeral: true,
+                            ..Default::default()
+                        }))),
+    
+                        _ => {
+                            warn!("Unknown button command: {}", button_command);
+                            return;
+                        }
+                    };
+    
+                match component_response {
+                    Some(component_response) => component_response,
+                    None => {
+                        return;
                     }
-
-                    "unsubscribe" => Some(component_handlers::unsubscribe(&ctx, &command).await),
-                    "autopost_cancel" => {
-                        Some(component_handlers::autopost_cancel(&ctx, &command).await)
+                }
+            },
+            Interaction::Modal(modal) => {
+                let modal_tx = sentry::TransactionOrSpan::from(
+                    tx.start_child("interaction.modal", "handle modal interaction"),
+                );
+    
+                match modal.guild_id {
+                    Some(guild_id) => {
+                        info!(
+                            "{:?} ({:?}) > {:?} ({:?}) : Modal {} {:?}",
+                            guild_id
+                                .name(&ctx.cache)
+                                .unwrap_or("Name Unavailable".into()),
+                            guild_id.get(),
+                            modal.user.name,
+                            modal.user.id.get(),
+                            modal.data.custom_id,
+                            modal.data.components
+                        );
+                        info!("Sent at {:?}", modal.id.created_at());
                     }
-                    "where-autopost" => Some(Ok(InteractionResponse {
-                        content: Some("Auto-post setup has been moved to the `/autopost start` command to reduce clutter on the post view\nand because only users with Manage Channels can setup auto-posts so it doesn't make much sense to show to everyone.".to_string()),
-                        ephemeral: true,
-                        ..Default::default()
-                    })),
-
-                    _ => {
-                        warn!("Unknown button command: {}", button_command);
+                    None => {
+                        info!(
+                            "{:?} ({:?}) : Modal {} {:?}",
+                            modal.user.name,
+                            modal.user.id.get(),
+                            modal.data.custom_id,
+                            modal.data.components
+                        );
+                        info!("Sent at {:?}", modal.id.created_at());
+                    }
+                }
+    
+                // If custom_id uses invalid data structure (old version of bot), ignore interaction
+                let custom_id: HashMap<String, serde_json::Value> =
+                    if let Ok(custom_id) = serde_json::from_str(&modal.data.custom_id) {
+                        custom_id
+                    } else {
+                        return;
+                    };
+    
+                let modal_command = match custom_id.get("command") {
+                    Some(command) => command.as_str().unwrap(),
+                    None => {
+                        warn!("Unknown modal command: {:?}", custom_id);
+                        modal_tx.finish();
                         return;
                     }
                 };
-
-            let component_response = match component_response {
-                Some(component_response) => component_response,
-                None => {
-                    return;
-                }
-            };
-
-            let component_response = match component_response {
-                Ok(component_response) => component_response,
-                Err(error) => {
-                    let why = format!("{:?}", error);
-                    let code = rand::thread_rng().gen_range(0..10000);
-                    error!(
-                        "Error code {} getting command response: {:?}",
-                        code,
-                        error.root_cause()
-                    );
-
-                    capture_event(
-                        ctx.data.clone(),
-                        "command_error",
-                        Some(&component_tx),
-                        Some(HashMap::from([("shard_id", ctx.shard_id.to_string())])),
-                        &format!("user_{}", command.user.id),
-                    )
-                    .await;
-                    sentry::integrations::anyhow::capture_anyhow(&error);
-                    let map = HashMap::from([(
-                        "content",
-                        format!(
-                            "Error code {} getting command response: {:?}",
-                            code,
-                            error.root_cause()
-                        ),
-                    )]);
-
-                    let client = reqwest::Client::new();
-                    let _ = client.post("https://discord.com/api/webhooks/1065290872729649293/RmbUroqyxn6RXQythEdDtjIq4ztiYZ4dt1ZPSTxxwYK42GL0TB46E1rkRdG5xeVg7YfF")
-                        .json(&map)
-                        .send()
-                        .await;
-                    error_response(code.to_string())
-                }
-            };
-
-            if let Err(why) = {
-                let api_span = component_tx.start_child("discord.api", "send button response");
-
-                let mut resp = CreateInteractionResponseMessage::new();
-
-                resp = resp.ephemeral(component_response.ephemeral);
-
-                if let Some(embed) = component_response.embed.clone() {
-                    resp = resp.embed(embed);
-                };
-
-                if let Some(components) = component_response.components.clone() {
-                    resp = resp.components(components);
-                };
-
-                if let Some(content) = component_response.content.clone() {
-                    resp = resp.content(content);
-                };
-
-                let to_return = command
-                    .create_response(&ctx.http, CreateInteractionResponse::Message(resp))
-                    .await;
-                api_span.finish();
-                to_return
-            } {
-                match why {
-                    serenity::Error::Http(e) => {
-                        if format!("{}", e) == "Interaction has already been acknowledged." {
-                            debug!(
-                                "Interaction already acknowledged, fallback is: {:?}",
-                                component_response.fallback
-                            );
-
-                            // Interaction has already been responded to, we either need to edit the response, send a followup, error, or do nothing
-                            // depending on the fallback method specified
-                            match component_response.fallback {
-                                ResponseFallbackMethod::Edit => {
-                                    let api_span = component_tx
-                                        .start_child("discord.api", "edit slash command response");
-                                    let mut resp = EditInteractionResponse::new();
-                                    if let Some(embed) = component_response.embed {
-                                        resp = resp.embed(embed);
-                                    };
-
-                                    if let Some(components) = component_response.components {
-                                        resp = resp.components(components);
-                                    };
-
-                                    if let Some(content) = component_response.content {
-                                        resp = resp.content(content);
-                                    };
-                                    if let Err(why) = command.edit_response(&ctx.http, resp).await {
-                                        warn!("Cannot edit slash command response: {}", why);
-                                    };
-                                    api_span.finish();
-                                }
-
-                                ResponseFallbackMethod::Followup => {
-                                    let followup_span =
-                                        component_tx.start_child("discord.api", "send followup");
-                                    let mut resp = CreateMessage::new();
-                                    if let Some(embed) = component_response.embed {
-                                        resp = resp.embed(embed);
-                                    };
-
-                                    if let Some(components) = component_response.components {
-                                        resp = resp.components(components);
-                                    };
-
-                                    if let Some(content) = component_response.content {
-                                        resp = resp.content(content);
-                                    };
-                                    if let Err(why) =
-                                        command.channel_id.send_message(&ctx.http, resp).await
-                                    {
-                                        warn!("Cannot send followup to slash command: {}", why);
-                                    }
-                                    followup_span.finish();
-                                }
-
-                                ResponseFallbackMethod::Error => {
-                                    error!("Cannot respond to slash command: {}", e);
-                                }
-
-                                ResponseFallbackMethod::None => {}
-                            };
-                        }
+    
+                match modal_command {
+                    "autopost" => {
+                        modal_handlers::autopost_create(&ctx, modal, custom_id, &modal_tx).await
                     }
-
-                    _ => {
-                        warn!("Cannot respond to slash command: {}", why);
-                    }
-                };
-            }
-            component_tx.finish();
-        };
-
-        if let Interaction::Modal(modal) = interaction.clone() {
-            let modal_tx = sentry::TransactionOrSpan::from(
-                tx.start_child("interaction.modal", "handle modal interaction"),
-            );
-
-            match modal.guild_id {
-                Some(guild_id) => {
-                    info!(
-                        "{:?} ({:?}) > {:?} ({:?}) : Modal {} {:?}",
-                        guild_id
-                            .name(&ctx.cache)
-                            .unwrap_or("Name Unavailable".into()),
-                        guild_id.get(),
-                        modal.user.name,
-                        modal.user.id.get(),
-                        modal.data.custom_id,
-                        modal.data.components
-                    );
-                    info!("Sent at {:?}", modal.id.created_at());
+    
+                    _ => Err(anyhow!("Unknown modal command")),
                 }
-                None => {
-                    info!(
-                        "{:?} ({:?}) : Modal {} {:?}",
-                        modal.user.name,
-                        modal.user.id.get(),
-                        modal.data.custom_id,
-                        modal.data.components
-                    );
-                    info!("Sent at {:?}", modal.id.created_at());
-                }
-            }
-
-            // If custom_id uses invalid data structure (old version of bot), ignore interaction
-            let custom_id: HashMap<String, serde_json::Value> =
-                if let Ok(custom_id) = serde_json::from_str(&modal.data.custom_id) {
-                    custom_id
-                } else {
-                    return;
-                };
-
-            let modal_command = match custom_id.get("command") {
-                Some(command) => command.as_str().unwrap(),
-                None => {
-                    warn!("Unknown modal command: {:?}", custom_id);
-                    modal_tx.finish();
-                    return;
-                }
-            };
-
-            match modal_command {
-                "autopost" => {
-                    modal_handlers::autopost_create(&ctx, modal, custom_id, &modal_tx).await;
-                }
-
-                _ => {
-                    warn!("Unknown modal command: {}", modal_command);
-                }
-            }
-
-            modal_tx.finish();
-        }
-
-        if let Interaction::Autocomplete(autocomplete) = interaction {
-            let subreddit = match autocomplete
+            },
+            Interaction::Autocomplete(autocomplete) => {
+                let subreddit = match autocomplete
                 .data
                 .options
                 .iter()
                 .find(|option| option.name == "subreddit")
-            {
-                Some(option) => option.value.as_str().unwrap().to_string(),
-                None => {
+                {
+                    Some(option) => option.value.as_str().unwrap().to_string(),
+                    None => {
+                        return;
+                    }
+                };
+
+                if redis_sanitise(&subreddit).len() < 2 {
                     return;
                 }
-            };
 
-            if redis_sanitise(&subreddit).len() < 2 {
+                debug!("Autocomplete for {:?}", subreddit);
+
+                let data_read = ctx.data.read().await;
+                let conf = data_read.get::<ConfigStruct>().unwrap();
+                let mut con = conf.redis.clone();
+
+                let search = subreddit.replace(' ', "");
+
+                let selector = if ctx.cache.current_user().id.get() == 278550142356029441 {
+                    "nsfw"
+                } else {
+                    "sfw"
+                };
+
+                debug!("Getting autocomplete results for {:?}", search);
+                let results: Vec<redis::Value> = match redis::cmd("FT.SEARCH")
+                    .arg(format!("{}_subs", selector))
+                    .arg(format!("*{}*", redis_sanitise(&search)))
+                    .arg("LIMIT")
+                    .arg(0)
+                    .arg(10)
+                    .query_async(&mut con)
+                    .await
+                {
+                    Ok(x) => x,
+                    Err(e) => {
+                        error!("Error getting autocomplete results: {:?}", e);
+                        return;
+                    }
+                };
+
+                let mut option_names = Vec::new();
+                for result in results {
+                    if let redis::Value::Int(_) = result {
+                        continue;
+                    }
+
+                    if let Ok(x) = String::from_redis_value(&result) {
+                        if x.starts_with("custom_sub") {
+                            continue;
+                        }
+                    }
+
+                    let result: Vec<redis::Value> = match result.into_sequence() {
+                        Ok(x) => x,
+                        Err(e) => {
+                            error!("Error getting autocomplete result: {:?}", e);
+                            continue;
+                        }
+                    };
+                    let name = match String::from_redis_value(&result[1]) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            error!("Error getting autocomplete result: {:?}", e);
+                            continue;
+                        }
+                    };
+                    option_names.push(name);
+                }
+
+                debug!("Autocomplete results: {:?}", option_names);
+
+                let resp = CreateAutocompleteResponse::new().set_choices(
+                    option_names
+                        .into_iter()
+                        .map(|x| AutocompleteChoice::new(x.clone(), x))
+                        .collect(),
+                );
+
+                match autocomplete
+                    .create_response(&ctx.http, CreateInteractionResponse::Autocomplete(resp))
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Failed to send autocomplete response: {:?}", e);
+                    }
+                };
                 return;
+            },
+            _ => {
+                return;
+            },
+        };
+
+        match interaction_response {
+            Ok(response) => {
+                debug!("Sending response: {:?}", response);
+                match response {
+                    InteractionResponse::None => {},
+                    InteractionResponse::Message(command_response) => {
+                                        // Try to send response
+                                        if let Err(why) = {
+                                            let api_span = tx
+                                                .start_child("discord.api", "create slash command response");
+                    
+                                            let mut resp = CreateInteractionResponseMessage::new();
+                                            if let Some(embed) = command_response.embed.clone() {
+                                                resp = resp.embed(embed);
+                                            };
+                    
+                                            if let Some(components) = command_response.components.clone() {
+                                                resp = resp.components(components);
+                                            };
+                    
+                                            if let Some(content) = command_response.content.clone() {
+                                                resp = resp.content(content);
+                                            };
+                    
+                                            resp = resp.ephemeral(command_response.ephemeral);
+                                            let to_return = match &interaction {
+                                                Interaction::Command(command) => {
+                                                    command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await
+                                                },
+                                                Interaction::Component(command) => {
+                                                    command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await
+                                                },
+                                                Interaction::Modal(command) => {
+                                                    command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await
+                                                },
+                                                _ => { Err(serenity::Error::Other("Unknown interaction type")) }
+                                            };
+                                            api_span.finish();
+                                            to_return
+                                        } {
+                                            match why {
+                                                serenity::Error::Http(e) => {
+                                                    if format!("{}", e) == "Interaction has already been acknowledged."
+                                                    {
+                                                        debug!(
+                                                            "Interaction already acknowledged, fallback is: {:?}",
+                                                            command_response.fallback
+                                                        );
+                    
+                                                        // Interaction has already been responded to, we either need to edit the response, send a followup, error, or do nothing
+                                                        // depending on the fallback method specified
+                                                        match command_response.fallback {
+                                                            ResponseFallbackMethod::Edit => {
+                                                                let api_span = tx.start_child(
+                                                                    "discord.api",
+                                                                    "edit slash command response",
+                                                                );
+                                                                let mut resp = EditInteractionResponse::new();
+                                                                if let Some(embed) = command_response.embed.clone() {
+                                                                    resp = resp.embed(embed);
+                                                                };
+                    
+                                                                if let Some(components) =
+                                                                    command_response.components.clone()
+                                                                {
+                                                                    resp = resp.components(components);
+                                                                };
+                    
+                                                                if let Some(content) = command_response.content.clone()
+                                                                {
+                                                                    resp = resp.content(content);
+                                                                };
+                    
+                                                                if let Err(why) =
+                                                                    match &interaction {
+                                                                        Interaction::Command(command) => {
+                                                                            command.edit_response(&ctx.http, resp).await
+                                                                        },
+                                                                        Interaction::Component(command) => {
+                                                                            command.edit_response(&ctx.http, resp).await
+                                                                        },
+                                                                        Interaction::Modal(command) => {
+                                                                            command.edit_response(&ctx.http, resp).await
+                                                                        },
+                                                                        _ => { Err(serenity::Error::Other("Unknown interaction type")) }
+                                                                    }
+                                                                {
+                                                                    warn!(
+                                                                        "Cannot edit slash command response: {}",
+                                                                        why
+                                                                    );
+                                                                };
+                                                                api_span.finish();
+                                                            }
+                    
+                                                            ResponseFallbackMethod::Followup => {
+                                                                let followup_span = tx
+                                                                    .start_child("discord.api", "send followup");
+                                                                let mut resp = CreateMessage::new();
+                                                                if let Some(embed) = command_response.embed.clone() {
+                                                                    resp = resp.embed(embed);
+                                                                };
+                    
+                                                                if let Some(components) =
+                                                                    command_response.components.clone()
+                                                                {
+                                                                    resp = resp.components(components);
+                                                                };
+                    
+                                                                if let Some(content) = command_response.content.clone()
+                                                                {
+                                                                    resp = resp.content(content);
+                                                                };
+                    
+                                                                if let Err(why) = match &interaction {
+                                                                    Interaction::Command(command) => {
+                                                                        command
+                                                                            .channel_id
+                                                                            .send_message(&ctx.http, resp)
+                                                                            .await
+                                                                    },
+                                                                    Interaction::Component(command) => {
+                                                                        command
+                                                                            .channel_id
+                                                                            .send_message(&ctx.http, resp)
+                                                                            .await
+                                                                    },
+                                                                    Interaction::Modal(command) => {
+                                                                        command
+                                                                            .channel_id
+                                                                            .send_message(&ctx.http, resp)
+                                                                            .await
+                                                                    },
+                                                                    _ => { Err(serenity::Error::Other("Unknown interaction type")) }
+                                                                } {
+                                                                    warn!(
+                                                                        "Cannot send followup to slash command: {}",
+                                                                        why
+                                                                    );
+                                                                }
+                                                            
+                                                                followup_span.finish();
+                                                            }
+                    
+                                                            ResponseFallbackMethod::Error => {
+                                                                error!("Cannot respond to slash command: {}", e);
+                                                            }
+                    
+                                                            ResponseFallbackMethod::None => {}
+                                                        };
+                                                    } else {
+                                                        error!("Cannot respond to slash command: {}", e);
+                                                        sentry::capture_error(&e);
+                                                    }
+                                                }
+                    
+                                                _ => {
+                                                    warn!("Cannot respond to slash command: {}", why);
+                                                }
+                                            };
+                                        }
+                                    }
+                                    InteractionResponse::Modal(modal) => {
+                                        if let Err(e) = match &interaction {
+                                            Interaction::Command(command) => {
+                                                command
+                                                    .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+                                                    .await
+                                            },
+                                            Interaction::Component(command) => {
+                                                command
+                                                    .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+                                                    .await
+                                            },
+                                            Interaction::Modal(command) => {
+                                                command
+                                                    .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+                                                    .await
+                                            },
+                                            _ => {
+                                                Err(serenity::Error::Other("Unknown interaction type"))
+                                            }
+                                        }
+                                        {
+                                            error!("Cannot respond to slash command with modal: {}", e);
+                                        }
+                                    }
+                }
+            },
+            Err(e) => {
+                capture_anyhow(&e);
+
+                let why = e.to_string();
+                let code = rand::thread_rng().gen_range(0..10000);
+
+                error!("Error getting command response: {:?}", e.root_cause());
+
+
+                let to_print = format!("Error code {} in shard {} getting command response: {:?}", code, ctx.shard_id, why);
+
+                
+                let mut resp = CreateInteractionResponseMessage::new();
+                resp = resp.embed(
+                    CreateEmbed::default()
+                        .title("An Error Occurred")
+                        .description(format!(
+                            "Please report this in the support server: {}",
+                            to_print
+                        ))
+                        .color(Colour::from_rgb(255, 0, 0))
+                        .to_owned(),
+                );
+                resp = resp.ephemeral(true);
+
+                match &interaction {
+                    Interaction::Command(command) => {
+                        let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await;
+                    },
+                    Interaction::Component(command) => {
+                        let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await;
+                    },
+                    Interaction::Modal(command) => {
+                        let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await;
+                    },
+                    _ => {}
+                }
             }
-
-            debug!("Autocomplete for {:?}", subreddit);
-
-            let data_read = ctx.data.read().await;
-            let conf = data_read.get::<ConfigStruct>().unwrap();
-            let mut con = conf.redis.clone();
-
-            let search = subreddit.replace(' ', "");
-
-            let selector = if ctx.cache.current_user().id.get() == 278550142356029441 {
-                "nsfw"
-            } else {
-                "sfw"
-            };
-
-            debug!("Getting autocomplete results for {:?}", search);
-            let results: Vec<redis::Value> = match redis::cmd("FT.SEARCH")
-                .arg(format!("{}_subs", selector))
-                .arg(format!("*{}*", redis_sanitise(&search)))
-                .arg("LIMIT")
-                .arg(0)
-                .arg(10)
-                .query_async(&mut con)
-                .await
-            {
-                Ok(x) => x,
-                Err(e) => {
-                    error!("Error getting autocomplete results: {:?}", e);
-                    return;
-                }
-            };
-
-            let mut option_names = Vec::new();
-            for result in results {
-                if let redis::Value::Int(_) = result {
-                    continue;
-                }
-
-                if let Ok(x) = String::from_redis_value(&result) {
-                    if x.starts_with("custom_sub") {
-                        continue;
-                    }
-                }
-
-                let result: Vec<redis::Value> = match result.into_sequence() {
-                    Ok(x) => x,
-                    Err(e) => {
-                        error!("Error getting autocomplete result: {:?}", e);
-                        continue;
-                    }
-                };
-                let name = match String::from_redis_value(&result[1]) {
-                    Ok(x) => x,
-                    Err(e) => {
-                        error!("Error getting autocomplete result: {:?}", e);
-                        continue;
-                    }
-                };
-                option_names.push(name);
-            }
-
-            debug!("Autocomplete results: {:?}", option_names);
-
-            let resp = CreateAutocompleteResponse::new().set_choices(
-                option_names
-                    .into_iter()
-                    .map(|x| AutocompleteChoice::new(x.clone(), x))
-                    .collect(),
-            );
-
-            match autocomplete
-                .create_response(&ctx.http, CreateInteractionResponse::Autocomplete(resp))
-                .await
-            {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Failed to send autocomplete response: {:?}", e);
-                }
-            };
         }
+
         tx.finish();
+
+        debug!("Interaction handled");
     }
 }
 
@@ -1113,7 +1058,22 @@ where
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        Pin::new(&mut self.underlying).poll_read(cx, buf)
+        match Pin::new(&mut self.underlying).poll_read(cx, buf) {
+            Poll::Ready(x) => match x {
+                Ok(x) => {
+                    return Poll::Ready(Ok(x));
+                }
+                Err(e) => {
+                    warn!("Error with underlying: {}", e);
+                    match Box::pin(tokio::time::sleep(Duration::from_millis(500))).poll_unpin(cx) {
+                        Poll::Ready(_) => {}
+                        Poll::Pending => return Poll::Pending,
+                    };
+                    return self.poll_read(cx, buf);
+                }
+            },
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -1361,7 +1321,7 @@ async fn main() {
                     .with_ansi(false)
                     .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG)
                     .with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
-                        if meta.name().contains("serenity") {
+                        if meta.name().contains("serenity") || meta.target().contains("request")  || meta.target().contains("hyper") || meta.target().contains("h2") {
                             return false;
                         };
                         true

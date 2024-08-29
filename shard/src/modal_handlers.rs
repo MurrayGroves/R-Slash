@@ -1,23 +1,21 @@
 use std::collections::HashMap;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use auto_poster::AutoPosterClient;
 use connection_pooler::ResourceManager;
-use log::{debug, error, warn};
+use log::{debug, warn};
 use memberships::get_user_tiers;
-use serenity::all::{
-    ActionRowComponent, Context, CreateEmbed, CreateInteractionResponse,
-    CreateInteractionResponseMessage, ModalInteraction,
-};
+use rslash_types::{InteractionResponse, InteractionResponseMessage};
+use serenity::all::{ActionRowComponent, Context, CreateEmbed, ModalInteraction};
 
 use crate::capture_event;
 
 pub async fn autopost_create(
     ctx: &Context,
-    modal: ModalInteraction,
+    modal: &ModalInteraction,
     custom_id: HashMap<String, serde_json::Value>,
     modal_tx: &sentry::TransactionOrSpan,
-) -> Result<(), anyhow::Error> {
+) -> Result<InteractionResponse, anyhow::Error> {
     capture_event(
         ctx.data.clone(),
         "autopost_start",
@@ -94,58 +92,37 @@ pub async fn autopost_create(
                         "Invalid limit, must be a number."
                     };
 
-                    let error_response = CreateInteractionResponseMessage::new()
-                        .embed(
+                    return Ok(InteractionResponse::Message(InteractionResponseMessage {
+                        embed: Some(
                             CreateEmbed::new()
                                 .title("Invalid Limit")
                                 .description(error_message)
                                 .color(0xff0000),
-                        )
-                        .ephemeral(true);
-
-                    match modal
-                        .create_response(
-                            &ctx.http,
-                            CreateInteractionResponse::Message(error_response),
-                        )
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("Failed to send error response: {:?}", e);
-                        }
-                    };
-                    return Ok(());
+                        ),
+                        ephemeral: true,
+                        ..Default::default()
+                    }));
                 }
             }
         },
         None => None,
     };
 
-    let invalid_interval = || async {
-        debug!("Invalid interval: {:?}", interval);
-
-        let error_response = CreateInteractionResponseMessage::new()
-            .embed(CreateEmbed::new()
-                .title("Invalid Interval")
-                .description(format!("Invalid Interval: {}, it must be a number followed by either 's', 'm', 'h', or 'd' - indicating seconds, minutes, hours, or days.", interval))
-                .color(0xff0000)
-            )
-            .ephemeral(true);
-
-        match modal
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::Message(error_response),
-            )
-            .await
-        {
-            Ok(_) => {}
-            Err(e) => {
-                error!("Failed to send error response: {:?}", e);
-            }
-        };
-    };
+    macro_rules! invalid_interval_resp {
+        ($interval:expr) =>
+        { return Ok(InteractionResponse::Message(InteractionResponseMessage {
+            embed: Some(
+                CreateEmbed::new()
+                    .title("Invalid Interval")
+                    .description(
+                        format!("Invalid Interval: {}, it must be a number followed by either 's', 'm', 'h', or 'd' - indicating seconds, minutes, hours, or days.", $interval),
+                    )
+                    .color(0xff0000),
+            ),
+            ephemeral: true,
+            ..Default::default()
+        }))}
+    }
 
     let multiplier = if interval.ends_with("s") {
         1
@@ -156,11 +133,10 @@ pub async fn autopost_create(
     } else if interval.ends_with("d") {
         86400
     } else {
-        invalid_interval().await;
-        return Ok(());
+        invalid_interval_resp!(interval);
     };
 
-    let interval = if interval.ends_with("s") {
+    let interval_parsed = if interval.ends_with("s") {
         interval.replace("s", "").parse::<u64>()
     } else if interval.ends_with("m") {
         interval.replace("m", "").parse::<u64>()
@@ -169,15 +145,17 @@ pub async fn autopost_create(
     } else if interval.ends_with("d") {
         interval.replace("d", "").parse::<u64>()
     } else {
-        invalid_interval().await;
-        return Ok(());
+        invalid_interval_resp!(interval);
     };
 
-    let interval = match interval {
+    if interval_parsed == Ok(0) {
+        invalid_interval_resp!(interval);
+    }
+
+    let interval = match interval_parsed {
         Ok(x) => tokio::time::Duration::from_secs(x * (multiplier as u64)),
         Err(_) => {
-            invalid_interval().await;
-            return Ok(());
+            invalid_interval_resp!(interval);
         }
     };
 
@@ -195,49 +173,22 @@ pub async fn autopost_create(
             search,
             ctx.http.application_id().expect("app ID missing").get(),
         )
-        .await
+        .await?
     {
         Ok(_) => {}
         Err(e) => {
-            error!("Failed to send start autopost command: {:?}", e);
-
-            let error_response = CreateInteractionResponseMessage::new()
-                .embed(CreateEmbed::new()
-                    .title("Error Starting Autopost")
-                    .description("An internal error occurred while starting the autopost loop, please try again.")
-                    .color(0xff0000)
-                )
-                .ephemeral(true);
-
-            match modal
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(error_response),
-                )
-                .await
-            {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Failed to send error response: {:?}", e);
-                }
-            };
+            bail!(e);
         }
     };
 
-    modal
-        .create_response(
-            &ctx.http,
-            CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new()
-                    .content("Autopost loop started!")
-                    .ephemeral(true),
-            ),
-        )
-        .await
-        .unwrap_or_else(|e| {
-            warn!("Failed to acknowledge autopost modal: {:?}", e);
-            return;
-        });
-
-    Ok(())
+    Ok(InteractionResponse::Message(InteractionResponseMessage {
+        embed: Some(
+            CreateEmbed::new()
+                .title("Autopost Loop Started")
+                .description("Autopost loop started!")
+                .color(0x00ff00),
+        ),
+        ephemeral: true,
+        ..Default::default()
+    }))
 }

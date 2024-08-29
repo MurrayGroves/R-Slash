@@ -3,35 +3,30 @@
 use async_recursion::async_recursion;
 use chrono::TimeDelta;
 use futures::{Future, StreamExt};
-use mongodb::bson::{doc, Bson, Document};
+use mongodb::bson::{doc, Document};
 use mongodb::options::ClientOptions;
 use redis::AsyncCommands;
 use serenity::all::{ChannelId, CreateMessage, GatewayIntents, Http};
 use serenity::{all::EventHandler, async_trait};
-use tarpc::trace::Context;
 use timer::{Guard, Timer};
 use tokio::runtime::Handle;
 use tokio::time::{Duration, Instant};
 
-use std::cell::{SyncUnsafeCell, UnsafeCell};
+use std::cell::SyncUnsafeCell;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::env;
+use std::fmt::Debug;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::Write;
-use std::net::SocketAddr;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::sync::Arc;
-use tarpc::server::incoming::Incoming;
 use tokio::sync::{Mutex, RwLock};
 
-use futures::future::{self, Ready};
+use futures::future::{self};
 use tarpc::{
-    client, context,
     server::{self, Channel},
     tokio_serde::formats::Bincode,
 };
 
-use anyhow::anyhow;
 use tracing::instrument;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{
@@ -40,8 +35,18 @@ use tracing_subscriber::{
 
 use auto_poster::{AutoPoster, PostMemory};
 
-#[derive(Debug)]
+mod timer_loop;
+
 struct UnsafeMemory(SyncUnsafeCell<PostMemory>);
+
+impl Debug for UnsafeMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unsafe {
+            let post_memory = &*self.0.get();
+            post_memory.fmt(f)
+        }
+    }
+}
 
 impl Hash for UnsafeMemory {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -99,15 +104,13 @@ struct AutoPosts {
 
 #[derive(Clone)]
 struct AutoPostServer {
-    socket_addr: SocketAddr,
     db: Arc<Mutex<mongodb::Client>>,
     autoposts: Arc<RwLock<AutoPosts>>,
     discords: HashMap<u64, Arc<Http>>,
     redis: redis::aio::MultiplexedConnection,
-    posthog: posthog::Client,
     timer: Arc<Mutex<Timer>>,
     timer_guard: Arc<Mutex<Option<Guard>>>,
-    runtime_handle: Handle,
+    sender: tokio::sync::mpsc::Sender<()>,
 }
 
 impl AutoPostServer {
@@ -133,7 +136,13 @@ impl AutoPostServer {
         if let Some(first) = autoposts.queue.peek() {
             if first.next_post >= next {
                 drop(autoposts);
-                self.update_timer().await;
+                debug!("Updating timer from add_autopost");
+                match self.sender.send(()).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        panic!("Error sending to timer loop: {}", e);
+                    }
+                };
                 debug!("Updated timer");
             }
         } else {
@@ -185,139 +194,10 @@ impl AutoPostServer {
         if by_channel.is_empty() {
             autoposts.by_channel.remove(&autopost.channel);
         }
-        if let Some(first) = autoposts.queue.peek() {
-            if first.id == id {
-                drop(autoposts);
-                drop(client);
-                self.update_timer().await;
-            }
-        }
 
         Ok(Arc::into_inner(autopost)
             .ok_or("Failed to take ownership of PostMemory".to_string())?
             .into_inner())
-    }
-
-    #[async_recursion]
-    #[instrument(skip(self))]
-    async fn update_timer(self) {
-        let mut timer_guard = self.timer_guard.lock().await;
-        let autoposts = self.autoposts.write().await;
-        if let Some(first) = autoposts.queue.peek() {
-            let self_clone = self.clone();
-
-            let timer = self.timer.lock().await;
-
-            let duration = first.next_post.duration_since(Instant::now());
-            *timer_guard = Some(
-                timer.schedule_with_delay(
-                    TimeDelta::new(duration.as_secs() as i64, duration.subsec_nanos())
-                        .expect("Failed to create TimeDelta"),
-                    move || {
-                        let mut self_clone = self_clone.clone();
-                        self_clone.runtime_handle.clone().spawn(async move {
-                            // Send reminder
-                            let mut autoposts = self_clone.autoposts.write().await;
-                            let autopost = match autoposts.queue.pop() {
-                                Some(x) => x,
-                                None => {
-                                    warn!("Scheduler woke up but found no autopost!");
-                                    return;
-                                }
-                            };
-
-                            debug!("Sending autopost: {:?}", autopost);
-
-                            let message = if let Some(search) = autopost.search.clone() {
-                                post_api::get_subreddit_search(
-                                    autopost.subreddit.clone(),
-                                    search,
-                                    &mut self_clone.redis,
-                                    autopost.channel,
-                                    None,
-                                )
-                                .await
-                            } else {
-                                post_api::get_subreddit(
-                                    autopost.subreddit.clone(),
-                                    &mut self_clone.redis,
-                                    autopost.channel,
-                                    None,
-                                )
-                                .await
-                            };
-
-                            let channel = autopost.channel.clone();
-                            let bot = autopost.bot.clone();
-
-                            (autopost.deref().get_mut()).current += 1;
-                            if let Some(limit) = autopost.limit {
-                                if autopost.current < limit {
-                                    autopost.get_mut().next_post =
-                                        autopost.next_post + autopost.interval;
-                                    autoposts.queue.push(autopost);
-                                } else {
-                                    autoposts.by_id.remove(&autopost.id);
-                                    match autoposts
-                                        .by_channel
-                                        .get_mut(&autopost.channel)
-                                    {
-                                        Some(x) => {
-                                            x.remove(&*autopost);
-                                            if x.len() == 0 {
-                                                autoposts.by_channel.remove(&autopost.channel);
-                                            };
-                                        },
-                                        None => {error!("Tried to get channel to remove autopost from it but channel didn't exist");}
-                                    };
-                                }
-                            } else {
-                                autopost.get_mut().next_post =
-                                    autopost.next_post + autopost.interval;
-                                autoposts.queue.push(autopost);
-                            };
-
-                            let message = match message {
-                                Ok(x) => x,
-                                Err(e) => {
-                                    warn!("Error getting subreddit for autopost: {}", e);
-                                    // Reschedule timer
-                                    if autoposts.queue.peek().is_some() {
-                                        drop(autoposts);
-                                        self_clone.update_timer().await;
-                                    }
-                                    return;
-                                }
-                            };
-
-                            if let Err(why) = {
-                                let mut resp = CreateMessage::new();
-                                if let Some(embed) = message.embed.clone() {
-                                    resp = resp.embed(embed);
-                                };
-
-                                if let Some(content) = message.content.clone() {
-                                    resp = resp.content(content);
-                                };
-
-                                let to_return =
-                                    channel.send_message(&self_clone.discords[&bot], resp).await;
-
-                                to_return
-                            } {
-                                warn!("Error sending message: {:?}", why);
-                            }
-
-                            // Reschedule timer
-                            if autoposts.queue.peek().is_some() {
-                                drop(autoposts);
-                                self_clone.update_timer().await;
-                            }
-                        });
-                    },
-                ),
-            );
-        }
     }
 }
 
@@ -464,7 +344,16 @@ async fn main() {
                 .with_ansi(false)
                 .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG)
                 .with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
-                    if meta.name().contains("serenity") {
+                    if meta.name().contains("serenity")
+                        || meta.name().contains("request")
+                        || meta.name().contains("h2")
+                        || meta.name().contains("hyper")
+                        || meta.name().contains("tokio")
+                        || meta.name().contains("perform")
+                        || meta.name().contains("run")
+                        || meta.name().contains("into_future")
+                        || meta.name().contains("reqwest")
+                    {
                         return false;
                     };
                     true
@@ -479,13 +368,6 @@ async fn main() {
         server_name: None,
         ..Default::default()
     }));
-
-    let posthog_key: String = env::var("POSTHOG_API_KEY")
-        .expect("POSTHOG_API_KEY not set")
-        .parse()
-        .expect("Failed to convert POSTHOG_API_KEY to string");
-    let posthog_client =
-        posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
 
     let mongo_url = env::var("MONGO_URL").expect("MONGO_URL not set");
     let mut client_options = ClientOptions::parse(mongo_url).await.unwrap();
@@ -588,6 +470,33 @@ async fn main() {
 
     let timer = Arc::new(Mutex::new(Timer::new()));
     let timer_guard = Arc::new(Mutex::new(None));
+    let (sender, receiver) = tokio::sync::mpsc::channel(50);
+    let server = AutoPostServer {
+        db: Arc::clone(&mongodb_client),
+        autoposts: Arc::clone(&autoposts),
+        discords: discord_https.clone(),
+        redis: redis.clone(),
+        timer: Arc::clone(&timer),
+        timer_guard: Arc::clone(&timer_guard),
+        sender,
+    };
+
+    info!("Connecting to discords");
+
+    for (bot, mut client) in discord_clients {
+        let total_shards = total_shards[&bot];
+        tokio::spawn(async move {
+            if let Err(why) = client.start_shard(0, total_shards).await {
+                error!("Client error: {:?}", why);
+            }
+        });
+    }
+
+    info!("Starting timer loop");
+    tokio::spawn(timer_loop::timer_loop(server.clone(), receiver));
+
+    info!("Starting tarpc");
+
     let handle = tokio::spawn(
         listener
             // Ignore accept errors.
@@ -596,17 +505,7 @@ async fn main() {
             // serve is generated by the service attribute. It takes as input any type implementing
             // the generated SubscriberServer trait.
             .map(move |channel| {
-                let server = AutoPostServer {
-                    socket_addr: channel.transport().peer_addr().unwrap(),
-                    db: Arc::clone(&mongodb_client),
-                    autoposts: Arc::clone(&autoposts),
-                    discords: discord_https.clone(),
-                    redis: redis.clone(),
-                    posthog: posthog_client.clone(),
-                    timer: Arc::clone(&timer),
-                    timer_guard: Arc::clone(&timer_guard),
-                    runtime_handle: Handle::current(),
-                };
+                let server = server.clone();
                 channel.execute(server.serve()).for_each({
                     debug!("received connection");
                     spawn
@@ -617,16 +516,7 @@ async fn main() {
             .for_each(|_| async {}),
     );
 
-    info!("Started tarpc server, connecting to discord...");
-
-    for (bot, mut client) in discord_clients {
-        let total_shards = total_shards[&bot];
-        tokio::spawn(async move {
-            if let Err(why) = client.start_shard(0, total_shards).await {
-                error!("Client error: {:?}", why);
-            }
-        });
-    }
+    info!("All threads spawned");
 
     handle.await.expect("Failed to run server");
     error!("Server stopped!");

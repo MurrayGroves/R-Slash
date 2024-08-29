@@ -176,6 +176,7 @@ dependencies = [
  "post_api",
  "posthog",
  "redis",
+ "rslash_types",
  "sentry",
  "serde",
  "serde_derive",

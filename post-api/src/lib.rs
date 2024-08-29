@@ -11,7 +11,7 @@ use serenity::all::{
 };
 use tracing::{debug, instrument};
 
-use rslash_types::{InteractionResponse, ResponseFallbackMethod};
+use rslash_types::{InteractionResponse, InteractionResponseMessage, ResponseFallbackMethod};
 
 /// Returns current milliseconds since the Epoch
 fn get_epoch_ms() -> u64 {
@@ -213,7 +213,7 @@ pub async fn get_post_by_id<'a>(
         );
 
         span.finish();
-        return Ok(InteractionResponse {
+        return Ok(InteractionResponse::Message(InteractionResponseMessage {
             content: Some(format!("[.]({})", embed_url)),
             embed: None,
             components: Some(vec![CreateActionRow::Buttons(vec![
@@ -239,10 +239,10 @@ pub async fn get_post_by_id<'a>(
 
             fallback: ResponseFallbackMethod::Edit,
             ..Default::default()
-        });
+        }));
     }
 
-    let to_return = InteractionResponse {
+    let to_return = InteractionResponse::Message(InteractionResponseMessage {
         embed: Some(
             CreateEmbed::default()
                 .title(title)
@@ -283,7 +283,7 @@ pub async fn get_post_by_id<'a>(
 
         fallback: ResponseFallbackMethod::Edit,
         ..Default::default()
-    };
+    });
 
     span.finish();
     return Ok(to_return);
@@ -424,7 +424,7 @@ pub async fn get_subreddit_search<'a>(
     .await?;
 
     if length == 0 {
-        return Ok(InteractionResponse {
+        return Ok(InteractionResponse::Message(InteractionResponseMessage {
             embed: Some(
                 CreateEmbed::default()
                     .title("No search results found")
@@ -432,7 +432,7 @@ pub async fn get_subreddit_search<'a>(
                     .to_owned(),
             ),
             ..Default::default()
-        });
+        }));
     }
 
     index = length - (index + 1);

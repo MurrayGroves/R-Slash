@@ -35,6 +35,8 @@ tracing = "*"
 tracing-subscriber = { version = "*" }
 
 post_api = { path = "../post-api" }
+rslash_types = { path = "../rslash_types" }
+
 
 #[patch.crates-io]
 #serenity = { path = "../../serenity" }
