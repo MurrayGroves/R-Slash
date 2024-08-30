@@ -64,13 +64,20 @@ impl Eq for UnsafeMemory {}
 
 impl Ord for UnsafeMemory {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.get().cmp(&other.0.get())
+        return unsafe {
+            let to_ret = (&*(self.0.get())).cmp(&*(other.0.get()));
+            println!(
+                "UnsafeMemory Comparing {:?} and {:?} got {:?}",
+                self, other, to_ret
+            );
+            to_ret
+        };
     }
 }
 
 impl PartialOrd for UnsafeMemory {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.0.get().partial_cmp(&other.0.get())
+        Some(self.cmp(other))
     }
 }
 
@@ -167,6 +174,8 @@ impl AutoPostServer {
             Ok(_) => (),
             Err(e) => return Err(e.to_string()),
         };
+
+        drop(client);
 
         let mut autoposts = self.autoposts.write().await;
         let autopost = match autoposts.by_id.remove(&id) {

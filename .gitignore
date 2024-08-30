@@ -47,3 +47,5 @@ scripts/all_posts.json
 website-bb/.svelte-kit/
 
 website-bb/node_modules/
+
+*.code-workspace

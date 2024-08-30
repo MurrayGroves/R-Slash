@@ -109,7 +109,9 @@ impl Hash for PostMemory {
 
 impl Ord for PostMemory {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.next_post.cmp(&other.next_post).reverse()
+        let to_ret = self.next_post.cmp(&other.next_post).reverse();
+        println!("Comparing {:?} and {:?} - {:?}", self, other, to_ret);
+        to_ret
     }
 }
 
