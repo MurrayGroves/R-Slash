@@ -1,14 +1,16 @@
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Error};
 use async_recursion::async_recursion;
 use log::warn;
+use redis::aio::MultiplexedConnection;
 use redis::{from_redis_value, AsyncCommands};
 use serde_json::json;
 use serenity::all::{
     ButtonStyle, ChannelId, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor,
 };
+use tokio::time::sleep;
 use tracing::{debug, instrument};
 
 use rslash_types::{InteractionResponse, InteractionResponseMessage, ResponseFallbackMethod};
@@ -513,4 +515,90 @@ pub async fn list_contains(
 
     span.finish();
     to_return
+}
+
+pub enum SubredditStatus {
+    Valid,
+    Invalid(String),
+}
+
+pub async fn check_subreddit_valid(subreddit: &str) -> Result<SubredditStatus, Error> {
+    let web_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(format!(
+            "Discord:RSlash:{} (by /u/murrax2)",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()?;
+    let res = web_client
+        .head(format!("https://www.reddit.com/r/{}.json", subreddit))
+        .send()
+        .await?;
+
+    return Ok(if res.status() == 200 {
+        SubredditStatus::Valid
+    } else {
+        SubredditStatus::Invalid(res.text().await?)
+    });
+}
+
+pub async fn queue_subreddit(
+    subreddit: &str,
+    con: &mut MultiplexedConnection,
+    parent_tx: Option<&sentry::TransactionOrSpan>,
+    bot: u64,
+) -> Result<(), Error> {
+    let already_queued =
+        list_contains(&subreddit, "custom_subreddits_queue", con, parent_tx).await?;
+
+    let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
+
+    if last_cached == 0 {
+        debug!("Subreddit not cached");
+
+        if !already_queued {
+            debug!("Queueing subreddit for download");
+            con.rpush("custom_subreddits_queue", &subreddit).await?;
+
+            let selector = if bot == 278550142356029441 {
+                "nsfw"
+            } else {
+                "sfw"
+            };
+
+            con.hset(
+                &format!("custom_sub:{}:{}", selector, subreddit),
+                "name",
+                &subreddit,
+            )
+            .await?;
+        }
+        loop {
+            sleep(Duration::from_millis(50)).await;
+
+            let posts: Vec<String> = match redis::cmd("LRANGE")
+                .arg(format!("subreddit:{}:posts", subreddit))
+                .arg(0i64)
+                .arg(0i64)
+                .query_async(con)
+                .await
+            {
+                Ok(posts) => posts,
+                Err(_) => {
+                    continue;
+                }
+            };
+            if posts.len() > 0 {
+                break;
+            }
+        }
+    } else if last_cached + 3600000 < get_epoch_ms() as i64 {
+        debug!("Subreddit last cached more than an hour ago, updating...");
+        // Tell downloader to update the subreddit, but use outdated posts for now.
+        if !already_queued {
+            con.rpush("custom_subreddits_queue", &subreddit).await?;
+        }
+    }
+
+    Ok(())
 }

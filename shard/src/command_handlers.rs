@@ -3,9 +3,8 @@ use log::{error, trace};
 use post_subscriber::{Bot, SubscriberClient};
 use serde_json::json;
 use serenity::all::{
-    ChannelId, CommandDataOptionValue, CreateButton, CreateInputText, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateModal, CreateSelectMenu, CreateSelectMenuKind,
-    CreateSelectMenuOption, InputTextStyle,
+    CommandDataOptionValue, CreateButton, CreateInputText, CreateInteractionResponse, CreateModal,
+    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
 };
 use serenity::model::Colour;
 use tarpc::context;
@@ -19,8 +18,6 @@ use std::time::SystemTime;
 
 use serenity::builder::{CreateActionRow, CreateEmbed, CreateEmbedFooter};
 use serenity::prelude::*;
-
-use tokio::time::{sleep, Duration};
 
 use redis::{self};
 use redis::{from_redis_value, AsyncCommands};
@@ -36,7 +33,7 @@ use post_api::*;
 use rslash_types::InteractionResponse;
 use rslash_types::{ConfigStruct, InteractionResponseMessage};
 
-use crate::{capture_event, get_epoch_ms, get_namespace};
+use crate::{capture_event, NAMESPACE};
 
 // Return error interaction response from current function if bot doesn't have permission to send messages in the channel
 macro_rules! error_if_no_send_message_perm {
@@ -62,6 +59,27 @@ macro_rules! error_if_no_send_message_perm {
                     }));
                 }
             }
+        }
+    };
+}
+
+macro_rules! error_if_no_premium {
+    ($ctx:expr, $user:expr) => {
+        let tiers = get_user_tiers_from_ctx($ctx, $user).await;
+        if !tiers.bronze.active {
+            return Ok(InteractionResponse::Message(InteractionResponseMessage {
+                embed: Some(
+                    CreateEmbed::default()
+                        .title("Premium Feature")
+                        .description(
+                            "You must have premium in order to use this command.
+                    Get it [here](https://ko-fi.com/rslash)",
+                        )
+                        .color(0xff0000)
+                        .to_owned(),
+                ),
+                ..Default::default()
+            }));
         }
     };
 }
@@ -97,17 +115,21 @@ pub async fn get_subreddit_cmd<'a>(
     .await;
 
     if config.nsfw_subreddits.contains(&subreddit) {
-        if let Some(channel) = command.channel_id.to_channel_cached(&ctx.cache) {
-            if !channel.nsfw {
-                return Ok(InteractionResponse::Message(InteractionResponseMessage {
-                    embed: Some(CreateEmbed::default()
-                        .title("NSFW subreddits can only be used in NSFW channels")
-                        .description("Discord requires NSFW content to only be sent in NSFW channels, find out how to fix this [here](https://support.discord.com/hc/en-us/articles/115000084051-NSFW-Channels-and-Content)")
-                        .color(Colour::from_rgb(255, 0, 0))
-                        .to_owned()
-                    ),
-                    ..Default::default()
-                }));
+        if let Some(guild_id) = command.guild_id {
+            if let Some(guild) = ctx.cache.guild(guild_id) {
+                if let Some(channel) = guild.channels.get(&command.channel_id) {
+                    if !channel.nsfw {
+                        return Ok(InteractionResponse::Message(InteractionResponseMessage {
+                        embed: Some(CreateEmbed::default()
+                            .title("NSFW subreddits can only be used in NSFW channels")
+                            .description("Discord requires NSFW content to only be sent in NSFW channels, find out how to fix this [here](https://support.discord.com/hc/en-us/articles/115000084051-NSFW-Channels-and-Content)")
+                            .color(Colour::from_rgb(255, 0, 0))
+                            .to_owned()
+                        ),
+                        ..Default::default()
+                    }));
+                    }
+                }
             }
         }
     }
@@ -181,128 +203,42 @@ pub async fn get_custom_subreddit<'a>(
     ctx: &'a Context,
     parent_tx: &sentry::TransactionOrSpan,
 ) -> Result<InteractionResponse, anyhow::Error> {
-    let data_lock = ctx.data.read().await;
-    let mongodb_manager = data_lock
-        .get::<ResourceManager<mongodb::Client>>()
-        .ok_or(anyhow!("Mongodb client manager not found"))?
-        .clone();
-    let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
-    let mut mongodb_client = mongodb_client_mutex.lock().await;
-
-    let membership = get_user_tiers(
-        command.user.id.get().to_string(),
-        &mut *mongodb_client,
-        Some(parent_tx),
-    )
-    .await;
-    if !membership.bronze.active {
-        return Ok(InteractionResponse::Message(InteractionResponseMessage {
-            embed: Some(
-                CreateEmbed::default()
-                    .title("Premium Feature")
-                    .description(
-                        "You must have premium in order to use this command.
-                Get it [here](https://ko-fi.com/rslash)",
-                    )
-                    .color(0xff0000)
-                    .to_owned(),
-            ),
-            ..Default::default()
-        }));
-    }
+    error_if_no_premium!(ctx, command.user.id);
 
     let options = &command.data.options;
     let subreddit = options[0].value.clone();
     let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
 
-    let web_client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(format!(
-            "Discord:RSlash:{} (by /u/murrax2)",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()?;
-    let res = web_client
-        .head(format!("https://www.reddit.com/r/{}.json", subreddit))
-        .send()
-        .await?;
-
-    if res.status() != 200 {
-        debug!("Subreddit response not 200: {}", res.text().await?);
-        return Ok(InteractionResponse::Message(InteractionResponseMessage {
-            embed: Some(
-                CreateEmbed::default()
-                    .title("Subreddit Inaccessible")
-                    .description(format!("r/{} is private or does not exist.", subreddit))
-                    .color(0xff0000)
-                    .to_owned(),
-            ),
-            ..Default::default()
-        }));
+    match check_subreddit_valid(&subreddit).await? {
+        SubredditStatus::Valid => {}
+        SubredditStatus::Invalid(reason) => {
+            debug!("Subreddit response not 200: {}", reason);
+            return Ok(InteractionResponse::Message(InteractionResponseMessage {
+                embed: Some(
+                    CreateEmbed::default()
+                        .title("Subreddit Inaccessible")
+                        .description(format!("r/{} is private or does not exist.", subreddit))
+                        .color(0xff0000)
+                        .to_owned(),
+                ),
+                ..Default::default()
+            }));
+        }
     }
 
+    command.defer(&ctx.http).await.unwrap_or_else(|e| {
+        warn!("Failed to defer response: {}", e);
+    });
+
+    let data_lock = ctx.data.read().await;
     let conf = data_lock.get::<ConfigStruct>().unwrap();
     let mut con = conf.redis.clone();
 
-    let already_queued = list_contains(
-        &subreddit,
-        "custom_subreddits_queue",
-        &mut con,
-        Some(parent_tx),
-    )
-    .await?;
+    let id = ctx.cache.current_user().id.get();
 
-    let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
+    queue_subreddit(&subreddit, &mut con, Some(parent_tx), id).await?;
 
-    if last_cached == 0 {
-        debug!("Subreddit not cached");
-
-        command.defer(&ctx.http).await.unwrap_or_else(|e| {
-            warn!("Failed to defer response: {}", e);
-        });
-        if !already_queued {
-            debug!("Queueing subreddit for download");
-            con.rpush("custom_subreddits_queue", &subreddit).await?;
-
-            let selector = if ctx.cache.current_user().id.get() == 278550142356029441 {
-                "nsfw"
-            } else {
-                "sfw"
-            };
-
-            con.hset(
-                &format!("custom_sub:{}:{}", selector, subreddit),
-                "name",
-                &subreddit,
-            )
-            .await?;
-        }
-        loop {
-            sleep(Duration::from_millis(50)).await;
-
-            let posts: Vec<String> = match redis::cmd("LRANGE")
-                .arg(format!("subreddit:{}:posts", subreddit.clone()))
-                .arg(0i64)
-                .arg(0i64)
-                .query_async(&mut con)
-                .await
-            {
-                Ok(posts) => posts,
-                Err(_) => {
-                    continue;
-                }
-            };
-            if posts.len() > 0 {
-                break;
-            }
-        }
-    } else if last_cached + 3600000 < get_epoch_ms() as i64 {
-        debug!("Subreddit last cached more than an hour ago, updating...");
-        // Tell downloader to update the subreddit, but use outdated posts for now.
-        if !already_queued {
-            con.rpush("custom_subreddits_queue", &subreddit).await?;
-        }
-    }
+    drop(data_lock);
 
     return get_subreddit_cmd(command, ctx, parent_tx).await;
 }
@@ -327,7 +263,7 @@ pub async fn info<'a>(
     .await;
 
     let guild_counts: HashMap<String, redis::Value> = con
-        .hgetall(format!("shard_guild_counts_{}", get_namespace()))
+        .hgetall(format!("shard_guild_counts_{}", &*NAMESPACE))
         .await?;
     let mut guild_count = 0;
     for (_, count) in guild_counts {
@@ -371,37 +307,7 @@ pub async fn subscribe_custom<'a>(
     ctx: &Context,
     parent_tx: &sentry::TransactionOrSpan,
 ) -> Result<InteractionResponse, anyhow::Error> {
-    {
-        let data_lock = ctx.data.read().await;
-        let mongodb_manager = data_lock
-            .get::<ResourceManager<mongodb::Client>>()
-            .ok_or(anyhow!("Mongodb client manager not found"))?
-            .clone();
-        let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
-        let mut mongodb_client = mongodb_client_mutex.lock().await;
-
-        let membership = get_user_tiers(
-            command.user.id.get().to_string(),
-            &mut *mongodb_client,
-            Some(parent_tx),
-        )
-        .await;
-        if !membership.bronze.active {
-            return Ok(InteractionResponse::Message(InteractionResponseMessage {
-                embed: Some(
-                    CreateEmbed::default()
-                        .title("Premium Feature")
-                        .description(
-                            "You must have premium in order to use this command.
-                    Get it [here](https://ko-fi.com/rslash)",
-                        )
-                        .color(0xff0000)
-                        .to_owned(),
-                ),
-                ..Default::default()
-            }));
-        }
-    }
+    error_if_no_premium!(ctx, command.user.id);
     subscribe(command, ctx, parent_tx).await
 }
 
@@ -435,10 +341,9 @@ pub async fn subscribe<'a>(
     let data_lock = ctx.data.read().await;
     let client = data_lock
         .get::<SubscriberClient>()
-        .ok_or(anyhow!("Subscriber client not found"))?
-        .clone();
+        .ok_or(anyhow!("Subscriber client not found"))?;
 
-    let bot = match get_namespace().as_str() {
+    let bot = match (&*NAMESPACE).as_str() {
         "r-slash" => Bot::RS,
         "booty-bot" => Bot::BB,
         _ => Bot::RS,
@@ -521,10 +426,9 @@ pub async fn unsubscribe<'a>(
     let data_lock = ctx.data.read().await;
     let client = data_lock
         .get::<SubscriberClient>()
-        .ok_or(anyhow!("Subscriber client not found"))?
-        .clone();
+        .ok_or(anyhow!("Subscriber client not found"))?;
 
-    let bot = match get_namespace().as_str() {
+    let bot = match (&*NAMESPACE).as_str() {
         "r-slash" => Bot::RS,
         "booty-bot" => Bot::BB,
         _ => Bot::RS,
@@ -604,22 +508,10 @@ async fn autopost_start<'a>(
 
     error_if_no_send_message_perm!(ctx, command.channel_id);
 
-    let is_premium = {
-        let data_read = ctx.data.read().await;
-        let mongodb_manager = data_read
-            .get::<ResourceManager<mongodb::Client>>()
-            .unwrap()
-            .clone();
-        let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
-        let mut mongodb_client = mongodb_client_mutex.lock().await;
-        let membership = get_user_tiers(
-            command.user.id.get().to_string(),
-            &mut *mongodb_client,
-            None,
-        )
-        .await;
-        membership.bronze.active
-    };
+    let is_premium = get_user_tiers_from_ctx(ctx, command.user.id)
+        .await
+        .bronze
+        .active;
 
     let max_length = match is_premium {
         true => 100,
@@ -689,8 +581,7 @@ pub async fn autopost_stop<'a>(
     let data_lock = ctx.data.read().await;
     let client = data_lock
         .get::<AutoPosterClient>()
-        .ok_or(anyhow!("Auto-poster client not found"))?
-        .clone();
+        .ok_or(anyhow!("Auto-poster client not found"))?;
 
     let bot = ctx.http.application_id().unwrap().get();
 
@@ -789,6 +680,24 @@ pub async fn autopost<'a>(
             }
         } else if first.name == "stop" {
             autopost_stop(command, ctx).await
+        } else if first.name == "custom" {
+            if let CommandDataOptionValue::SubCommand(options) = &first.value {
+                error_if_no_premium!(ctx, command.user.id);
+
+                let subreddit = options[0].value.clone();
+                let subreddit = subreddit
+                    .as_str()
+                    .ok_or(anyhow!("Subreddit parameter couldn't be string"))?
+                    .to_string()
+                    .to_lowercase();
+                let search = match options.get(1) {
+                    Some(x) => x.value.clone(),
+                    None => CommandDataOptionValue::Number(0 as f64),
+                };
+                autopost_start(command, ctx, subreddit, search.as_str()).await
+            } else {
+                Err(anyhow!("Invalid subcommand"))
+            }
         } else {
             Err(anyhow!("Invalid subcommand"))
         }

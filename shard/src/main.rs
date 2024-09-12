@@ -70,6 +70,11 @@ pub fn get_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+lazy_static::lazy_static! {
+    static ref NAMESPACE: String = fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+    .expect("Couldn't read /var/run/secrets/kubernetes.io/serviceaccount/namespace");
+}
+
 pub fn redis_sanitise(input: &str) -> String {
     let special = vec![
         ",", ".", "<", ">", "{", "}", "[", "]", "\"", "'", ":", ";", "!", "@", "#", "$", "%", "^",
@@ -144,26 +149,6 @@ pub async fn capture_event(
     });
 
     span.finish();
-}
-
-fn error_response(code: String) -> InteractionResponse {
-    let embed = CreateEmbed::default()
-        .title("An Error Occurred")
-        .description(format!(
-            "Please report this in the support server.\n Error: {}",
-            code
-        ))
-        .color(Colour::from_rgb(255, 0, 0))
-        .to_owned();
-
-    return InteractionResponse::Message(InteractionResponseMessage  {
-        file: None,
-        embed: Some(embed),
-        content: None,
-        ephemeral: true,
-        components: None,
-        fallback: ResponseFallbackMethod::Followup,
-    });
 }
 
 #[instrument(skip(command, ctx, tx))]
@@ -299,7 +284,7 @@ impl EventHandler for Handler {
         let mut con = conf.redis.clone();
         let _: () = con
             .hset(
-                format!("shard_guild_counts_{}", get_namespace()),
+                format!("shard_guild_counts_{}", &*NAMESPACE),
                 ctx.shard_id.0,
                 ctx.cache.guild_count(),
             )
@@ -328,7 +313,7 @@ impl EventHandler for Handler {
             let mut con = conf.redis.clone();
             let _: () = con
                 .hset(
-                    format!("shard_guild_counts_{}", get_namespace()),
+                    format!("shard_guild_counts_{}", &*NAMESPACE),
                     ctx.shard_id.0,
                     ctx.cache.guild_count(),
                 )
@@ -994,7 +979,7 @@ async fn monitor_total_shards(
         let _ = sleep(Duration::from_secs(60)).await;
 
         let db_total_shards: redis::RedisResult<u32> =
-            con.get(format!("total_shards_{}", get_namespace())).await;
+            con.get(format!("total_shards_{}", &*NAMESPACE)).await;
         let db_total_shards: u32 =
             db_total_shards.expect("Failed to get or convert total_shards from Redis");
 
@@ -1009,7 +994,7 @@ async fn monitor_total_shards(
             );
             let _ = fs::remove_file("/etc/probes/live");
         } else {
-            if !Path::new("/etc/probes/live").exists() {
+            if !tokio::fs::metadata("/etc/probes/live").await.is_ok() {
                 debug!("Resurrected!");
                 if !Path::new("/etc/probes").is_dir() {
                     fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
@@ -1034,11 +1019,6 @@ async fn monitor_total_shards(
     }
 }
 
-fn get_namespace() -> String {
-    let namespace = fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-        .expect("Couldn't read /var/run/secrets/kubernetes.io/serviceaccount/namespace");
-    return namespace;
-}
 
 struct RetryingTcpStream<T, C>
 where
@@ -1148,18 +1128,18 @@ async fn main() {
         .parse()
         .expect("unable to convert shard_id to u32");
 
-    debug!("Connecting to redis...");
+    println!("Connecting to redis...");
     let redis_client =
         redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
     let mut con = redis_client
         .get_multiplexed_async_connection()
         .await
         .expect("Can't connect to redis");
-    debug!("Connected to redis");
+    println!("Connected to redis");
 
-    debug!("Connecting to mongodb...");
+    println!("Connecting to mongodb...");
     let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
-    debug!("Connected to mongodb");
+    println!("Connected to mongodb");
     client_options.app_name = Some(format!("Shard {}", shard_id));
 
     let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
@@ -1183,10 +1163,10 @@ async fn main() {
         .collect();
 
     let total_shards: redis::RedisResult<u32> =
-        con.get(format!("total_shards_{}", get_namespace())).await;
+        con.get(format!("total_shards_{}", &*NAMESPACE)).await;
     let total_shards: u32 = total_shards.expect("Failed to get or convert total_shards");
 
-    debug!("Booting with {:?} total shards", total_shards);
+    println!("Booting with {:?} total shards", total_shards);
 
     let mut client = serenity::Client::builder(token, GatewayIntents::non_privileged())
         .event_handler(Handler)
@@ -1217,7 +1197,7 @@ async fn main() {
         })
         .await;
 
-        debug!("Connecting to post subscriber...");
+        println!("Connecting to post subscriber...");
         let reconnect_opts = ReconnectOptions::new()
             .with_exit_if_first_connect_fails(false)
             .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
@@ -1235,9 +1215,9 @@ async fn main() {
             post_subscriber::SubscriberClient::new(tarpc::client::Config::default(), transport)
                 .spawn();
 
-        debug!("Connected to post subscriber");
+        println!("Connected to post subscriber");
 
-        debug!("Connecting to auto poster...");
+        println!("Connecting to auto poster...");
         let reconnect_opts = ReconnectOptions::new()
             .with_exit_if_first_connect_fails(false)
             .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
@@ -1254,7 +1234,7 @@ async fn main() {
         let auto_poster =
             auto_poster::AutoPosterClient::new(tarpc::client::Config::default(), transport).spawn();
 
-        debug!("Connected to auto poster");
+        println!("Connected to auto poster");
 
         data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
         data.insert::<ResourceManager<posthog::Client>>(posthog_manager);
@@ -1269,7 +1249,7 @@ async fn main() {
 
     let shard_manager = client.shard_manager.clone();
     tokio::spawn(async move {
-        debug!("Spawning shard monitor thread");
+        println!("Spawning shard monitor thread");
         monitor_total_shards(shard_manager, total_shards).await;
     });
 
@@ -1279,7 +1259,7 @@ async fn main() {
                 sentry::integrations::tracing::layer()
                     .span_filter(|md| {
                         if md.name().contains("recv")
-                            || md.name().contains("recv_event")
+                            || md.name().contains("recv_event") 
                             || md.name().contains("dispatch")
                             || md.name().contains("handle_event")
                             || md.name().contains("check_heartbeat")
@@ -1343,7 +1323,7 @@ async fn main() {
             ..Default::default()
         }));
 
-        debug!("Spawning client thread");
+        println!("Spawning client thread");
         client
             .start_shard(shard_id, total_shards)
             .await

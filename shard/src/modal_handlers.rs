@@ -2,9 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail};
 use auto_poster::AutoPosterClient;
-use connection_pooler::ResourceManager;
 use log::{debug, warn};
-use memberships::get_user_tiers;
+use memberships::get_user_tiers_from_ctx;
 use rslash_types::{InteractionResponse, InteractionResponseMessage};
 use serenity::all::{ActionRowComponent, Context, CreateEmbed, ModalInteraction};
 
@@ -27,8 +26,6 @@ pub async fn autopost_create(
         ),
     )
     .await;
-
-    let lock = ctx.data.read().await;
 
     let search = match &custom_id["search"] {
         serde_json::value::Value::Null => None,
@@ -63,20 +60,10 @@ pub async fn autopost_create(
         }
     }
 
-    let is_premium = get_user_tiers(
-        modal.user.id.get().to_string(),
-        &mut *lock
-            .get::<ResourceManager<mongodb::Client>>()
-            .unwrap()
-            .get_available_resource()
-            .await
-            .lock()
-            .await,
-        None,
-    )
-    .await
-    .bronze
-    .active;
+    let is_premium = get_user_tiers_from_ctx(ctx, modal.user.id.get())
+        .await
+        .bronze
+        .active;
 
     let limit = match limit {
         Some(x) => match x.parse::<u32>() {
@@ -158,6 +145,8 @@ pub async fn autopost_create(
             invalid_interval_resp!(interval);
         }
     };
+
+    let lock = ctx.data.read().await;
 
     let autoposter = lock
         .get::<AutoPosterClient>()

@@ -7,7 +7,7 @@ use rslash_types::{InteractionResponse, InteractionResponseMessage};
 use serenity::all::{ComponentInteraction, ComponentInteractionDataKind, Context};
 use tarpc::context;
 
-use crate::{capture_event, get_namespace};
+use crate::{capture_event, NAMESPACE};
 
 pub async fn unsubscribe(
     ctx: &Context,
@@ -26,10 +26,8 @@ pub async fn unsubscribe(
     let data_lock = ctx.data.read().await;
     let client = data_lock
         .get::<SubscriberClient>()
-        .ok_or(anyhow!("Subscriber client not found"))?
-        .clone();
-
-    let bot = match get_namespace().as_str() {
+        .ok_or(anyhow!("Subscriber client not found"))?;
+    let bot = match (&*NAMESPACE).as_str() {
         "r-slash" => Bot::RS,
         "booty-bot" => Bot::BB,
         _ => Bot::RS,
@@ -84,8 +82,7 @@ pub async fn autopost_cancel(
     let data_lock = ctx.data.read().await;
     let client = data_lock
         .get::<AutoPosterClient>()
-        .ok_or(anyhow!("Auto-poster client not found"))?
-        .clone();
+        .ok_or(anyhow!("Auto-poster client not found"))?;
 
     let autopost = match client.delete_autopost(context::current(), id).await? {
         Ok(x) => x,

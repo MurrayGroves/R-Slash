@@ -2,9 +2,9 @@
 
 use async_recursion::async_recursion;
 use chrono::TimeDelta;
-use futures::{Future, StreamExt};
+use futures::{Future, StreamExt, TryStreamExt};
 use mongodb::bson::{doc, Document};
-use mongodb::options::ClientOptions;
+use mongodb::options::{ClientOptions, FindOptions};
 use redis::AsyncCommands;
 use serenity::all::{ChannelId, CreateMessage, GatewayIntents, Http};
 use serenity::{all::EventHandler, async_trait};
@@ -115,9 +115,8 @@ struct AutoPostServer {
     autoposts: Arc<RwLock<AutoPosts>>,
     discords: HashMap<u64, Arc<Http>>,
     redis: redis::aio::MultiplexedConnection,
-    timer: Arc<Mutex<Timer>>,
-    timer_guard: Arc<Mutex<Option<Guard>>>,
     sender: tokio::sync::mpsc::Sender<()>,
+    default_subs: Vec<String>,
 }
 
 impl AutoPostServer {
@@ -381,14 +380,11 @@ async fn main() {
     let mongo_url = env::var("MONGO_URL").expect("MONGO_URL not set");
     let mut client_options = ClientOptions::parse(mongo_url).await.unwrap();
     client_options.app_name = Some("Post Subscriber".to_string());
-    let mongodb_client = Arc::new(Mutex::new(
-        mongodb::Client::with_options(client_options).unwrap(),
-    ));
+    let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
 
     let existing_subs = {
-        let client = mongodb_client.lock().await;
         let coll: mongodb::Collection<PostMemory> =
-            client.database("state").collection("autoposts");
+            mongodb_client.database("state").collection("autoposts");
 
         let mut cursor = coll
             .find(Document::new())
@@ -477,17 +473,39 @@ async fn main() {
         .unwrap();
     listener.config_mut().max_frame_length(usize::MAX);
 
-    let timer = Arc::new(Mutex::new(Timer::new()));
-    let timer_guard = Arc::new(Mutex::new(None));
+    let db = mongodb_client.database("config");
+    let coll = db.collection::<Document>("settings");
+
+    let filter = doc! {"id": "subreddit_list".to_string()};
+    let mut cursor = coll.find(filter.clone()).await.unwrap();
+
+    let doc = cursor.try_next().await.unwrap().unwrap();
+    let mut sfw_subreddits: Vec<String> = doc
+        .get_array("sfw")
+        .unwrap()
+        .into_iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    let mut nsfw_subreddits: Vec<String> = doc
+        .get_array("nsfw")
+        .unwrap()
+        .into_iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+
+    let mut subreddits_vec = Vec::new();
+    subreddits_vec.append(&mut nsfw_subreddits);
+    subreddits_vec.append(&mut sfw_subreddits);
+
+    let mongodb_client = Arc::new(Mutex::new(mongodb_client));
     let (sender, receiver) = tokio::sync::mpsc::channel(50);
     let server = AutoPostServer {
         db: Arc::clone(&mongodb_client),
         autoposts: Arc::clone(&autoposts),
         discords: discord_https.clone(),
         redis: redis.clone(),
-        timer: Arc::clone(&timer),
-        timer_guard: Arc::clone(&timer_guard),
         sender,
+        default_subs: subreddits_vec,
     };
 
     info!("Connecting to discords");

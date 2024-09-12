@@ -1,11 +1,11 @@
-use std::{ops::Deref, time::Duration};
+use std::{ops::Deref, sync::Arc, time::Duration};
 
 use auto_poster::PostMemory;
 use mongodb::bson::doc;
+use post_api::queue_subreddit;
 use serenity::all::CreateMessage;
 use tokio::{select, time::Instant};
 use tracing::{debug, error, warn};
-use tracing_subscriber::field::debug;
 
 use crate::AutoPostServer;
 
@@ -27,37 +27,23 @@ pub async fn timer_loop(
                             continue;
                         }
                     };
+                    drop(autoposts);
 
                     debug!("Posting autopost: {:?}", autopost);
-
-                    let message = if let Some(search) = autopost.search.clone() {
-                        post_api::get_subreddit_search(
-                            autopost.subreddit.clone(),
-                            search,
-                            &mut server.redis,
-                            autopost.channel,
-                            None,
-                        )
-                        .await
-                    } else {
-                        post_api::get_subreddit(
-                            autopost.subreddit.clone(),
-                            &mut server.redis,
-                            autopost.channel,
-                            None,
-                        )
-                        .await
-                    };
 
                     let channel = autopost.channel.clone();
                     let bot = autopost.bot.clone();
 
-                    (autopost.deref().get_mut()).current += 1;
                     if let Some(limit) = autopost.limit {
+                        let autoposts = server.autoposts.write().await;
+                        (autopost.deref().get_mut()).current += 1;
+                        drop(autoposts);
                         if autopost.current < limit {
+                            let mut autoposts = server.autoposts.write().await;
                             autopost.get_mut().next_post = autopost.next_post + autopost.interval;
-                            autoposts.queue.push(autopost);
+                            autoposts.queue.push(autopost.clone());
                         } else {
+                            let mut autoposts = server.autoposts.write().await;
                             autoposts.by_id.remove(&autopost.id);
                             match autoposts.by_channel.get_mut(&autopost.channel) {
                                 Some(x) => {
@@ -70,6 +56,7 @@ pub async fn timer_loop(
                                     error!("Tried to get channel to remove autopost from it but channel didn't exist");
                                 }
                             };
+                            drop(autoposts);
                             let client = server.db.lock().await;
                             let coll: mongodb::Collection<PostMemory> =
                                 client.database("state").collection("autoposts");
@@ -86,58 +73,110 @@ pub async fn timer_loop(
                             };
                         }
                     } else {
+                        let mut autoposts = server.autoposts.write().await;
+                        (autopost.deref().get_mut()).current += 1;
                         autopost.get_mut().next_post = autopost.next_post + autopost.interval;
-                        autoposts.queue.push(autopost);
+                        autoposts.queue.push(autopost.clone());
                     };
 
-                    let message = match match message {
-                        Ok(x) => x,
-                        Err(e) => {
-                            warn!("Error getting subreddit for autopost: {}", e);
-                            rslash_types::InteractionResponse::Message(
-                            rslash_types::InteractionResponseMessage {
-                                content: Some(
-                                    "Error getting subreddit for auto-post, please report in the support server."
-                                        .to_string(),
-                                ),
-                                ephemeral: true,
-                                ..Default::default()
-                            },
-                        )
+                    let http = server.discords[&bot].clone();
+                    let autopost_clone = autopost.clone();
+                    let redis = server.redis.clone();
+
+                    let is_custom = !server.default_subs.contains(&autopost.subreddit);
+                    tokio::spawn(async move {
+                        let mut redis = redis.clone();
+
+                        if is_custom {
+                            match queue_subreddit(
+                                &autopost_clone.subreddit,
+                                &mut redis.clone(),
+                                None,
+                                autopost_clone.bot,
+                            )
+                            .await
+                            {
+                                Ok(_) => (),
+                                Err(e) => {
+                                    warn!("Error queueing subreddit: {:?}", e);
+                                }
+                            };
                         }
-                    } {
-                        rslash_types::InteractionResponse::Message(message) => message,
-                        _ => {
-                            warn!("Invalid response from post_api");
-                            rslash_types::InteractionResponseMessage {
-                                content: Some(
-                                    "Error getting subreddit for auto-post (invalid post_api enum), please report in the support server."
-                                        .to_string(),
-                                ),
-                                ephemeral: true,
-                                ..Default::default()
+
+                        let message = if let Some(search) = autopost_clone.search.clone() {
+                            post_api::get_subreddit_search(
+                                autopost_clone.subreddit.clone(),
+                                search,
+                                &mut redis,
+                                autopost_clone.channel,
+                                None,
+                            )
+                            .await
+                        } else {
+                            post_api::get_subreddit(
+                                autopost_clone.subreddit.clone(),
+                                &mut redis,
+                                autopost_clone.channel,
+                                None,
+                            )
+                            .await
+                        };
+
+                        let message = match match message {
+                            Ok(x) => x,
+                            Err(e) => {
+                                warn!("Error getting subreddit for autopost: {}", e);
+                                rslash_types::InteractionResponse::Message(
+                                rslash_types::InteractionResponseMessage {
+                                    content: Some(
+                                        "Error getting subreddit for auto-post, please report in the support server."
+                                            .to_string(),
+                                    ),
+                                    ephemeral: true,
+                                    ..Default::default()
+                                },
+                            )
                             }
+                        } {
+                            rslash_types::InteractionResponse::Message(message) => message,
+                            _ => {
+                                warn!("Invalid response from post_api");
+                                rslash_types::InteractionResponseMessage {
+                                    content: Some(
+                                        "Error getting subreddit for auto-post (invalid post_api enum), please report in the support server."
+                                            .to_string(),
+                                    ),
+                                    ephemeral: true,
+                                    ..Default::default()
+                                }
+                            }
+                        };
+
+                        if let Err(why) = {
+                            let mut resp = CreateMessage::new();
+                            if let Some(embed) = message.embed.clone() {
+                                resp = resp.embed(embed);
+                            };
+
+                            if let Some(content) = message.content.clone() {
+                                resp = resp.content(content);
+                            };
+
+                            debug!("Sending message: {:?}", resp);
+                            let to_return = select! {
+                                result = channel.send_message(http, resp) => result,
+                                _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                                    Err(serenity::Error::Other("Sending message took more than 10 seconds"))
+                                }
+                            };
+                            debug!("Sent message");
+                            to_return
+                        } {
+                            warn!("Error sending message: {:?}", why);
                         }
-                    };
+                    });
 
-                    if let Err(why) = {
-                        let mut resp = CreateMessage::new();
-                        if let Some(embed) = message.embed.clone() {
-                            resp = resp.embed(embed);
-                        };
-
-                        if let Some(content) = message.content.clone() {
-                            resp = resp.content(content);
-                        };
-
-                        debug!("Sending message: {:?}", resp);
-                        let to_return = channel.send_message(&server.discords[&bot], resp).await;
-                        debug!("Sent message");
-                        to_return
-                    } {
-                        warn!("Error sending message: {:?}", why);
-                    }
-
+                    let autoposts = server.autoposts.read().await;
                     if let Some(next) = autoposts.queue.peek() {
                         debug!("Memories: {:?}", autoposts.queue);
                         debug!("Next post: {:?}", next);

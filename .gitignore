@@ -48,4 +48,4 @@ website-bb/.svelte-kit/
 
 website-bb/node_modules/
 
-*.code-workspace
+website/node_modules/
