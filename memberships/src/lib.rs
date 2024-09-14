@@ -53,16 +53,7 @@ struct MembershipDuration {
 pub async fn get_user_tiers<'a>(
     user: impl Into<String>,
     data: impl Into<Client<'a>>,
-    parent_tx: Option<&sentry::TransactionOrSpan>,
 ) -> MembershipTiers {
-    let span: sentry::TransactionOrSpan = match &parent_tx {
-        Some(parent) => parent.start_child("db.query", "get_user_tiers").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("db.query", "get_user_tiers");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
     let client: Client = data.into();
     let mongodb_client = client.client;
 
@@ -140,7 +131,6 @@ pub async fn get_user_tiers<'a>(
         None => false,
     };
 
-    span.finish();
     return MembershipTiers {
         bronze: MembershipTier {
             _name: "bronze".to_string(),
@@ -162,6 +152,6 @@ pub async fn get_user_tiers_from_ctx(
         .clone();
     let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
     let mut mongodb_client = mongodb_client_mutex.lock().await;
-    let membership = get_user_tiers(user.to_string(), &mut *mongodb_client, None).await;
+    let membership = get_user_tiers(user.to_string(), &mut *mongodb_client).await;
     membership
 }

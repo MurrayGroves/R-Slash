@@ -1,4 +1,4 @@
-use std::{ops::Deref, sync::Arc, time::Duration};
+use std::{ops::Deref, time::Duration};
 
 use auto_poster::PostMemory;
 use mongodb::bson::doc;
@@ -10,7 +10,7 @@ use tracing::{debug, error, warn};
 use crate::AutoPostServer;
 
 pub async fn timer_loop(
-    mut server: AutoPostServer,
+    server: AutoPostServer,
     mut new_memory_alert: tokio::sync::mpsc::Receiver<()>,
 ) {
     loop {
@@ -91,7 +91,6 @@ pub async fn timer_loop(
                             match queue_subreddit(
                                 &autopost_clone.subreddit,
                                 &mut redis.clone(),
-                                None,
                                 autopost_clone.bot,
                             )
                             .await
@@ -109,7 +108,6 @@ pub async fn timer_loop(
                                 search,
                                 &mut redis,
                                 autopost_clone.channel,
-                                None,
                             )
                             .await
                         } else {
@@ -117,7 +115,6 @@ pub async fn timer_loop(
                                 autopost_clone.subreddit.clone(),
                                 &mut redis,
                                 autopost_clone.channel,
-                                None,
                             )
                             .await
                         };

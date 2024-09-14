@@ -1,6 +1,7 @@
+#![deny(elided_lifetimes_in_paths)]
+
 use futures::FutureExt;
 use log::trace;
-use rand::Rng;
 use serenity::all::{AutocompleteChoice, CreateAutocompleteResponse};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
@@ -23,10 +24,7 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::{fs, iter};
 
-use serenity::builder::{
-    CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
-    EditInteractionResponse,
-};
+use serenity::builder::{CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage};
 use serenity::model::gateway::GatewayIntents;
 use serenity::model::id::ShardId;
 use serenity::{async_trait, model::gateway::Ready, prelude::*};
@@ -37,7 +35,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{sleep, Duration};
 
 use redis::AsyncCommands;
 use redis::{self, FromRedisValue};
@@ -49,16 +47,16 @@ use mongodb::options::FindOptions;
 use serenity::model::application::{CommandInteraction, Interaction};
 use serenity::model::guild::{Guild, UnavailableGuild};
 
-use anyhow::{anyhow, Error};
+use anyhow::anyhow;
 use sentry_anyhow::capture_anyhow;
 
 use connection_pooler::ResourceManager;
 
 mod command_handlers;
 mod component_handlers;
+mod discord;
 mod modal_handlers;
 
-use post_api::*;
 use rslash_types::ConfigStruct;
 use rslash_types::InteractionResponse;
 
@@ -78,7 +76,7 @@ lazy_static::lazy_static! {
 pub fn redis_sanitise(input: &str) -> String {
     let special = vec![
         ",", ".", "<", ">", "{", "}", "[", "]", "\"", "'", ":", ";", "!", "@", "#", "$", "%", "^",
-        "&", "*", "(", ")", "-", "+", "=", "~",
+        "&", "*", "(", ")", "-", "+", "=", "~", "/"
     ];
 
     let mut output = input.to_string();
@@ -91,22 +89,13 @@ pub fn redis_sanitise(input: &str) -> String {
     output
 }
 
-#[instrument(skip(data, parent_tx))]
+#[instrument(skip(data))]
 pub async fn capture_event(
     data: Arc<RwLock<TypeMap>>,
     event: &str,
-    parent_tx: Option<&sentry::TransactionOrSpan>,
     properties: Option<HashMap<&str, String>>,
     distinct_id: &str,
 ) {
-    let span: sentry::TransactionOrSpan = match parent_tx {
-        Some(parent) => parent.start_child("analytics", "capture_event").into(),
-        None => {
-            let ctx = sentry::TransactionContext::new("analytics", "capture_event");
-            sentry::start_transaction(ctx).into()
-        }
-    };
-
     let event = event.to_string();
     let properties = match properties {
         Some(properties) => Some(
@@ -147,125 +136,71 @@ pub async fn capture_event(
             }
         }
     });
-
-    span.finish();
 }
 
-#[instrument(skip(command, ctx, tx))]
+#[instrument(skip(command, ctx, tracker))]
 async fn get_command_response<'a>(
     command: &'a CommandInteraction,
     ctx: &'a Context,
-    tx: &'a sentry::Transaction,
-) -> Result<InteractionResponse, anyhow::Error> {
+    mut tracker: discord::ResponseTracker<'a>,
+) -> Result<(), anyhow::Error> {
     match command.data.name.as_str() {
-        "ping" => Ok(InteractionResponse::Message(InteractionResponseMessage {
-            content: None,
-            embed: Some(
-                CreateEmbed::default()
-                    .title("Pong!")
-                    .color(Colour::from_rgb(0, 255, 0))
-                    .to_owned(),
-            ),
-            components: None,
-            file: None,
-            ephemeral: false,
-            fallback: ResponseFallbackMethod::Error,
-        })),
+        "ping" => {
+            tracker
+                .send_response(InteractionResponse::Message(InteractionResponseMessage {
+                    content: None,
+                    embed: Some(
+                        CreateEmbed::default()
+                            .title("Pong!")
+                            .color(Colour::from_rgb(0, 255, 0))
+                            .to_owned(),
+                    ),
+                    components: None,
+                    file: None,
+                    ephemeral: false,
+                    fallback: ResponseFallbackMethod::Error,
+                }))
+                .await
+        }
 
-        "support" => Ok(InteractionResponse::Message(InteractionResponseMessage {
-            content: None,
-            embed: Some(
-                CreateEmbed::default()
-                    .title("Get Support")
-                    .description(
-                        "[Discord Server](https://discord.gg/jYtCFQG)
+        "support" => {
+            tracker
+                .send_response(InteractionResponse::Message(InteractionResponseMessage {
+                    content: None,
+                    embed: Some(
+                        CreateEmbed::default()
+                            .title("Get Support")
+                            .description(
+                                "[Discord Server](https://discord.gg/jYtCFQG)
                     Email: rslashdiscord@gmail.com",
-                    )
-                    .color(Colour::from_rgb(0, 255, 0))
-                    .url("https://discord.gg/jYtCFQG")
-                    .to_owned(),
-            ),
-            components: None,
-            file: None,
-            ephemeral: false,
-            fallback: ResponseFallbackMethod::Error,
-        })),
-
-        "get" => {
-            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child(
-                "interaction.slash_command.get_response",
-                "cmd_get_subreddit_cmd",
-            ));
-            let resp = command_handlers::get_subreddit_cmd(&command, &ctx, &cmd_tx).await;
-            cmd_tx.finish();
-            resp
+                            )
+                            .color(Colour::from_rgb(0, 255, 0))
+                            .url("https://discord.gg/jYtCFQG")
+                            .to_owned(),
+                    ),
+                    components: None,
+                    file: None,
+                    ephemeral: false,
+                    fallback: ResponseFallbackMethod::Error,
+                }))
+                .await
         }
 
-        "membership" => {
-            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child(
-                "interaction.slash_command.get_response",
-                "cmd_get_user_tiers",
-            ));
-            let resp = command_handlers::cmd_get_user_tiers(&command, &ctx, &cmd_tx).await;
-            cmd_tx.finish();
-            resp
-        }
+        "get" => command_handlers::get_subreddit_cmd(&command, &ctx, tracker).await,
 
-        "custom" => {
-            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child(
-                "interaction.slash_command.get_response",
-                "cmd_get_custom_subreddit",
-            ));
-            let resp = command_handlers::get_custom_subreddit(&command, &ctx, &cmd_tx).await;
-            cmd_tx.finish();
-            resp
-        }
+        "membership" => command_handlers::cmd_get_user_tiers(&command, &ctx, tracker).await,
 
-        "info" => {
-            let cmd_tx = sentry::TransactionOrSpan::from(
-                tx.start_child("interaction.slash_command.get_response", "cmd_info"),
-            );
-            let resp = command_handlers::info(&command, &ctx, &cmd_tx).await;
-            cmd_tx.finish();
-            resp
-        }
+        "custom" => command_handlers::get_custom_subreddit(&command, &ctx, tracker).await,
 
-        "subscribe" => {
-            let cmd_tx = sentry::TransactionOrSpan::from(
-                tx.start_child("interaction.slash_command.get_response", "cmd_subscribe"),
-            );
-            let resp = command_handlers::subscribe(&command, &ctx, &cmd_tx).await;
-            cmd_tx.finish();
-            resp
-        }
+        "info" => command_handlers::info(&command, &ctx, tracker).await,
 
-        "subscribe_custom" => {
-            let cmd_tx = sentry::TransactionOrSpan::from(tx.start_child(
-                "interaction.slash_command.get_response",
-                "cmd_subscribe_custom",
-            ));
-            let resp = command_handlers::subscribe_custom(&command, &ctx, &cmd_tx).await;
-            cmd_tx.finish();
-            resp
-        }
+        "subscribe" => command_handlers::subscribe(&command, &ctx, tracker).await,
 
-        "unsubscribe" => {
-            let cmd_tx = sentry::TransactionOrSpan::from(
-                tx.start_child("interaction.slash_command.get_response", "cmd_unsubscribe"),
-            );
-            let resp = command_handlers::unsubscribe(&command, &ctx, &cmd_tx).await;
-            cmd_tx.finish();
-            resp
-        }
+        "subscribe_custom" => command_handlers::subscribe_custom(&command, &ctx, tracker).await,
 
-        "autopost" => {
-            let cmd_tx = sentry::TransactionOrSpan::from(
-                tx.start_child("interaction.slash_command.get_response", "cmd_autopost"),
-            );
-            let resp = command_handlers::autopost(&command, &ctx, &cmd_tx).await;
-            cmd_tx.finish();
-            resp
-        }
+        "unsubscribe" => command_handlers::unsubscribe(&command, &ctx, tracker).await,
+
+        "autopost" => command_handlers::autopost(&command, &ctx, tracker).await,
 
         _ => Err(anyhow!("Unknown command"))?,
     }
@@ -298,7 +233,6 @@ impl EventHandler for Handler {
                     ctx.data.clone(),
                     "guild_join",
                     None,
-                    None,
                     &format!("guild_{}", guild.id.get().to_string()),
                 )
                 .await;
@@ -325,7 +259,6 @@ impl EventHandler for Handler {
             ctx.data.clone(),
             "guild_leave",
             None,
-            None,
             &format!("guild_{}", incomplete.id.get().to_string()),
         )
         .await;
@@ -336,7 +269,6 @@ impl EventHandler for Handler {
         capture_event(
             ctx.data,
             "on_ready",
-            None,
             None,
             &format!("shard_{}", ready.shard.unwrap().id.0.to_string()),
         )
@@ -391,11 +323,16 @@ impl EventHandler for Handler {
     /// Fires when a slash command or other interaction is received
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         debug!("Interaction received");
-        let tx_ctx = sentry::TransactionContext::new("interaction_create", "interaction");
-        let tx = sentry::start_transaction(tx_ctx);
-        sentry::configure_scope(|scope| scope.set_span(Some(tx.clone().into())));
+        let tx_ctx = sentry::TransactionContext::new(
+            "interaction_create",
+            "http.server",
+        );
+        let transaction = sentry::start_transaction(tx_ctx);
+        sentry::configure_scope(|scope| scope.set_span(Some(transaction.clone().into())));
 
-        let interaction_response = match &interaction {
+        let mut tracker = discord::ResponseTracker::new(&interaction, ctx.http.clone());
+
+        let result = match &interaction {
             Interaction::Command(command) => {
                 match command.guild_id {
                     Some(guild_id) => {
@@ -423,13 +360,10 @@ impl EventHandler for Handler {
                         info!("Sent at {:?}", command.id.created_at());
                     }
                 }
-                get_command_response(&command, &ctx, &tx).await
-            },
+                get_command_response(&command, &ctx, tracker).await
+            }
+
             Interaction::Component(command) => {
-                let component_tx = sentry::TransactionOrSpan::from(
-                    tx.start_child("interaction.component", "handle component interaction"),
-                );
-    
                 match command.guild_id {
                     Some(guild_id) => {
                         info!(
@@ -456,7 +390,7 @@ impl EventHandler for Handler {
                         info!("Sent at {:?}", command.id.created_at());
                     }
                 }
-    
+
                 // If custom_id uses invalid data structure (old version of bot), ignore interaction
                 let custom_id: HashMap<String, serde_json::Value> =
                     if let Ok(custom_id) = serde_json::from_str(&command.data.custom_id) {
@@ -464,109 +398,30 @@ impl EventHandler for Handler {
                     } else {
                         return;
                     };
-    
+
                 let button_command = match custom_id.get("command") {
                     Some(command) => command.to_string().replace('"', ""),
                     None => "again".to_string(),
                 };
-    
-                let component_response: Option<Result<InteractionResponse, Error>> =
-                    match button_command.as_str() {
-                        "again" => {
-                            let subreddit = custom_id["subreddit"].to_string().replace('"', "");
-                            debug!("Search, {:?}", custom_id["search"]);
-                            let search_enabled = match custom_id["search"] {
-                                serde_json::Value::String(_) => true,
-                                _ => false,
-                            };
-    
-                            capture_event(
-                                ctx.data.clone(),
-                                "subreddit_cmd",
-                                Some(&component_tx),
-                                Some(HashMap::from([
-                                    ("subreddit", subreddit.clone().to_lowercase()),
-                                    ("button", "true".to_string()),
-                                    ("search_enabled", search_enabled.to_string()),
-                                ])),
-                                &format!("user_{}", command.user.id.get().to_string()),
-                            )
-                            .await;
-    
-                            let data_read = ctx.data.read().await;
-                            let conf = data_read.get::<ConfigStruct>().unwrap();
-                            let mut con = conf.redis.clone();
-    
-                            let component_response = match search_enabled {
-                                true => {
-                                    let search = custom_id["search"].to_string().replace('"', "");
-                                    match timeout(
-                                        Duration::from_secs(30),
-                                        get_subreddit_search(
-                                            subreddit,
-                                            search,
-                                            &mut con,
-                                            command.channel_id,
-                                            Some(&component_tx),
-                                        ),
-                                    )
-                                    .await
-                                    {
-                                        Ok(x) => x,
-                                        Err(x) => {
-                                            Err(anyhow!("Timeout getting search results: {:?}", x))
-                                        }
-                                    }
-                                }
-                                false => {
-                                    match timeout(
-                                        Duration::from_secs(30),
-                                        get_subreddit(
-                                            subreddit,
-                                            &mut con,
-                                            command.channel_id,
-                                            Some(&component_tx),
-                                        ),
-                                    )
-                                    .await
-                                    {
-                                        Ok(x) => x,
-                                        Err(x) => Err(anyhow!("Timeout getting subreddit: {:?}", x)),
-                                    }
-                                }
-                            };
-    
-                            Some(component_response)
-                        }
-    
-                        "unsubscribe" => Some(component_handlers::unsubscribe(&ctx, &command).await),
-                        "autopost_cancel" => {
-                            Some(component_handlers::autopost_cancel(&ctx, &command).await)
-                        }
-                        "where-autopost" => Some(Ok(InteractionResponse::Message(InteractionResponseMessage {
+
+                match button_command.as_str() {
+                        "again" => component_handlers::post_again(&ctx, &command, custom_id, tracker).await,
+                        "unsubscribe" => component_handlers::unsubscribe(&ctx, &command, tracker).await,
+                        "autopost_cancel" => component_handlers::autopost_cancel(&ctx, &command, tracker).await,
+                        "where-autopost" => tracker.send_response(InteractionResponse::Message(InteractionResponseMessage {
                             content: Some("Auto-post setup has been moved to the `/autopost start` command to reduce clutter on the post view\nand because only users with Manage Channels can setup auto-posts so it doesn't make much sense to show to everyone.".to_string()),
                             ephemeral: true,
                             ..Default::default()
-                        }))),
-    
+                        })).await,
+
                         _ => {
                             warn!("Unknown button command: {}", button_command);
                             return;
                         }
-                    };
-    
-                match component_response {
-                    Some(component_response) => component_response,
-                    None => {
-                        return;
                     }
-                }
-            },
+            }
+
             Interaction::Modal(modal) => {
-                let modal_tx = sentry::TransactionOrSpan::from(
-                    tx.start_child("interaction.modal", "handle modal interaction"),
-                );
-    
                 match modal.guild_id {
                     Some(guild_id) => {
                         info!(
@@ -593,7 +448,7 @@ impl EventHandler for Handler {
                         info!("Sent at {:?}", modal.id.created_at());
                     }
                 }
-    
+
                 // If custom_id uses invalid data structure (old version of bot), ignore interaction
                 let custom_id: HashMap<String, serde_json::Value> =
                     if let Ok(custom_id) = serde_json::from_str(&modal.data.custom_id) {
@@ -601,30 +456,30 @@ impl EventHandler for Handler {
                     } else {
                         return;
                     };
-    
+
                 let modal_command = match custom_id.get("command") {
                     Some(command) => command.as_str().unwrap(),
                     None => {
                         warn!("Unknown modal command: {:?}", custom_id);
-                        modal_tx.finish();
                         return;
                     }
                 };
-    
+
                 match modal_command {
                     "autopost" => {
-                        modal_handlers::autopost_create(&ctx, modal, custom_id, &modal_tx).await
+                        modal_handlers::autopost_create(&ctx, modal, custom_id, tracker).await
                     }
-    
+
                     _ => Err(anyhow!("Unknown modal command")),
                 }
-            },
+            }
+
             Interaction::Autocomplete(autocomplete) => {
                 let subreddit = match autocomplete
-                .data
-                .options
-                .iter()
-                .find(|option| option.name == "subreddit")
+                    .data
+                    .options
+                    .iter()
+                    .find(|option| option.name == "subreddit")
                 {
                     Some(option) => option.value.as_str().unwrap().to_string(),
                     None => {
@@ -715,244 +570,52 @@ impl EventHandler for Handler {
                     }
                 };
                 return;
-            },
+            }
             _ => {
                 return;
-            },
+            }
         };
 
-        match interaction_response {
-            Ok(response) => {
-                debug!("Sending response: {:?}", response);
-                match response {
-                    InteractionResponse::None => {},
-                    InteractionResponse::Message(command_response) => {
-                                        // Try to send response
-                                        if let Err(why) = {
-                                            let api_span = tx
-                                                .start_child("discord.api", "create slash command response");
-                    
-                                            let mut resp = CreateInteractionResponseMessage::new();
-                                            if let Some(embed) = command_response.embed.clone() {
-                                                resp = resp.embed(embed);
-                                            };
-                    
-                                            if let Some(components) = command_response.components.clone() {
-                                                resp = resp.components(components);
-                                            };
-                    
-                                            if let Some(content) = command_response.content.clone() {
-                                                resp = resp.content(content);
-                                            };
-                    
-                                            resp = resp.ephemeral(command_response.ephemeral);
-                                            let to_return = match &interaction {
-                                                Interaction::Command(command) => {
-                                                    command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await
-                                                },
-                                                Interaction::Component(command) => {
-                                                    command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await
-                                                },
-                                                Interaction::Modal(command) => {
-                                                    command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await
-                                                },
-                                                _ => { Err(serenity::Error::Other("Unknown interaction type")) }
-                                            };
-                                            api_span.finish();
-                                            to_return
-                                        } {
-                                            match why {
-                                                serenity::Error::Http(e) => {
-                                                    if format!("{}", e) == "Interaction has already been acknowledged."
-                                                    {
-                                                        debug!(
-                                                            "Interaction already acknowledged, fallback is: {:?}",
-                                                            command_response.fallback
-                                                        );
-                    
-                                                        // Interaction has already been responded to, we either need to edit the response, send a followup, error, or do nothing
-                                                        // depending on the fallback method specified
-                                                        match command_response.fallback {
-                                                            ResponseFallbackMethod::Edit => {
-                                                                let api_span = tx.start_child(
-                                                                    "discord.api",
-                                                                    "edit slash command response",
-                                                                );
-                                                                let mut resp = EditInteractionResponse::new();
-                                                                if let Some(embed) = command_response.embed.clone() {
-                                                                    resp = resp.embed(embed);
-                                                                };
-                    
-                                                                if let Some(components) =
-                                                                    command_response.components.clone()
-                                                                {
-                                                                    resp = resp.components(components);
-                                                                };
-                    
-                                                                if let Some(content) = command_response.content.clone()
-                                                                {
-                                                                    resp = resp.content(content);
-                                                                };
-                    
-                                                                if let Err(why) =
-                                                                    match &interaction {
-                                                                        Interaction::Command(command) => {
-                                                                            command.edit_response(&ctx.http, resp).await
-                                                                        },
-                                                                        Interaction::Component(command) => {
-                                                                            command.edit_response(&ctx.http, resp).await
-                                                                        },
-                                                                        Interaction::Modal(command) => {
-                                                                            command.edit_response(&ctx.http, resp).await
-                                                                        },
-                                                                        _ => { Err(serenity::Error::Other("Unknown interaction type")) }
-                                                                    }
-                                                                {
-                                                                    warn!(
-                                                                        "Cannot edit slash command response: {}",
-                                                                        why
-                                                                    );
-                                                                };
-                                                                api_span.finish();
-                                                            }
-                    
-                                                            ResponseFallbackMethod::Followup => {
-                                                                let followup_span = tx
-                                                                    .start_child("discord.api", "send followup");
-                                                                let mut resp = CreateMessage::new();
-                                                                if let Some(embed) = command_response.embed.clone() {
-                                                                    resp = resp.embed(embed);
-                                                                };
-                    
-                                                                if let Some(components) =
-                                                                    command_response.components.clone()
-                                                                {
-                                                                    resp = resp.components(components);
-                                                                };
-                    
-                                                                if let Some(content) = command_response.content.clone()
-                                                                {
-                                                                    resp = resp.content(content);
-                                                                };
-                    
-                                                                if let Err(why) = match &interaction {
-                                                                    Interaction::Command(command) => {
-                                                                        command
-                                                                            .channel_id
-                                                                            .send_message(&ctx.http, resp)
-                                                                            .await
-                                                                    },
-                                                                    Interaction::Component(command) => {
-                                                                        command
-                                                                            .channel_id
-                                                                            .send_message(&ctx.http, resp)
-                                                                            .await
-                                                                    },
-                                                                    Interaction::Modal(command) => {
-                                                                        command
-                                                                            .channel_id
-                                                                            .send_message(&ctx.http, resp)
-                                                                            .await
-                                                                    },
-                                                                    _ => { Err(serenity::Error::Other("Unknown interaction type")) }
-                                                                } {
-                                                                    warn!(
-                                                                        "Cannot send followup to slash command: {}",
-                                                                        why
-                                                                    );
-                                                                }
-                                                            
-                                                                followup_span.finish();
-                                                            }
-                    
-                                                            ResponseFallbackMethod::Error => {
-                                                                error!("Cannot respond to slash command: {}", e);
-                                                            }
-                    
-                                                            ResponseFallbackMethod::None => {}
-                                                        };
-                                                    } else {
-                                                        error!("Cannot respond to slash command: {}", e);
-                                                        sentry::capture_error(&e);
-                                                    }
-                                                }
-                    
-                                                _ => {
-                                                    warn!("Cannot respond to slash command: {}", why);
-                                                }
-                                            };
-                                        }
-                                    }
-                                    InteractionResponse::Modal(modal) => {
-                                        if let Err(e) = match &interaction {
-                                            Interaction::Command(command) => {
-                                                command
-                                                    .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
-                                                    .await
-                                            },
-                                            Interaction::Component(command) => {
-                                                command
-                                                    .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
-                                                    .await
-                                            },
-                                            Interaction::Modal(command) => {
-                                                command
-                                                    .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
-                                                    .await
-                                            },
-                                            _ => {
-                                                Err(serenity::Error::Other("Unknown interaction type"))
-                                            }
-                                        }
-                                        {
-                                            error!("Cannot respond to slash command with modal: {}", e);
-                                        }
-                                    }
-                }
-            },
-            Err(e) => {
-                capture_anyhow(&e);
+        if let Err(e) = result {
+            let report_error;
+            let error_message;
 
-                let why = e.to_string();
-                let code = rand::thread_rng().gen_range(0..10000);
-
-                error!("Error getting command response: {:?}", e.root_cause());
-
-
-                let to_print = format!("Error code {} in shard {} getting command response: {:?}", code, ctx.shard_id, why);
-
-                
-                let mut resp = CreateInteractionResponseMessage::new();
-                resp = resp.embed(
-                    CreateEmbed::default()
-                        .title("An Error Occurred")
-                        .description(format!(
-                            "Please report this in the support server: {}",
-                            to_print
-                        ))
-                        .color(Colour::from_rgb(255, 0, 0))
-                        .to_owned(),
-                );
-                resp = resp.ephemeral(true);
-
-                match &interaction {
-                    Interaction::Command(command) => {
-                        let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await;
-                    },
-                    Interaction::Component(command) => {
-                        let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await;
-                    },
-                    Interaction::Modal(command) => {
-                        let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(resp)).await;
-                    },
-                    _ => {}
-                }
+            if e.to_string() == "Missing Access".to_string() {
+                report_error = false;
+                error_message =
+                    "The bot does not have permissions to send messages in this channel"
+                        .to_string();
+            } else {
+                report_error = true;
+                error_message = format!("An error occurred while processing your request, please report it in the [support server](https://discord.gg/BggYYTpdG5):\n\n{}", e.to_string());
             }
-        }
 
-        tx.finish();
+            if report_error {
+                capture_anyhow(&e);
+                error!("Error: {:?}", e);
+            }
 
-        debug!("Interaction handled");
+            let error_message = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(error_message)
+                    .ephemeral(true),
+            );
+
+            if let Err(e) = match interaction {
+                Interaction::Command(command) => {
+                    command.create_response(&ctx.http, error_message).await
+                }
+                Interaction::Component(component) => {
+                    component.create_response(&ctx.http, error_message).await
+                }
+                Interaction::Modal(modal) => modal.create_response(&ctx.http, error_message).await,
+                _ => Err(serenity::Error::Other("Invalid interaction type")),
+            } {
+                error!("Failed to send error message: {:?}", e);
+            }
+        };
+
+        transaction.finish();
     }
 }
 
@@ -1018,7 +681,6 @@ async fn monitor_total_shards(
         }
     }
 }
-
 
 struct RetryingTcpStream<T, C>
 where
@@ -1110,231 +772,226 @@ where
     }
 }
 
-#[tokio::main]
-async fn main() {
-    println!("Starting up...");
-    trace!("TRACE");
-    let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
+fn main() {
     let application_id: u64 = env::var("DISCORD_APPLICATION_ID")
         .expect("DISCORD_APPLICATION_ID not set")
         .parse()
         .expect("Failed to convert application_id to u64");
+
+    let bot_name: std::borrow::Cow<'_, str> = match &application_id {
+        278550142356029441 => "booty-bot".into(),
+        291255986742624256 => "testing".into(),
+        _ => "r-slash".into(),
+    };
+
     let shard_id: String = env::var("HOSTNAME")
         .expect("HOSTNAME not set")
         .parse()
         .expect("Failed to convert HOSTNAME to string");
+
     let shard_id: u32 = shard_id
         .replace("discord-shards-", "")
         .parse()
         .expect("unable to convert shard_id to u32");
 
-    println!("Connecting to redis...");
-    let redis_client =
-        redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
-    let mut con = redis_client
-        .get_multiplexed_async_connection()
-        .await
-        .expect("Can't connect to redis");
-    println!("Connected to redis");
-
-    println!("Connecting to mongodb...");
-    let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
-    println!("Connected to mongodb");
-    client_options.app_name = Some(format!("Shard {}", shard_id));
-
-    let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
-    let db = mongodb_client.database("config");
-    let coll = db.collection::<Document>("settings");
-
-    let filter = doc! {"id": "subreddit_list".to_string()};
-    let find_options = FindOptions::builder().build();
-    let mut cursor = coll
-        .find(filter.clone(), find_options.clone())
-        .await
-        .unwrap();
-
-    let doc = cursor.try_next().await.unwrap().unwrap();
-
-    let nsfw_subreddits: Vec<String> = doc
-        .get_array("nsfw")
-        .unwrap()
-        .into_iter()
-        .map(|x| x.as_str().unwrap().to_string())
-        .collect();
-
-    let total_shards: redis::RedisResult<u32> =
-        con.get(format!("total_shards_{}", &*NAMESPACE)).await;
-    let total_shards: u32 = total_shards.expect("Failed to get or convert total_shards");
-
-    println!("Booting with {:?} total shards", total_shards);
-
-    let mut client = serenity::Client::builder(token, GatewayIntents::non_privileged())
-        .event_handler(Handler)
-        .application_id(application_id.into())
-        .await
-        .expect("Error creating client");
-
-    {
-        let mut data: tokio::sync::RwLockWriteGuard<'_, TypeMap> = client.data.write().await;
-
-        let mongodb_manager = ResourceManager::<mongodb::Client>::new(|| Arc::new(Mutex::new(Box::pin(async {
-            let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
-            let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
-
-            let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
-            client_options.app_name = Some(format!("Shard {}", shard_id));
-            mongodb::Client::with_options(client_options).unwrap()
-        })))).await;
-
-        let posthog_manager = ResourceManager::<posthog::Client>::new(|| {
-            Arc::new(Mutex::new(Box::pin(async {
-                let posthog_key: String = env::var("POSTHOG_API_KEY")
-                    .expect("POSTHOG_API_KEY not set")
-                    .parse()
-                    .expect("Failed to convert POSTHOG_API_KEY to string");
-                posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string())
-            })))
-        })
-        .await;
-
-        println!("Connecting to post subscriber...");
-        let reconnect_opts = ReconnectOptions::new()
-            .with_exit_if_first_connect_fails(false)
-            .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
-        let tcp_stream = RetryingTcpStream::new(
-            StubbornTcpStream::connect_with_options(
-                "post-subscriber.discord-bot-shared.svc.cluster.local:50051",
-                reconnect_opts,
-            )
-            .await
-            .expect("Failed to connect to post subscriber"),
-        );
-        let transport = Transport::from((tcp_stream, Bincode::default()));
-
-        let subscriber =
-            post_subscriber::SubscriberClient::new(tarpc::client::Config::default(), transport)
-                .spawn();
-
-        println!("Connected to post subscriber");
-
-        println!("Connecting to auto poster...");
-        let reconnect_opts = ReconnectOptions::new()
-            .with_exit_if_first_connect_fails(false)
-            .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
-        let tcp_stream = RetryingTcpStream::new(
-            StubbornTcpStream::connect_with_options(
-                "auto-poster.discord-bot-shared.svc.cluster.local:50051",
-                reconnect_opts,
-            )
-            .await
-            .expect("Failed to connect to autoposter"),
-        );
-        let transport = Transport::from((tcp_stream, Bincode::default()));
-
-        let auto_poster =
-            auto_poster::AutoPosterClient::new(tarpc::client::Config::default(), transport).spawn();
-
-        println!("Connected to auto poster");
-
-        data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
-        data.insert::<ResourceManager<posthog::Client>>(posthog_manager);
-        data.insert::<ConfigStruct>(ConfigStruct {
-            shard_id,
-            nsfw_subreddits,
-            redis: con,
-        });
-        data.insert::<post_subscriber::SubscriberClient>(subscriber);
-        data.insert::<auto_poster::AutoPosterClient>(auto_poster);
-    }
-
-    let shard_manager = client.shard_manager.clone();
-    tokio::spawn(async move {
-        println!("Spawning shard monitor thread");
-        monitor_total_shards(shard_manager, total_shards).await;
-    });
-
-    let thread = tokio::spawn(async move {
-        tracing_subscriber::Registry::default()
-            .with(
-                sentry::integrations::tracing::layer()
-                    .span_filter(|md| {
-                        if md.name().contains("recv")
-                            || md.name().contains("recv_event") 
-                            || md.name().contains("dispatch")
-                            || md.name().contains("handle_event")
-                            || md.name().contains("check_heartbeat")
-                            || md.name().contains("headers")
-                        {
-                            return false;
-                        } else {
-                            return true;
-                        }
-                    })
-                    .event_filter(|md| {
-                        let level_filter = match md.level() {
-                            &tracing::Level::ERROR => {
-                                sentry::integrations::tracing::EventFilter::Event
-                            }
-                            &tracing::Level::WARN => {
-                                sentry::integrations::tracing::EventFilter::Event
-                            }
-                            &tracing::Level::TRACE => {
-                                sentry::integrations::tracing::EventFilter::Ignore
-                            }
-                            _ => sentry::integrations::tracing::EventFilter::Breadcrumb,
-                        };
-
-                        if (!md.target().contains("discord_shard")
-                            && !md.target().contains("post_api"))
-                            || md.name().contains("serenity")
-                            || md.target().contains("serenity")
-                        {
-                            return sentry::integrations::tracing::EventFilter::Ignore;
-                        } else {
-                            return level_filter;
-                        }
-                    }),
-            )
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .compact()
-                    .with_ansi(false)
-                    .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG)
-                    .with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
-                        if meta.name().contains("serenity") || meta.target().contains("request")  || meta.target().contains("hyper") || meta.target().contains("h2") {
-                            return false;
-                        };
-                        true
-                    })),
-            )
-            .init();
-
-        let bot_name: std::borrow::Cow<str> = match &application_id {
-            278550142356029441 => "booty-bot".into(),
-            291255986742624256 => "testing".into(),
-            _ => "r-slash".into(),
-        };
-
-        let _guard = sentry::init(("https://e1d0fdcc5e224a40ae768e8d36dd7387@o4504774745718784.ingest.sentry.io/4504793832161280", sentry::ClientOptions {
-            release: sentry::release_name!(),
-            traces_sample_rate: 0.2,
-            environment: Some(bot_name.clone()),
-            server_name: Some(shard_id.to_string().into()),
-            ..Default::default()
-        }));
-
-        println!("Spawning client thread");
-        client
-            .start_shard(shard_id, total_shards)
-            .await
-            .expect("Failed to start shard");
-    });
-
-    // If client thread exits, shard has crashed, so mark self as unhealthy.
-    match thread.await {
-        Ok(_) => {}
-        Err(_) => {
-            fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
+    tracing_subscriber::Registry::default()
+        .with(
+        tracing_subscriber::fmt::layer()
+                .compact()
+                .with_ansi(false)
+                .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG)
+                .with_filter(tracing_subscriber::filter::FilterFn::new(|meta| {
+                    if meta.name().contains("serenity")
+                        || meta.target().contains("request")
+                        || meta.target().contains("hyper")
+                        || meta.target().contains("h2")
+                    {
+                        return false;
+                    };
+                    true
+                })),
+        )
+        .with(sentry::integrations::tracing::layer()
+    .span_filter(|meta| {
+        if (meta.target().contains("serenity") && meta.target() != "serenity::http::client") || meta.target().contains("h2") {
+            false
+        } else {
+            true
         }
-    }
+    }))
+        .init();
+
+    let _guard = sentry::init(("https://e1d0fdcc5e224a40ae768e8d36dd7387@o4504774745718784.ingest.sentry.io/4504793832161280", sentry::ClientOptions {
+        release: sentry::release_name!(),
+        traces_sample_rate: 0.2,
+        environment: Some(bot_name.clone()),
+        server_name: Some(shard_id.to_string().into()),
+        before_send: Some(Arc::new(|event| {
+            if let Some(x) = &event.transaction {
+                if x.contains("recv") || x.contains("recv_event") || x.contains("dispatch") || x.contains("handle_event") || x.contains("check_heartbeat") || x.contains("headers") {
+                    return Some(event);
+                }
+            };
+            return Some(event);
+        })),
+        ..Default::default()
+    }));
+
+    tokio::runtime::Builder::new_multi_thread()
+    .enable_all()
+    .build()
+    .unwrap()
+    .block_on(async {
+        println!("Starting up...");
+        
+        trace!("TRACE");
+        let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
+
+        println!("Connecting to redis...");
+        let redis_client =
+            redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
+        let mut con = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("Can't connect to redis");
+        println!("Connected to redis");
+
+        println!("Connecting to mongodb...");
+        let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
+        println!("Connected to mongodb");
+        client_options.app_name = Some(format!("Shard {}", shard_id));
+
+        let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
+        let db = mongodb_client.database("config");
+        let coll = db.collection::<Document>("settings");
+
+        let filter = doc! {"id": "subreddit_list".to_string()};
+        let find_options = FindOptions::builder().build();
+        let mut cursor = coll
+            .find(filter.clone(), find_options.clone())
+            .await
+            .unwrap();
+
+        let doc = cursor.try_next().await.unwrap().unwrap();
+
+        let nsfw_subreddits: Vec<String> = doc
+            .get_array("nsfw")
+            .unwrap()
+            .into_iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect();
+
+        let total_shards: redis::RedisResult<u32> =
+            con.get(format!("total_shards_{}", &*NAMESPACE)).await;
+        let total_shards: u32 = total_shards.expect("Failed to get or convert total_shards");
+
+        println!("Booting with {:?} total shards", total_shards);
+
+        let mut client = serenity::Client::builder(token, GatewayIntents::non_privileged())
+            .event_handler(Handler)
+            .application_id(application_id.into())
+            .await
+            .expect("Error creating client");
+
+        println!("Created client");
+        {
+            let mut data: tokio::sync::RwLockWriteGuard<'_, TypeMap> = client.data.write().await;
+
+            println!("Locked data");
+
+            let mongodb_manager = ResourceManager::<mongodb::Client>::new(|| Arc::new(Mutex::new(Box::pin(async {
+                let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
+                let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
+
+                let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
+                client_options.app_name = Some(format!("Shard {}", shard_id));
+                mongodb::Client::with_options(client_options).unwrap()
+            })))).await;
+
+            println!("Created mongodb manager");
+
+            let posthog_manager = ResourceManager::<posthog::Client>::new(|| {
+                Arc::new(Mutex::new(Box::pin(async {
+                    let posthog_key: String = env::var("POSTHOG_API_KEY")
+                        .expect("POSTHOG_API_KEY not set")
+                        .parse()
+                        .expect("Failed to convert POSTHOG_API_KEY to string");
+                    posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string())
+                })))
+            })
+            .await;
+
+            println!("Connecting to post subscriber...");
+            let reconnect_opts = ReconnectOptions::new()
+                .with_exit_if_first_connect_fails(false)
+                .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
+            let tcp_stream = RetryingTcpStream::new(
+                StubbornTcpStream::connect_with_options(
+                    "post-subscriber.discord-bot-shared.svc.cluster.local:50051",
+                    reconnect_opts,
+                )
+                .await
+                .expect("Failed to connect to post subscriber"),
+            );
+            let transport = Transport::from((tcp_stream, Bincode::default()));
+
+            let subscriber =
+                post_subscriber::SubscriberClient::new(tarpc::client::Config::default(), transport)
+                    .spawn();
+
+            println!("Connected to post subscriber");
+
+            println!("Connecting to auto poster...");
+            let reconnect_opts = ReconnectOptions::new()
+                .with_exit_if_first_connect_fails(false)
+                .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
+            let tcp_stream = RetryingTcpStream::new(
+                StubbornTcpStream::connect_with_options(
+                    "auto-poster.discord-bot-shared.svc.cluster.local:50051",
+                    reconnect_opts,
+                )
+                .await
+                .expect("Failed to connect to autoposter"),
+            );
+            let transport = Transport::from((tcp_stream, Bincode::default()));
+
+            let auto_poster =
+                auto_poster::AutoPosterClient::new(tarpc::client::Config::default(), transport).spawn();
+
+            println!("Connected to auto poster");
+
+            data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
+            data.insert::<ResourceManager<posthog::Client>>(posthog_manager);
+            data.insert::<ConfigStruct>(ConfigStruct {
+                shard_id,
+                nsfw_subreddits,
+                redis: con,
+            });
+            data.insert::<post_subscriber::SubscriberClient>(subscriber);
+            data.insert::<auto_poster::AutoPosterClient>(auto_poster);
+        }
+
+        let shard_manager = client.shard_manager.clone();
+        tokio::spawn(async move {
+            println!("Spawning shard monitor thread");
+            monitor_total_shards(shard_manager, total_shards).await;
+        });
+
+        let thread = tokio::spawn(async move {
+
+            println!("Spawning client thread");
+            client
+                .start_shard(shard_id, total_shards)
+                .await
+                .expect("Failed to start shard");
+        });
+
+        // If client thread exits, shard has crashed, so mark self as unhealthy.
+        match thread.await {
+            Ok(_) => {}
+            Err(_) => {
+                fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
+            }
+        }
+    });
 }

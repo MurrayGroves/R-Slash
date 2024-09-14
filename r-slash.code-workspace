@@ -2,6 +2,21 @@
 	"folders": [
 		{
 			"path": "shard"
+		},
+		{
+			"path": "connection-pooler"
+		},
+		{
+			"path": "auto-poster"
+		},
+		{
+			"path": "post-subscriber"
+		},
+		{
+			"path": "post-api"
+		},
+		{
+			"path": "rslash_types"
 		}
 	],
 	"settings": {}

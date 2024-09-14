@@ -3,13 +3,13 @@ use log::{error, trace};
 use post_subscriber::{Bot, SubscriberClient};
 use serde_json::json;
 use serenity::all::{
-    CommandDataOptionValue, CreateButton, CreateInputText, CreateInteractionResponse, CreateModal,
-    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
+    CommandDataOptionValue, CreateButton, CreateInputText, CreateModal, CreateSelectMenu,
+    CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
 };
 use serenity::model::Colour;
 use tarpc::context;
+use tracing::debug;
 use tracing::instrument;
-use tracing::{debug, warn};
 
 use std::collections::HashMap;
 use std::env;
@@ -33,30 +33,32 @@ use post_api::*;
 use rslash_types::InteractionResponse;
 use rslash_types::{ConfigStruct, InteractionResponseMessage};
 
+use crate::discord::ResponseTracker;
 use crate::{capture_event, NAMESPACE};
 
 // Return error interaction response from current function if bot doesn't have permission to send messages in the channel
 macro_rules! error_if_no_send_message_perm {
-    ($ctx:expr, $channel:expr) => {
+    ($ctx:expr, $channel:expr, $tracker:expr) => {
         let channel = $channel.to_channel(&$ctx.http).await?;
         if let Some(channel) = channel.guild() {
-            if let Ok(perms) =
-                channel.permissions_for_user(&$ctx.cache, $ctx.cache.current_user().id)
-            {
+            let id = $ctx.cache.current_user().id.clone();
+            if let Ok(perms) = channel.permissions_for_user(&$ctx.cache, id) {
                 if !perms.send_messages() {
-                    return Ok(InteractionResponse::Message(InteractionResponseMessage {
-                        embed: Some(
-                            CreateEmbed::default()
-                                .title("Permission Error")
-                                .description(
-                                    "I don't have permission to send messages in this channel.",
-                                )
-                                .color(0xff0000)
-                                .to_owned(),
-                        ),
-                        ephemeral: true,
-                        ..Default::default()
-                    }));
+                    return $tracker
+                        .send_response(InteractionResponse::Message(InteractionResponseMessage {
+                            embed: Some(
+                                CreateEmbed::default()
+                                    .title("Permission Error")
+                                    .description(
+                                        "I don't have permission to send messages in this channel.",
+                                    )
+                                    .color(0xff0000)
+                                    .to_owned(),
+                            ),
+                            ephemeral: true,
+                            ..Default::default()
+                        }))
+                        .await;
                 }
             }
         }
@@ -64,32 +66,34 @@ macro_rules! error_if_no_send_message_perm {
 }
 
 macro_rules! error_if_no_premium {
-    ($ctx:expr, $user:expr) => {
+    ($ctx:expr, $user:expr, $tracker:expr) => {
         let tiers = get_user_tiers_from_ctx($ctx, $user).await;
         if !tiers.bronze.active {
-            return Ok(InteractionResponse::Message(InteractionResponseMessage {
-                embed: Some(
-                    CreateEmbed::default()
-                        .title("Premium Feature")
-                        .description(
-                            "You must have premium in order to use this command.
+            return $tracker
+                .send_response(InteractionResponse::Message(InteractionResponseMessage {
+                    embed: Some(
+                        CreateEmbed::default()
+                            .title("Premium Feature")
+                            .description(
+                                "You must have premium in order to use this command.
                     Get it [here](https://ko-fi.com/rslash)",
-                        )
-                        .color(0xff0000)
-                        .to_owned(),
-                ),
-                ..Default::default()
-            }));
+                            )
+                            .color(0xff0000)
+                            .to_owned(),
+                    ),
+                    ..Default::default()
+                }))
+                .await;
         }
     };
 }
 
-#[instrument(skip(command, ctx, tx))]
+#[instrument(skip(command, ctx, tracker))]
 pub async fn get_subreddit_cmd<'a>(
     command: &'a CommandInteraction,
     ctx: &'a Context,
-    tx: &sentry::TransactionOrSpan,
-) -> Result<InteractionResponse, anyhow::Error> {
+    mut tracker: ResponseTracker<'a>,
+) -> Result<()> {
     let data_read = ctx.data.read().await;
 
     let config = data_read.get::<ConfigStruct>().unwrap();
@@ -104,7 +108,6 @@ pub async fn get_subreddit_cmd<'a>(
     capture_event(
         ctx.data.clone(),
         "subreddit_cmd",
-        Some(tx),
         Some(HashMap::from([
             ("subreddit", subreddit.clone()),
             ("button", "false".to_string()),
@@ -115,22 +118,27 @@ pub async fn get_subreddit_cmd<'a>(
     .await;
 
     if config.nsfw_subreddits.contains(&subreddit) {
+        let mut permitted = true;
         if let Some(guild_id) = command.guild_id {
             if let Some(guild) = ctx.cache.guild(guild_id) {
                 if let Some(channel) = guild.channels.get(&command.channel_id) {
                     if !channel.nsfw {
-                        return Ok(InteractionResponse::Message(InteractionResponseMessage {
-                        embed: Some(CreateEmbed::default()
-                            .title("NSFW subreddits can only be used in NSFW channels")
-                            .description("Discord requires NSFW content to only be sent in NSFW channels, find out how to fix this [here](https://support.discord.com/hc/en-us/articles/115000084051-NSFW-Channels-and-Content)")
-                            .color(Colour::from_rgb(255, 0, 0))
-                            .to_owned()
-                        ),
-                        ..Default::default()
-                    }));
+                        permitted = false;
                     }
                 }
             }
+        }
+
+        if !permitted {
+            return tracker.send_response(InteractionResponse::Message(InteractionResponseMessage {
+                embed: Some(CreateEmbed::default()
+                    .title("NSFW subreddits can only be used in NSFW channels")
+                    .description("Discord requires NSFW content to only be sent in NSFW channels, find out how to fix this [here](https://support.discord.com/hc/en-us/articles/115000084051-NSFW-Channels-and-Content)")
+                    .color(Colour::from_rgb(255, 0, 0))
+                    .to_owned()
+                ),
+                ..Default::default()
+            })).await;
         }
     }
 
@@ -140,19 +148,24 @@ pub async fn get_subreddit_cmd<'a>(
     debug!("Got redis client");
     if options.len() > 1 {
         let search = options[1].value.as_str().unwrap().to_string();
-        return get_subreddit_search(subreddit, search, &mut con, command.channel_id, Some(tx))
+        return tracker
+            .send_response(
+                get_subreddit_search(subreddit, search, &mut con, command.channel_id).await?,
+            )
             .await;
     } else {
-        return get_subreddit(subreddit, &mut con, command.channel_id, Some(tx)).await;
+        return tracker
+            .send_response(get_subreddit(subreddit, &mut con, command.channel_id).await?)
+            .await;
     }
 }
 
-#[instrument(skip(command, ctx, parent_tx))]
+#[instrument(skip(command, ctx, tracker))]
 pub async fn cmd_get_user_tiers<'a>(
     command: &'a CommandInteraction,
     ctx: &'a Context,
-    parent_tx: &sentry::TransactionOrSpan,
-) -> Result<InteractionResponse, anyhow::Error> {
+    mut tracker: ResponseTracker<'a>,
+) -> Result<()> {
     let data_lock = ctx.data.read().await;
     let mongodb_manager = data_lock
         .get::<ResourceManager<mongodb::Client>>()
@@ -161,12 +174,7 @@ pub async fn cmd_get_user_tiers<'a>(
     let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
     let mut mongodb_client = mongodb_client_mutex.lock().await;
 
-    let tiers = get_user_tiers(
-        command.user.id.get().to_string(),
-        &mut *mongodb_client,
-        Some(parent_tx),
-    )
-    .await;
+    let tiers = get_user_tiers(command.user.id.get().to_string(), &mut *mongodb_client).await;
     debug!("Tiers: {:?}", tiers);
 
     let bronze = match tiers.bronze.active {
@@ -178,32 +186,33 @@ pub async fn cmd_get_user_tiers<'a>(
     capture_event(
         ctx.data.clone(),
         "cmd_get_user_tiers",
-        Some(parent_tx),
         Some(HashMap::from([("bronze_active", bronze.to_string())])),
         &format!("user_{}", command.user.id.get().to_string()),
     )
     .await;
 
-    return Ok(InteractionResponse::Message(InteractionResponseMessage {
-        embed: Some(
-            CreateEmbed::default()
-                .title("Your membership tiers")
-                .description("Get Premium here: https://ko-fi.com/rslash")
-                .field("Premium", bronze, false)
-                .to_owned(),
-        ),
-        ephemeral: true,
-        ..Default::default()
-    }));
+    tracker
+        .send_response(InteractionResponse::Message(InteractionResponseMessage {
+            embed: Some(
+                CreateEmbed::default()
+                    .title("Your membership tiers")
+                    .description("Get Premium here: https://ko-fi.com/rslash")
+                    .field("Premium", bronze, false)
+                    .to_owned(),
+            ),
+            ephemeral: true,
+            ..Default::default()
+        }))
+        .await
 }
 
-#[instrument(skip(command, ctx, parent_tx))]
+#[instrument(skip(command, ctx, tracker))]
 pub async fn get_custom_subreddit<'a>(
     command: &'a CommandInteraction,
     ctx: &'a Context,
-    parent_tx: &sentry::TransactionOrSpan,
-) -> Result<InteractionResponse, anyhow::Error> {
-    error_if_no_premium!(ctx, command.user.id);
+    mut tracker: ResponseTracker<'a>,
+) -> Result<()> {
+    error_if_no_premium!(ctx, command.user.id, tracker);
 
     let options = &command.data.options;
     let subreddit = options[0].value.clone();
@@ -213,22 +222,22 @@ pub async fn get_custom_subreddit<'a>(
         SubredditStatus::Valid => {}
         SubredditStatus::Invalid(reason) => {
             debug!("Subreddit response not 200: {}", reason);
-            return Ok(InteractionResponse::Message(InteractionResponseMessage {
-                embed: Some(
-                    CreateEmbed::default()
-                        .title("Subreddit Inaccessible")
-                        .description(format!("r/{} is private or does not exist.", subreddit))
-                        .color(0xff0000)
-                        .to_owned(),
-                ),
-                ..Default::default()
-            }));
+            return tracker
+                .send_response(InteractionResponse::Message(InteractionResponseMessage {
+                    embed: Some(
+                        CreateEmbed::default()
+                            .title("Subreddit Inaccessible")
+                            .description(format!("r/{} is private or does not exist.", subreddit))
+                            .color(0xff0000)
+                            .to_owned(),
+                    ),
+                    ..Default::default()
+                }))
+                .await;
         }
     }
 
-    command.defer(&ctx.http).await.unwrap_or_else(|e| {
-        warn!("Failed to defer response: {}", e);
-    });
+    tracker.defer().await?;
 
     let data_lock = ctx.data.read().await;
     let conf = data_lock.get::<ConfigStruct>().unwrap();
@@ -236,19 +245,19 @@ pub async fn get_custom_subreddit<'a>(
 
     let id = ctx.cache.current_user().id.get();
 
-    queue_subreddit(&subreddit, &mut con, Some(parent_tx), id).await?;
+    queue_subreddit(&subreddit, &mut con, id).await?;
 
     drop(data_lock);
 
-    return get_subreddit_cmd(command, ctx, parent_tx).await;
+    return get_subreddit_cmd(command, ctx, tracker).await;
 }
 
-#[instrument(skip(command, ctx, parent_tx))]
+#[instrument(skip(command, ctx, tracker))]
 pub async fn info<'a>(
     command: &'a CommandInteraction,
     ctx: &Context,
-    parent_tx: &sentry::TransactionOrSpan,
-) -> Result<InteractionResponse, anyhow::Error> {
+    mut tracker: ResponseTracker<'a>,
+) -> Result<()> {
     let data_read = ctx.data.read().await;
     let conf = data_read.get::<ConfigStruct>().unwrap();
     let mut con = conf.redis.clone();
@@ -256,7 +265,6 @@ pub async fn info<'a>(
     capture_event(
         ctx.data.clone(),
         "cmd_info",
-        Some(parent_tx),
         None,
         &format!("user_{}", command.user.id.get().to_string()),
     )
@@ -272,7 +280,7 @@ pub async fn info<'a>(
 
     let id = ctx.cache.current_user().id.get();
 
-    return Ok(InteractionResponse::Message(InteractionResponseMessage {
+    tracker.send_response(InteractionResponse::Message(InteractionResponseMessage {
         embed: Some(CreateEmbed::default()
             .title("Info")
             .color(0x00ff00).to_owned()
@@ -299,26 +307,28 @@ pub async fn info<'a>(
             ]
     )]),
         ..Default::default()
-    }));
+    })).await
 }
 
+#[instrument(skip(command, ctx, tracker))]
 pub async fn subscribe_custom<'a>(
     command: &'a CommandInteraction,
     ctx: &Context,
-    parent_tx: &sentry::TransactionOrSpan,
-) -> Result<InteractionResponse, anyhow::Error> {
-    error_if_no_premium!(ctx, command.user.id);
-    subscribe(command, ctx, parent_tx).await
+    mut tracker: ResponseTracker<'a>,
+) -> Result<()> {
+    error_if_no_premium!(ctx, command.user.id, tracker);
+    subscribe(command, ctx, tracker).await
 }
 
+#[instrument(skip(command, ctx, tracker))]
 pub async fn subscribe<'a>(
     command: &'a CommandInteraction,
     ctx: &Context,
-    parent_tx: &sentry::TransactionOrSpan,
-) -> Result<InteractionResponse, anyhow::Error> {
+    mut tracker: ResponseTracker<'a>,
+) -> Result<(), anyhow::Error> {
     if let Some(member) = &command.member {
         if !member.permissions(&ctx).unwrap().manage_messages() {
-            return Ok(InteractionResponse::Message(InteractionResponseMessage {
+            return tracker.send_response(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(CreateEmbed::default()
                     .title("Permission Error")
                     .description("You must have the 'Manage Messages' permission to setup a subscription.")
@@ -326,11 +336,11 @@ pub async fn subscribe<'a>(
                 ),
                 ephemeral: true,
                 ..Default::default()
-            }));
+            })).await;
         }
     }
 
-    error_if_no_send_message_perm!(ctx, command.channel_id);
+    error_if_no_send_message_perm!(ctx, command.channel_id, tracker);
 
     let options = &command.data.options;
     debug!("Command Options: {:?}", options);
@@ -349,7 +359,6 @@ pub async fn subscribe<'a>(
         _ => Bot::RS,
     };
 
-    let tx = parent_tx.start_child("subscribe_call", "subscribe");
     if let Err(x) = client
         .register_subscription(
             context::current(),
@@ -359,59 +368,61 @@ pub async fn subscribe<'a>(
         )
         .await
     {
-        tx.finish();
         if format!("{}", x).contains("Already subscribed") {
-            return Ok(InteractionResponse::Message(InteractionResponseMessage {
-                embed: Some(
-                    CreateEmbed::default()
-                        .title("Already Subscribed")
-                        .description(format!(
-                            "This channel is already subscribed to r/{}",
-                            subreddit
-                        ))
-                        .color(0xff0000)
-                        .to_owned(),
-                ),
-                ..Default::default()
-            }));
+            return tracker
+                .send_response(InteractionResponse::Message(InteractionResponseMessage {
+                    embed: Some(
+                        CreateEmbed::default()
+                            .title("Already Subscribed")
+                            .description(format!(
+                                "This channel is already subscribed to r/{}",
+                                subreddit
+                            ))
+                            .color(0xff0000)
+                            .to_owned(),
+                    ),
+                    ..Default::default()
+                }))
+                .await;
         } else {
             bail!(x);
         }
     };
-    tx.finish();
 
     capture_event(
         ctx.data.clone(),
         "subscribe_subreddit",
-        Some(parent_tx),
         Some(HashMap::from([("subreddit", subreddit.clone())])),
         &command.user.id.get().to_string(),
     )
     .await;
 
-    return Ok(InteractionResponse::Message(InteractionResponseMessage {
-        embed: Some(
-            CreateEmbed::default()
-                .title("Subscribed")
-                .description(format!(
-                    "This channel has been subscribed to r/{}",
-                    subreddit
-                ))
-                .color(0x00ff00)
-                .to_owned(),
-        ),
-        ..Default::default()
-    }));
+    tracker
+        .send_response(InteractionResponse::Message(InteractionResponseMessage {
+            embed: Some(
+                CreateEmbed::default()
+                    .title("Subscribed")
+                    .description(format!(
+                        "This channel has been subscribed to r/{}",
+                        subreddit
+                    ))
+                    .color(0x00ff00)
+                    .to_owned(),
+            ),
+            ..Default::default()
+        }))
+        .await
 }
 
+#[instrument(skip(command, ctx, tracker))]
 pub async fn unsubscribe<'a>(
     command: &'a CommandInteraction,
     ctx: &Context,
-    _: &sentry::TransactionOrSpan,
-) -> Result<InteractionResponse, anyhow::Error> {
+    mut tracker: ResponseTracker<'a>,
+) -> Result<()> {
     if let Some(member) = &command.member {
         if !member.permissions(&ctx).unwrap().manage_messages() {
-            return Ok(InteractionResponse::Message(InteractionResponseMessage {
+            return tracker.send_response(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(CreateEmbed::default()
                     .title("Permission Error")
                     .description("You must have the 'Manage Messages' permission to manage subscriptions.")
@@ -419,7 +430,7 @@ pub async fn unsubscribe<'a>(
                 ),
                 ephemeral: true,
                 ..Default::default()
-            }));
+            })).await;
         }
     }
 
@@ -447,17 +458,19 @@ pub async fn unsubscribe<'a>(
     };
 
     if subreddits.len() == 0 {
-        return Ok(InteractionResponse::Message(InteractionResponseMessage {
-            embed: Some(
-                CreateEmbed::default()
-                    .title("No Subscriptions")
-                    .description("This channel has no subscriptions.")
-                    .color(0xff0000)
-                    .to_owned(),
-            ),
-            ephemeral: true,
-            ..Default::default()
-        }));
+        return tracker
+            .send_response(InteractionResponse::Message(InteractionResponseMessage {
+                embed: Some(
+                    CreateEmbed::default()
+                        .title("No Subscriptions")
+                        .description("This channel has no subscriptions.")
+                        .color(0xff0000)
+                        .to_owned(),
+                ),
+                ephemeral: true,
+                ..Default::default()
+            }))
+            .await;
     }
 
     let menu = CreateSelectMenu::new(
@@ -475,22 +488,27 @@ pub async fn unsubscribe<'a>(
 
     let components = vec![CreateActionRow::SelectMenu(menu)];
 
-    return Ok(InteractionResponse::Message(InteractionResponseMessage {
-        ephemeral: true,
-        components: Some(components),
-        ..Default::default()
-    }));
+    tracker
+        .send_response(InteractionResponse::Message(InteractionResponseMessage {
+            ephemeral: true,
+            components: Some(components),
+            ..Default::default()
+        }))
+        .await
 }
 
+#[instrument(skip(command, ctx, tracker))]
 async fn autopost_start<'a>(
     command: &'a CommandInteraction,
     ctx: &Context,
     subreddit: String,
     search: Option<&str>,
-) -> Result<InteractionResponse> {
+    mut tracker: ResponseTracker<'a>,
+) -> Result<()> {
     if let Some(member) = &command.member {
         if !member.permissions(&ctx).unwrap().manage_channels() {
-            return Ok(InteractionResponse::Message(InteractionResponseMessage {
+            return tracker
+                .send_response(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(
                     CreateEmbed::default()
                         .title("Permission Error")
@@ -502,11 +520,11 @@ async fn autopost_start<'a>(
                 ),
                 ephemeral: true,
                 ..Default::default()
-            }));
+            })).await;
         }
     }
 
-    error_if_no_send_message_perm!(ctx, command.channel_id);
+    error_if_no_send_message_perm!(ctx, command.channel_id, tracker);
 
     let is_premium = get_user_tiers_from_ctx(ctx, command.user.id)
         .await
@@ -535,35 +553,33 @@ async fn autopost_start<'a>(
         ),
     ];
 
-    let resp = CreateInteractionResponse::Modal(
-        CreateModal::new(
-            serde_json::to_string(&json!({
-                "subreddit": subreddit,
-                "command": "autopost",
-                "search": search
-            }))
-            .unwrap(),
-            "Autopost Setup",
-        )
-        .components(components),
-    );
-    match command.create_response(&ctx.http, resp).await {
-        Ok(_) => {}
-        Err(x) => {
-            warn!("Error sending modal: {:?}", x);
-        }
-    };
-    Ok(InteractionResponse::default())
+    tracker
+        .send_response(InteractionResponse::Modal(
+            CreateModal::new(
+                serde_json::to_string(&json!({
+                    "subreddit": subreddit,
+                    "command": "autopost",
+                    "search": search
+                }))
+                .unwrap(),
+                "Autopost Setup",
+            )
+            .components(components),
+        ))
+        .await
 }
 
+#[instrument(skip(command, ctx, tracker))]
 pub async fn autopost_stop<'a>(
     command: &'a CommandInteraction,
     ctx: &Context,
-) -> Result<InteractionResponse, anyhow::Error> {
+    mut tracker: ResponseTracker<'a>,
+) -> Result<()> {
     trace!("autopost_stop command handler");
     if let Some(member) = &command.member {
         if !member.permissions(&ctx).unwrap().manage_messages() {
-            return Ok(InteractionResponse::Message(InteractionResponseMessage {
+            return tracker
+                .send_response(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(
                     CreateEmbed::default()
                         .title("Permission Error")
@@ -574,7 +590,7 @@ pub async fn autopost_stop<'a>(
                         .to_owned(),
                 ),
                 ..Default::default()
-            }));
+            })).await;
         }
     }
 
@@ -602,17 +618,19 @@ pub async fn autopost_stop<'a>(
     };
 
     if autoposts.len() == 0 {
-        return Ok(InteractionResponse::Message(InteractionResponseMessage {
-            embed: Some(
-                CreateEmbed::default()
-                    .title("No Autoposts")
-                    .description("This channel has no autoposts running.")
-                    .color(0xff0000)
-                    .to_owned(),
-            ),
-            ephemeral: true,
-            ..Default::default()
-        }));
+        return tracker
+            .send_response(InteractionResponse::Message(InteractionResponseMessage {
+                embed: Some(
+                    CreateEmbed::default()
+                        .title("No Autoposts")
+                        .description("This channel has no autoposts running.")
+                        .color(0xff0000)
+                        .to_owned(),
+                ),
+                ephemeral: true,
+                ..Default::default()
+            }))
+            .await;
     }
 
     let mut fancy_texts = Vec::new();
@@ -647,19 +665,21 @@ pub async fn autopost_stop<'a>(
 
     let components = vec![CreateActionRow::SelectMenu(menu)];
 
-    trace!("Sending select menu");
-    return Ok(InteractionResponse::Message(InteractionResponseMessage {
-        ephemeral: true,
-        components: Some(components),
-        ..Default::default()
-    }));
+    tracker
+        .send_response(InteractionResponse::Message(InteractionResponseMessage {
+            ephemeral: true,
+            components: Some(components),
+            ..Default::default()
+        }))
+        .await
 }
 
+#[instrument(skip(command, ctx, tracker))]
 pub async fn autopost<'a>(
     command: &'a CommandInteraction,
     ctx: &Context,
-    _: &sentry::TransactionOrSpan,
-) -> Result<InteractionResponse, anyhow::Error> {
+    mut tracker: ResponseTracker<'a>,
+) -> Result<()> {
     let options = &command.data.options;
     if let Some(first) = options.get(0) {
         if first.name == "start" {
@@ -674,15 +694,15 @@ pub async fn autopost<'a>(
                     Some(x) => x.value.clone(),
                     None => CommandDataOptionValue::Number(0 as f64),
                 };
-                autopost_start(command, ctx, subreddit, search.as_str()).await
+                autopost_start(command, ctx, subreddit, search.as_str(), tracker).await
             } else {
                 Err(anyhow!("Invalid subcommand"))
             }
         } else if first.name == "stop" {
-            autopost_stop(command, ctx).await
+            autopost_stop(command, ctx, tracker).await
         } else if first.name == "custom" {
             if let CommandDataOptionValue::SubCommand(options) = &first.value {
-                error_if_no_premium!(ctx, command.user.id);
+                error_if_no_premium!(ctx, command.user.id, tracker);
 
                 let subreddit = options[0].value.clone();
                 let subreddit = subreddit
@@ -694,7 +714,7 @@ pub async fn autopost<'a>(
                     Some(x) => x.value.clone(),
                     None => CommandDataOptionValue::Number(0 as f64),
                 };
-                autopost_start(command, ctx, subreddit, search.as_str()).await
+                autopost_start(command, ctx, subreddit, search.as_str(), tracker).await
             } else {
                 Err(anyhow!("Invalid subcommand"))
             }

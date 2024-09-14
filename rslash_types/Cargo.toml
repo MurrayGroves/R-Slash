@@ -6,8 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "*"
 mongodb = "2.3"
-posthog = {path = "../posthog"}
+posthog = { path = "../posthog" }
 serenity = "*"
 redis = { version = "*", features = ["aio", "tokio-comp"] }
 typemap_rev = "*"

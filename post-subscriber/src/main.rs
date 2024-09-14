@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tarpc::server::incoming::Incoming;
 use tokio::sync::{Mutex, RwLock};
+use tokio::time::interval;
 
 use futures::future::{self, Ready};
 use tarpc::{
@@ -31,15 +32,75 @@ struct Subscriptions {
     by_channel: HashMap<u64, HashSet<Arc<Subscription>>>,
 }
 
+struct PostAlert {
+    message: CreateMessage,
+    subscriptions: Vec<Arc<Subscription>>,
+}
+
 #[derive(Clone)]
 struct SubscriberServer {
-    socket_addr: SocketAddr,
     db: Arc<Mutex<mongodb::Client>>,
     subscriptions: Arc<RwLock<Subscriptions>>,
     discord_bb: Arc<Http>,
     discord_rs: Arc<Http>,
     redis: redis::aio::MultiplexedConnection,
     posthog: posthog::Client,
+    queued_alerts: Arc<Mutex<Vec<PostAlert>>>,
+}
+
+impl SubscriberServer {
+    async fn watch_alerts(self) {
+        let mut outer_interval = interval(tokio::time::Duration::from_secs(1));
+        let mut inner_interval = interval(tokio::time::Duration::from_millis(1000 / 25)); // Send alerts at max of 25 per second (Discord global rate limit is 50 reqs per second)
+        loop {
+            outer_interval.tick().await;
+            let mut queued_alerts = self.queued_alerts.lock().await;
+            let next_alert = match queued_alerts.pop() {
+                Some(x) => x,
+                None => continue,
+            };
+            drop(queued_alerts);
+
+            for alert in next_alert.subscriptions {
+                inner_interval.tick().await;
+                let channel: ChannelId = alert.channel.into();
+                let http = match alert.bot {
+                    Bot::BB => &self.discord_bb,
+                    Bot::RS => &self.discord_rs,
+                };
+
+                match channel.send_message(http, next_alert.message.clone()).await {
+                    Ok(_) => debug!("Sent message to channel {}", channel),
+                    Err(e) => {
+                        if let serenity::Error::Http(e) = e {
+                            if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
+                                if e.error.code == 10003 {
+                                    debug!("Channel doesn't exist anymore, deleting subscription");
+                                    let mut subscriptions = self.subscriptions.write().await;
+                                    match subscriptions.by_channel.get_mut(&alert.channel) {
+                                        Some(x) => {
+                                            x.remove(&*alert);
+                                        }
+                                        None => {
+                                            warn!("Tried to delete subscription by channel that already didn't exist!");
+                                        }
+                                    };
+                                    match subscriptions.by_subreddit.get_mut(&alert.subreddit) {
+                                        Some(x) => {
+                                            x.remove(&*alert);
+                                        }
+                                        None => {
+                                            warn!("Tried to delete subscription by sub that already didn't exist!");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Subscriber for SubscriberServer {
@@ -76,7 +137,7 @@ impl Subscriber for SubscriberServer {
         let coll: mongodb::Collection<Subscription> =
             client.database("state").collection("subscriptions");
 
-        match coll.insert_one(&subscription, None).await {
+        match coll.insert_one(&subscription).await {
             Ok(_) => (),
             Err(e) => return Err(e.to_string()),
         };
@@ -117,7 +178,7 @@ impl Subscriber for SubscriberServer {
             "bot": bot.clone(),
         };
 
-        match coll.delete_one(filter, None).await {
+        match coll.delete_one(filter).await {
             Ok(_) => (),
             Err(e) => return Err(e.to_string()),
         };
@@ -199,11 +260,10 @@ impl Subscriber for SubscriberServer {
         let mut redis = self.redis.clone();
 
         debug!("Getting post {}", post_id);
-        let mut post = match post_api::get_post_by_id(
+        let post = match post_api::get_post_by_id(
             &format!("subreddit:{}:post:{}", subreddit, &post_id),
             None,
             &mut redis,
-            None,
         )
         .await
         {
@@ -215,22 +275,17 @@ impl Subscriber for SubscriberServer {
         };
         debug!("Got post {:?}", post);
 
-        let timestamp: i64 = match redis
-            .hget(
-                format!("subreddit:{}:post:{}", subreddit, &post_id),
-                "timestamp",
-            )
-            .await
-        {
-            Ok(ts) => ts,
+        let message: Result<CreateMessage, anyhow::Error> = post.try_into();
+        let mut message = match message {
+            Ok(x) => x,
             Err(e) => {
-                warn!("Failed to get timestamp: {:?}", e);
+                warn!("Failed to convert post to message: {:?}", e);
                 return Err(e.to_string());
             }
         };
 
         // Remove the components because we don't want autopost and refresh options in this context
-        post.components = None;
+        message = message.components(vec![]);
 
         let _ = self
             .posthog
@@ -243,80 +298,13 @@ impl Subscriber for SubscriberServer {
 
         debug!("Filtered subscriptions {:?}", filtered);
 
-        let mut subs_to_delete = Vec::new();
+        let alert = PostAlert {
+            message: message.clone(),
+            subscriptions: filtered.into_iter().map(|x| (*x).clone()).collect(),
+        };
 
-        for sub in filtered {
-            if sub.added_at > timestamp {
-                info!("Skipping notification for post {} in subreddit {} to channel {} because it was added after the post", post_id, subreddit, sub.channel);
-                continue;
-            }
-
-            info!(
-                "Notifying channel {} of post {} in subreddit {}",
-                sub.channel, post_id, subreddit
-            );
-
-            let post = post.clone();
-
-            let channel: ChannelId = sub.channel.into();
-
-            // Turn post response into message
-            let mut resp = CreateMessage::default();
-            if let Some(em) = post.embed {
-                resp = resp.embed(em);
-            }
-
-            if let Some(content) = post.content {
-                resp = resp.content(content);
-            }
-
-            if let Some(attachment) = post.file {
-                resp = resp.add_file(attachment);
-            }
-
-            match sub.bot {
-                Bot::BB => match channel.send_message(&self.discord_bb, resp).await {
-                    Ok(_) => (),
-                    Err(e) => {
-                        if let serenity::Error::Http(e) = e {
-                            if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
-                                if e.error.code == 10003 {
-                                    debug!("Channel doesn't exist anymore, deleting subscription");
-                                    subs_to_delete.push(sub.clone());
-                                }
-                            }
-                        }
-                    }
-                },
-                Bot::RS => match channel.send_message(&self.discord_rs, resp).await {
-                    Ok(_) => (),
-                    Err(e) => warn!("Failed to send message: {:?}", e),
-                },
-            }
-        }
-
-        if subs_to_delete.len() > 0 {
-            drop(subscriptions);
-            for sub in subs_to_delete {
-                let mut subscriptions = self.subscriptions.write().await;
-                match subscriptions.by_channel.get_mut(&sub.channel) {
-                    Some(x) => {
-                        x.remove(&sub);
-                    }
-                    None => {
-                        warn!("Tried to delete subscription by channel that already didn't exist!");
-                    }
-                };
-                match subscriptions.by_subreddit.get_mut(&sub.subreddit) {
-                    Some(x) => {
-                        x.remove(&sub);
-                    }
-                    None => {
-                        warn!("Tried to delete subscription by sub that already didn't exist!");
-                    }
-                }
-            }
-        }
+        let mut queued_alerts = self.queued_alerts.lock().await;
+        queued_alerts.push(alert);
 
         Ok(())
     }
@@ -390,7 +378,7 @@ async fn main() {
             client.database("state").collection("subscriptions");
 
         let mut cursor = coll
-            .find(None, None)
+            .find(doc! {})
             .await
             .expect("Failed to get subscriptions");
         let mut subscriptions = Vec::new();
@@ -443,6 +431,18 @@ async fn main() {
     let total_shards_rs: redis::RedisResult<u32> = redis.get("total_shards_r-slash").await;
     let total_shards_rs: u32 = total_shards_rs.expect("Failed to get or convert total_shards");
 
+    let server = SubscriberServer {
+        db: mongodb_client,
+        subscriptions,
+        discord_bb: http_bb,
+        discord_rs: http_rs,
+        redis,
+        posthog: posthog_client,
+        queued_alerts: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    tokio::spawn(server.clone().watch_alerts());
+
     let mut listener = tarpc::serde_transport::tcp::listen("0.0.0.0:50051", Bincode::default)
         .await
         .unwrap();
@@ -455,15 +455,7 @@ async fn main() {
             // serve is generated by the service attribute. It takes as input any type implementing
             // the generated SubscriberServer trait.
             .map(move |channel| {
-                let server = SubscriberServer {
-                    socket_addr: channel.transport().peer_addr().unwrap(),
-                    db: Arc::clone(&mongodb_client),
-                    subscriptions: Arc::clone(&subscriptions),
-                    discord_bb: Arc::clone(&http_bb),
-                    discord_rs: Arc::clone(&http_rs),
-                    redis: redis.clone(),
-                    posthog: posthog_client.clone(),
-                };
+                let server = server.clone();
                 channel.execute(server.serve()).for_each({
                     debug!("received connection");
                     spawn

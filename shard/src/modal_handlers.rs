@@ -1,28 +1,32 @@
 use std::collections::HashMap;
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use auto_poster::AutoPosterClient;
 use log::{debug, warn};
 use memberships::get_user_tiers_from_ctx;
 use rslash_types::{InteractionResponse, InteractionResponseMessage};
 use serenity::all::{ActionRowComponent, Context, CreateEmbed, ModalInteraction};
+use tracing::instrument;
 
-use crate::capture_event;
+use crate::{capture_event, discord::ResponseTracker};
 
-pub async fn autopost_create(
+#[instrument(skip(ctx, modal, custom_id, tracker))]
+pub async fn autopost_create<'a>(
     ctx: &Context,
     modal: &ModalInteraction,
     custom_id: HashMap<String, serde_json::Value>,
-    modal_tx: &sentry::TransactionOrSpan,
-) -> Result<InteractionResponse, anyhow::Error> {
+    mut tracker: ResponseTracker<'a>,
+) -> Result<()> {
     capture_event(
         ctx.data.clone(),
         "autopost_start",
-        Some(&modal_tx),
         None,
         &format!(
             "channel_{}",
-            modal.channel.clone().unwrap().id.get().to_string()
+            match &modal.channel {
+                Some(x) => x.id.get().to_string(),
+                None => "unknown".to_string(),
+            }
         ),
     )
     .await;
@@ -79,16 +83,18 @@ pub async fn autopost_create(
                         "Invalid limit, must be a number."
                     };
 
-                    return Ok(InteractionResponse::Message(InteractionResponseMessage {
-                        embed: Some(
-                            CreateEmbed::new()
-                                .title("Invalid Limit")
-                                .description(error_message)
-                                .color(0xff0000),
-                        ),
-                        ephemeral: true,
-                        ..Default::default()
-                    }));
+                    return tracker
+                        .send_response(InteractionResponse::Message(InteractionResponseMessage {
+                            embed: Some(
+                                CreateEmbed::new()
+                                    .title("Invalid Limit")
+                                    .description(error_message)
+                                    .color(0xff0000),
+                            ),
+                            ephemeral: true,
+                            ..Default::default()
+                        }))
+                        .await;
                 }
             }
         },
@@ -97,7 +103,7 @@ pub async fn autopost_create(
 
     macro_rules! invalid_interval_resp {
         ($interval:expr) =>
-        { return Ok(InteractionResponse::Message(InteractionResponseMessage {
+        { return tracker.send_response(InteractionResponse::Message(InteractionResponseMessage {
             embed: Some(
                 CreateEmbed::new()
                     .title("Invalid Interval")
@@ -108,7 +114,7 @@ pub async fn autopost_create(
             ),
             ephemeral: true,
             ..Default::default()
-        }))}
+        })).await;}
     }
 
     let multiplier = if interval.ends_with("s") {
@@ -170,14 +176,16 @@ pub async fn autopost_create(
         }
     };
 
-    Ok(InteractionResponse::Message(InteractionResponseMessage {
-        embed: Some(
-            CreateEmbed::new()
-                .title("Autopost Loop Started")
-                .description("Autopost loop started!")
-                .color(0x00ff00),
-        ),
-        ephemeral: true,
-        ..Default::default()
-    }))
+    tracker
+        .send_response(InteractionResponse::Message(InteractionResponseMessage {
+            embed: Some(
+                CreateEmbed::new()
+                    .title("Autopost Loop Started")
+                    .description("Autopost loop started!")
+                    .color(0x00ff00),
+            ),
+            ephemeral: true,
+            ..Default::default()
+        }))
+        .await
 }

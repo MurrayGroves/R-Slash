@@ -7,20 +7,24 @@ edition = "2021"
 
 [dependencies]
 serenity = "0.12"
-redis = "0.24"
-tokio = {version="1.36", features = ["rt-multi-thread"]}
+redis = { version = "*", features = ["aio", "tokio-comp"] }
+tokio = { version = "1.36", features = ["rt-multi-thread"] }
 env_logger = "0.11"
 log = "*"
-posthog = {path = "../posthog"}
+posthog = { path = "../posthog" }
 mongodb = "*"
-tarpc = {version="*", features = ["serde-transport", "tcp", "serde-transport-bincode"]}
+tarpc = { version = "*", features = [
+    "serde-transport",
+    "tcp",
+    "serde-transport-bincode",
+] }
 anyhow = "*"
 futures = "*"
 serde_derive = "*"
 serde = "*"
 chrono = "*"
 
-post_api = {path = "../post-api"}
+post_api = { path = "../post-api" }
 
 [lib]
 name = "post_subscriber"

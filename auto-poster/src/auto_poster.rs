@@ -1,7 +1,6 @@
 use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use serde_with::serde_as;
 use serenity::all::ChannelId;
 use tokio::time::{Duration, Instant};

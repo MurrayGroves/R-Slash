@@ -1,16 +1,12 @@
 #![feature(sync_unsafe_cell)]
 
-use async_recursion::async_recursion;
-use chrono::TimeDelta;
 use futures::{Future, StreamExt, TryStreamExt};
 use mongodb::bson::{doc, Document};
-use mongodb::options::{ClientOptions, FindOptions};
+use mongodb::options::ClientOptions;
 use redis::AsyncCommands;
-use serenity::all::{ChannelId, CreateMessage, GatewayIntents, Http};
+use serenity::all::{ChannelId, GatewayIntents, Http};
 use serenity::{all::EventHandler, async_trait};
-use timer::{Guard, Timer};
-use tokio::runtime::Handle;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 
 use std::cell::SyncUnsafeCell;
 use std::collections::{BinaryHeap, HashMap, HashSet};

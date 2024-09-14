@@ -18,7 +18,10 @@ pub enum AutoPostCommand {
     Stop(ChannelId),
 }
 
-use serenity::all::{ChannelId, CreateActionRow, CreateModal, UserId};
+use serenity::all::{
+    ChannelId, CreateActionRow, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, CreateMessage, CreateModal, UserId,
+};
 use tokio::time::Instant;
 
 /// Stores config values required for operation of the shard
@@ -43,12 +46,83 @@ pub struct InteractionResponseMessage {
     pub fallback: ResponseFallbackMethod,
 }
 
+impl Into<CreateInteractionResponseMessage> for InteractionResponseMessage {
+    fn into(self) -> CreateInteractionResponseMessage {
+        let mut resp = CreateInteractionResponseMessage::new();
+        if let Some(embed) = self.embed {
+            resp = resp.embed(embed);
+        };
+
+        if let Some(components) = self.components {
+            resp = resp.components(components);
+        };
+
+        if let Some(content) = self.content {
+            resp = resp.content(content);
+        };
+
+        resp.ephemeral(self.ephemeral)
+    }
+}
+
+impl Into<CreateInteractionResponseFollowup> for InteractionResponseMessage {
+    fn into(self) -> CreateInteractionResponseFollowup {
+        let mut resp = CreateInteractionResponseFollowup::new();
+        if let Some(embed) = self.embed {
+            resp = resp.embed(embed);
+        };
+
+        if let Some(components) = self.components {
+            resp = resp.components(components);
+        };
+
+        if let Some(content) = self.content {
+            resp = resp.content(content);
+        };
+
+        resp.ephemeral(self.ephemeral)
+    }
+}
+
+impl Into<CreateInteractionResponse> for InteractionResponseMessage {
+    fn into(self) -> CreateInteractionResponse {
+        CreateInteractionResponse::Message(self.into())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum InteractionResponse {
     Message(InteractionResponseMessage),
     Modal(CreateModal),
     None,
 }
+
+impl TryInto<CreateMessage> for InteractionResponse {
+    type Error = anyhow::Error;
+
+    fn try_into(self) -> Result<CreateMessage, Self::Error> {
+        match self {
+            InteractionResponse::Message(message) => {
+                let mut resp = CreateMessage::new();
+                if let Some(embed) = message.embed {
+                    resp = resp.embed(embed);
+                };
+
+                if let Some(content) = message.content {
+                    resp = resp.content(content);
+                };
+
+                if let Some(components) = message.components {
+                    resp = resp.components(components);
+                };
+
+                Ok(resp)
+            }
+            _ => Err(anyhow::anyhow!("Invalid response type")),
+        }
+    }
+}
+
 impl Default for InteractionResponse {
     fn default() -> Self {
         InteractionResponse::Message(InteractionResponseMessage {
