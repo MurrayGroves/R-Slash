@@ -6,7 +6,7 @@ use serenity::all::{
     CommandDataOptionValue, CreateButton, CreateInputText, CreateModal, CreateSelectMenu,
     CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
 };
-use serenity::model::Colour;
+use serenity::model::{guild, Colour};
 use tarpc::context;
 use tracing::debug;
 use tracing::instrument;
@@ -501,7 +501,18 @@ async fn autopost_start<'a>(
     mut tracker: ResponseTracker<'a>,
 ) -> Result<()> {
     if let Some(member) = &command.member {
-        if !member.permissions(&ctx).unwrap().manage_channels() {
+        let permissions = match member.permissions(&ctx) {
+            Ok(x) => x,
+            Err(e) => {
+                if let Some(guild_id) = command.guild_id {
+                    let member = guild_id.member(&ctx, command.user.id).await?;
+                    member.permissions(&ctx)?
+                } else {
+                    return Err(anyhow!("Error getting permissions: {:?}", e));
+                }
+            }
+        };
+        if !permissions.manage_channels() {
             return tracker
                 .send_response(InteractionResponse::Message(InteractionResponseMessage {
                 embed: Some(
