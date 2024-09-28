@@ -2,7 +2,7 @@
 
 use futures::FutureExt;
 use log::trace;
-use serenity::all::{AutocompleteChoice, CreateAutocompleteResponse};
+use serenity::all::{AutocompleteChoice, CreateActionRow, CreateAutocompleteResponse, CreateButton, Emoji, ReactionType};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
 use stubborn_io::tokio::{StubbornIo, UnderlyingIo};
@@ -591,7 +591,12 @@ impl EventHandler for Handler {
             let error_message = CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
                     .content(error_message)
-                    .ephemeral(true),
+                    .ephemeral(true)
+                    .components(vec![CreateActionRow::Buttons(vec![
+                        CreateButton::new_link("https://discord.gg/BggYYTpdG5")
+                            .label("Support Server")
+                            .emoji(ReactionType::Unicode("🛠️".to_string())),
+                    ])])
             );
 
             if let Err(e) = match interaction {
@@ -891,7 +896,7 @@ fn main() {
 
         println!("Booting with {:?} total shards", total_shards);
 
-        let mut client = serenity::Client::builder(token, GatewayIntents::non_privileged())
+        let mut client = serenity::Client::builder(token, GatewayIntents::GUILDS)
             .event_handler(Handler)
             .application_id(application_id.into())
             .await

@@ -62,13 +62,13 @@ tarpc = { version = "*", features = [
 ] }
 stubborn-io = "*"
 sentry-anyhow = "*"
+sentry-backtrace = "*"
 pretty-duration = "*"
 lazy_static = "*"
 
 posthog = { path = "../posthog" }
 memberships = { path = "../memberships" }
 rslash_types = { path = "../rslash_types" }
-connection_pooler = { path = "../connection-pooler" }
 post_api = { path = "../post-api" }
 post_subscriber = { path = "../post-subscriber" }
 auto_poster = { path = "../auto-poster" }
@@ -79,6 +79,6 @@ name = "discord-shard"
 path = "src/main.rs"
 
 [profile.release]
-debug = 0
+debug = "full"
 split-debuginfo = "packed"
 lto = "thin"

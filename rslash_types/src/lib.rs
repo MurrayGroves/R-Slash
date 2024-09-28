@@ -30,6 +30,8 @@ pub struct ConfigStruct {
     pub shard_id: u32,
     pub nsfw_subreddits: Vec<String>,
     pub redis: redis::aio::MultiplexedConnection,
+    pub mongodb: mongodb::Client,
+    pub posthog: posthog::Client,
 }
 
 impl serenity::prelude::TypeMapKey for ConfigStruct {
