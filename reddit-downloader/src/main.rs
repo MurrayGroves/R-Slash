@@ -724,7 +724,7 @@ async fn get_subreddit(
                             };
 
                             if !res.starts_with("http") {
-                                res = format!("https://r-slash.b-cdn.net/gifs/{}", res);
+                                res = format!("https://cdn.rsla.sh/gifs/{}", res);
                             }
 
                             url = res;

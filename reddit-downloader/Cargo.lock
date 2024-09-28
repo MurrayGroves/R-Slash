@@ -2963,6 +2963,7 @@ dependencies = [
 name = "rslash_types"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "mongodb 2.8.2",
  "posthog",
  "redis 0.25.4",
