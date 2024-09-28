@@ -1,15 +1,15 @@
+use k8s_openapi;
+use kube::api::Patch;
 use log::*;
+use redis::{from_redis_value, Commands, Value};
+use std::cmp;
+use std::convert::TryInto;
+use std::{env, fs, io::Write, process::Command, thread};
 use tokio::time::{sleep, Duration};
 use tungstenite::Result;
-use std::{thread, fs, env, io::Write, process::Command};
-use k8s_openapi;
-use redis::{Commands, from_redis_value, Value};
-use std::cmp;
-use kube::api::Patch;
-use std::convert::TryInto;
 
 async fn get_namespace() -> String {
-    let namespace= fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+    let namespace = fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
         .expect("Couldn't read /var/run/secrets/kubernetes.io/serviceaccount/namespace");
     return namespace;
 }
@@ -32,8 +32,12 @@ async fn add_shards(num: u64, max_concurrency: u64) {
 
         let client_k8s = kube::Client::try_default().await.unwrap();
 
-        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
-        let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
+        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> =
+            kube::Api::namespaced(client_k8s, &namespace);
+        let shards_set = stateful_sets
+            .get("discord-shards")
+            .await
+            .expect("Failed to get statefulset discord-shards");
         let current_shards: u64 = shards_set.status.unwrap().replicas.try_into().unwrap();
 
         let patch = serde_json::json!({
@@ -48,19 +52,35 @@ async fn add_shards(num: u64, max_concurrency: u64) {
             }
         });
 
-        info!("Booting {} new shards, bringing total to {}", new_shards, new_shards + current_shards);
-        let _:() = con.set(format!("total_shards_{}", namespace), new_shards + current_shards).expect("Failed to set total shards");
+        info!(
+            "Booting {} new shards, bringing total to {}",
+            new_shards,
+            new_shards + current_shards
+        );
 
         let mut params = kube::api::PatchParams::apply("rslash-manager");
         params.force = true;
         let patch = Patch::Apply(&patch);
-        let _ = stateful_sets.patch("discord-shards", &params, &patch).await.expect("Failed to patch statefulset discord-shards");
+        let _ = stateful_sets
+            .patch("discord-shards", &params, &patch)
+            .await
+            .expect("Failed to patch statefulset discord-shards");
 
         loop {
             let client_k8s = kube::Client::try_default().await.unwrap();
-            let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
-            let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
-            let ready_shards: u64 = shards_set.status.unwrap().available_replicas.unwrap().try_into().unwrap();
+            let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> =
+                kube::Api::namespaced(client_k8s, &namespace);
+            let shards_set = stateful_sets
+                .get("discord-shards")
+                .await
+                .expect("Failed to get statefulset discord-shards");
+            let ready_shards: u64 = shards_set
+                .status
+                .unwrap()
+                .available_replicas
+                .unwrap()
+                .try_into()
+                .unwrap();
             if ready_shards == new_shards + current_shards {
                 break;
             }
@@ -71,7 +91,8 @@ async fn add_shards(num: u64, max_concurrency: u64) {
 }
 
 async fn get_redis_connection() -> redis::Connection {
-    let db_client = redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
+    let db_client =
+        redis::Client::open("redis://redis.discord-bot-shared.svc.cluster.local/").unwrap();
     let con = db_client.get_connection().expect("Can't connect to redis");
     return con;
 }
@@ -79,10 +100,8 @@ async fn get_redis_connection() -> redis::Connection {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::builder()
-    .format(|buf, record| {
-        writeln!(buf, "{}: {}", record.level(), record.args())
-    })
-    .init();
+        .format(|buf, record| writeln!(buf, "{}: {}", record.level(), record.args()))
+        .init();
 
     let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN not set");
 
@@ -93,8 +112,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut con = get_redis_connection().await;
     loop {
         let client_k8s = kube::Client::try_default().await?;
-        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> = kube::Api::namespaced(client_k8s, &namespace);
-        let shards_set = stateful_sets.get("discord-shards").await.expect("Failed to get statefulset discord-shards");
+        let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> =
+            kube::Api::namespaced(client_k8s, &namespace);
+        let shards_set = stateful_sets
+            .get("discord-shards")
+            .await
+            .expect("Failed to get statefulset discord-shards");
         let current_shards = shards_set.status.unwrap().replicas as u64;
 
         let res = client_web
@@ -104,25 +127,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
         let json: serde_json::Value = res.unwrap().json().await.unwrap();
-        let total_shards: u64 = serde_json::from_value::<u64>(json["shards"].clone()).expect("Gateway response not u64");
-        let max_concurrency: u64 = *&json["session_start_limit"]["max_concurrency"].as_u64().unwrap();
+        let total_shards: u64 = serde_json::from_value::<u64>(json["shards"].clone())
+            .expect("Gateway response not u64")
+            * 2;
 
-        debug!("Gateway wants {} shards, {} at a time", &total_shards, &max_concurrency);
+        let max_concurrency: u64 = *&json["session_start_limit"]["max_concurrency"]
+            .as_u64()
+            .unwrap();
+
+        debug!(
+            "Gateway wants {} shards, {} at a time",
+            &total_shards, &max_concurrency
+        );
         if &total_shards > &current_shards {
-            info!("Gateway wants {:?} shards, but we only have {:?}", &total_shards, &current_shards);
+            info!(
+                "Gateway wants {:?} shards, but we only have {:?}",
+                &total_shards, &current_shards
+            );
 
             let manual_sharding: Value = con.get("manual_sharding").unwrap();
-            let manual_sharding:String = from_redis_value(&manual_sharding).unwrap();
+            let manual_sharding: String =
+                from_redis_value(&manual_sharding).unwrap_or("false".to_string());
             let manual_sharding: bool = manual_sharding.parse::<bool>().unwrap();
             if manual_sharding {
                 info!("Manual sharding enabled, doing nothing.");
-                thread::sleep(Duration::from_secs(60*15));
+                thread::sleep(Duration::from_secs(60 * 15));
                 continue;
             }
             info!("Booting new shards");
-            add_shards(total_shards-current_shards, max_concurrency).await;
-
+            let _: () = con
+                .set(format!("total_shards_{}", namespace), total_shards)
+                .expect("Failed to set total shards");
+            add_shards(total_shards - current_shards, max_concurrency).await;
         }
-        thread::sleep(Duration::from_secs(60*15));
+        thread::sleep(Duration::from_secs(60 * 15));
     }
 }
