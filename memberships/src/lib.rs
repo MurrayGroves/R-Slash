@@ -4,12 +4,12 @@ use log::*;
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 
+use rslash_types::ConfigStruct;
 use serenity::all::UserId;
 use serenity::futures::TryStreamExt;
 
 use serde_derive::{Deserialize, Serialize};
 
-use connection_pooler::ResourceManager;
 
 #[cfg(test)]
 mod tests {
@@ -146,12 +146,8 @@ pub async fn get_user_tiers_from_ctx(
 ) -> MembershipTiers {
     let user = user.into();
     let data_read = ctx.data.read().await;
-    let mongodb_manager = data_read
-        .get::<ResourceManager<mongodb::Client>>()
-        .unwrap()
-        .clone();
-    let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
-    let mut mongodb_client = mongodb_client_mutex.lock().await;
-    let membership = get_user_tiers(user.to_string(), &mut *mongodb_client).await;
+    let config = data_read.get::<ConfigStruct>().unwrap();
+    let mongodb_client = &mut config.mongodb.clone();
+    let membership = get_user_tiers(user.to_string(), mongodb_client).await;
     membership
 }

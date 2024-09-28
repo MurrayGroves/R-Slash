@@ -34,7 +34,6 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 use redis::AsyncCommands;
@@ -49,8 +48,6 @@ use serenity::model::guild::{Guild, UnavailableGuild};
 
 use anyhow::anyhow;
 use sentry_anyhow::capture_anyhow;
-
-use connection_pooler::ResourceManager;
 
 mod command_handlers;
 mod component_handlers;
@@ -109,18 +106,14 @@ pub async fn capture_event(
     let distinct_id = distinct_id.to_string();
 
     tokio::spawn(async move {
-        debug!("Getting posthog manager");
-        let posthog_manager = data
+        debug!("Getting posthog client");
+        let config = data
             .read()
             .await
-            .get::<ResourceManager<posthog::Client>>()
+            .get::<ConfigStruct>()
             .unwrap()
             .clone();
-        debug!("Getting posthog client");
-        let client_mutex = posthog_manager.get_available_resource().await;
-        debug!("Locking client mutex");
-        let client = client_mutex.lock().await;
-        debug!("Locked client mutex");
+        let client = config.posthog;
 
         let mut properties_map = serde_json::Map::new();
         if properties.is_some() {
@@ -812,13 +805,16 @@ fn main() {
                 })),
         )
         .with(sentry::integrations::tracing::layer()
-    .span_filter(|meta| {
-        if (meta.target().contains("serenity") && meta.target() != "serenity::http::client") || meta.target().contains("h2") {
-            false
-        } else {
-            true
-        }
-    }))
+            .span_filter(|meta| {
+                if (meta.target().contains("serenity") && meta.target() != "serenity::http::client") || meta.target().contains("h2")
+                    || meta.target().contains("hyper") || meta.target().contains("request") || meta.target().contains("tokio") || meta.target().contains("tungstenite") || meta.target().contains("rustls")
+                {
+                    false
+                } else {
+                    true
+                }
+            })
+        )
         .init();
 
     let _guard = sentry::init(("https://e1d0fdcc5e224a40ae768e8d36dd7387@o4504774745718784.ingest.sentry.io/4504793832161280", sentry::ClientOptions {
@@ -829,13 +825,15 @@ fn main() {
         before_send: Some(Arc::new(|event| {
             if let Some(x) = &event.transaction {
                 if x.contains("recv") || x.contains("recv_event") || x.contains("dispatch") || x.contains("handle_event") || x.contains("check_heartbeat") || x.contains("headers") {
-                    return Some(event);
+                    return None;
                 }
             };
             return Some(event);
         })),
         ..Default::default()
-    }));
+    }.add_integration(sentry::integrations::backtrace::AttachStacktraceIntegration::new())
+)
+);
 
     tokio::runtime::Builder::new_multi_thread()
     .enable_all()
@@ -855,6 +853,12 @@ fn main() {
             .await
             .expect("Can't connect to redis");
         println!("Connected to redis");
+
+        let posthog_key: String = env::var("POSTHOG_API_KEY")
+            .expect("POSTHOG_API_KEY not set")
+            .parse()
+            .expect("Failed to convert POSTHOG_API_KEY to string");
+        let posthog = posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
 
         println!("Connecting to mongodb...");
         let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
@@ -897,30 +901,6 @@ fn main() {
         {
             let mut data: tokio::sync::RwLockWriteGuard<'_, TypeMap> = client.data.write().await;
 
-            println!("Locked data");
-
-            let mongodb_manager = ResourceManager::<mongodb::Client>::new(|| Arc::new(Mutex::new(Box::pin(async {
-                let shard_id: String = env::var("HOSTNAME").expect("HOSTNAME not set").parse().expect("Failed to convert HOSTNAME to string");
-                let shard_id: u64 = shard_id.replace("discord-shards-", "").parse().expect("unable to convert shard_id to u64");
-
-                let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();
-                client_options.app_name = Some(format!("Shard {}", shard_id));
-                mongodb::Client::with_options(client_options).unwrap()
-            })))).await;
-
-            println!("Created mongodb manager");
-
-            let posthog_manager = ResourceManager::<posthog::Client>::new(|| {
-                Arc::new(Mutex::new(Box::pin(async {
-                    let posthog_key: String = env::var("POSTHOG_API_KEY")
-                        .expect("POSTHOG_API_KEY not set")
-                        .parse()
-                        .expect("Failed to convert POSTHOG_API_KEY to string");
-                    posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string())
-                })))
-            })
-            .await;
-
             println!("Connecting to post subscriber...");
             let reconnect_opts = ReconnectOptions::new()
                 .with_exit_if_first_connect_fails(false)
@@ -960,12 +940,12 @@ fn main() {
 
             println!("Connected to auto poster");
 
-            data.insert::<ResourceManager<mongodb::Client>>(mongodb_manager);
-            data.insert::<ResourceManager<posthog::Client>>(posthog_manager);
             data.insert::<ConfigStruct>(ConfigStruct {
                 shard_id,
                 nsfw_subreddits,
                 redis: con,
+                mongodb: mongodb_client,
+                posthog,
             });
             data.insert::<post_subscriber::SubscriberClient>(subscriber);
             data.insert::<auto_poster::AutoPosterClient>(auto_poster);

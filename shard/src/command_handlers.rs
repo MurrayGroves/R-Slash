@@ -26,7 +26,6 @@ use serenity::model::application::CommandInteraction;
 
 use anyhow::{anyhow, bail, Result};
 
-use connection_pooler::ResourceManager;
 use memberships::*;
 
 use post_api::*;
@@ -167,14 +166,10 @@ pub async fn cmd_get_user_tiers<'a>(
     mut tracker: ResponseTracker<'a>,
 ) -> Result<()> {
     let data_lock = ctx.data.read().await;
-    let mongodb_manager = data_lock
-        .get::<ResourceManager<mongodb::Client>>()
-        .ok_or(anyhow!("Mongodb client manager not found"))?
-        .clone();
-    let mongodb_client_mutex = mongodb_manager.get_available_resource().await;
-    let mut mongodb_client = mongodb_client_mutex.lock().await;
+    let config = data_lock.get::<ConfigStruct>().unwrap();
+    let mongodb_client = &mut config.mongodb.clone();
 
-    let tiers = get_user_tiers(command.user.id.get().to_string(), &mut *mongodb_client).await;
+    let tiers = get_user_tiers(command.user.id.get().to_string(), mongodb_client).await;
     debug!("Tiers: {:?}", tiers);
 
     let bronze = match tiers.bronze.active {
