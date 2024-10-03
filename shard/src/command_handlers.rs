@@ -112,7 +112,7 @@ pub async fn get_subreddit_cmd<'a>(
             ("button", "false".to_string()),
             ("search_enabled", search_enabled.to_string()),
         ])),
-        &format!("user_{}", command.user.id.get().to_string()),
+        &format!("user_{}", command.user.id.get()),
     )
     .await;
 
@@ -182,7 +182,7 @@ pub async fn cmd_get_user_tiers<'a>(
         ctx.data.clone(),
         "cmd_get_user_tiers",
         Some(HashMap::from([("bronze_active", bronze.to_string())])),
-        &format!("user_{}", command.user.id.get().to_string()),
+        &format!("user_{}", command.user.id.get()),
     )
     .await;
 
@@ -212,6 +212,19 @@ pub async fn get_custom_subreddit<'a>(
     let options = &command.data.options;
     let subreddit = options[0].value.clone();
     let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
+
+    let search_enabled = options.len() > 1;
+    capture_event(
+        ctx.data.clone(),
+        "custom_subreddit_cmd",
+        Some(HashMap::from([
+            ("subreddit", subreddit.clone()),
+            ("button", "false".to_string()),
+            ("search_enabled", search_enabled.to_string()),
+        ])),
+        &format!("user_{}", command.user.id.get()),
+    )
+    .await;
 
     match check_subreddit_valid(&subreddit).await? {
         SubredditStatus::Valid => {}
@@ -312,6 +325,13 @@ pub async fn subscribe_custom<'a>(
     mut tracker: ResponseTracker<'a>,
 ) -> Result<()> {
     error_if_no_premium!(ctx, command.user.id, tracker);
+    capture_event(
+        ctx.data.clone(),
+        "subscribe_custom",
+        None,
+        &format!("user_{}", command.user.id.get()),
+    )
+    .await;
     subscribe(command, ctx, tracker).await
 }
 
@@ -388,7 +408,7 @@ pub async fn subscribe<'a>(
         ctx.data.clone(),
         "subscribe_subreddit",
         Some(HashMap::from([("subreddit", subreddit.clone())])),
-        &command.user.id.get().to_string(),
+        &format!("user_{}", command.user.id.get()),
     )
     .await;
 
@@ -409,6 +429,7 @@ pub async fn subscribe<'a>(
         .await
 }
 
+/// Note: Reported to posthog in component handler
 #[instrument(skip(command, ctx, tracker))]
 pub async fn unsubscribe<'a>(
     command: &'a CommandInteraction,
@@ -492,6 +513,7 @@ pub async fn unsubscribe<'a>(
         .await
 }
 
+/// Note: Reported to posthog in modal handler
 #[instrument(skip(command, ctx, tracker))]
 async fn autopost_start<'a>(
     command: &'a CommandInteraction,

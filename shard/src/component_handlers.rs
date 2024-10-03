@@ -57,7 +57,7 @@ pub async fn unsubscribe<'a>(
         ctx.data.clone(),
         "unsubscribe_subreddit",
         Some(HashMap::from([("subreddit", subreddit.clone())])),
-        &interaction.user.id.get().to_string(),
+        &format!("user_{}", &interaction.user.id.get().to_string()),
     )
     .await;
 
@@ -117,7 +117,7 @@ pub async fn autopost_cancel<'a>(
         ctx.data.clone(),
         "cancel_autopost",
         None,
-        &interaction.user.id.get().to_string(),
+        &format!("user_{}", interaction.user.id.get().to_string()),
     )
     .await;
 
