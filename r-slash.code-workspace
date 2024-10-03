@@ -17,6 +17,18 @@
 		},
 		{
 			"path": "rslash_types"
+		},
+		{
+			"path": "discord-interface"
+		},
+		{
+			"path": "reddit-downloader"
+		},
+		{
+			"path": "mp4-opengraph"
+		},
+		{
+			"path": "scripts"
 		}
 	],
 	"settings": {}

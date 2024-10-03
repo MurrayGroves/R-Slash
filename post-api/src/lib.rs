@@ -157,7 +157,10 @@ pub async fn get_post_by_id<'a>(
     let timestamp =
         from_redis_value::<i64>(post.get("timestamp").context("No timestamp in post")?)?;
 
-    if embed_url.starts_with("https://r-slash") && embed_url.ends_with(".mp4") {
+    if (embed_url.starts_with("https://r-slash.b-cdn.net")
+        || embed_url.starts_with("https://cdn.rsla.sh"))
+        && embed_url.ends_with(".mp4")
+    {
         let filename = embed_url
             .split("/")
             .last()
@@ -167,7 +170,7 @@ pub async fn get_post_by_id<'a>(
         let subreddit: String =
             url::form_urlencoded::byte_serialize(subreddit.as_bytes()).collect();
         let embed_url = format!(
-            "https://r-slash.b-cdn.net/render/{}?title={}%20-%20by%20u/{}%20in%20r/{}&redirect={}",
+            "https://cdn.rsla.sh/render/{}?title={}%20-%20by%20u/{}%20in%20r/{}&redirect={}",
             filename, title, author, subreddit, url
         );
 
@@ -315,7 +318,7 @@ pub async fn get_subreddit<'a>(
     if let Err(e) = post {
         warn!("Error getting post by ID: {}", e);
         let _: () = con
-            .lrem(format!("subreddit:{}:posts", &subreddit), 0, &post_id)
+            .lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
             .await?;
         post = get_subreddit(subreddit, con, channel).await;
     }

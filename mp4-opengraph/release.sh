@@ -1,5 +1,7 @@
+set -e
+
 cargo build --release
-docker build -f Dockerfile -t registry.murraygrov.es/mp4-opengraph target/release
+docker build -f Dockerfile -t registry.murraygrov.es/mp4-opengraph .
 docker push registry.murraygrov.es/mp4-opengraph
 
 
