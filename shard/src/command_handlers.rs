@@ -112,6 +112,8 @@ pub async fn get_subreddit_cmd<'a>(
             ("button", "false".to_string()),
             ("search_enabled", search_enabled.to_string()),
         ])),
+        command.guild_id,
+        Some(command.channel_id),
         &format!("user_{}", command.user.id.get()),
     )
     .await;
@@ -182,6 +184,8 @@ pub async fn cmd_get_user_tiers<'a>(
         ctx.data.clone(),
         "cmd_get_user_tiers",
         Some(HashMap::from([("bronze_active", bronze.to_string())])),
+        command.guild_id,
+        Some(command.channel_id),
         &format!("user_{}", command.user.id.get()),
     )
     .await;
@@ -222,6 +226,8 @@ pub async fn get_custom_subreddit<'a>(
             ("button", "false".to_string()),
             ("search_enabled", search_enabled.to_string()),
         ])),
+        command.guild_id,
+        Some(command.channel_id),
         &format!("user_{}", command.user.id.get()),
     )
     .await;
@@ -274,6 +280,8 @@ pub async fn info<'a>(
         ctx.data.clone(),
         "cmd_info",
         None,
+        command.guild_id,
+        Some(command.channel_id),
         &format!("user_{}", command.user.id.get().to_string()),
     )
     .await;
@@ -329,6 +337,8 @@ pub async fn subscribe_custom<'a>(
         ctx.data.clone(),
         "subscribe_custom",
         None,
+        command.guild_id,
+        Some(command.channel_id),
         &format!("user_{}", command.user.id.get()),
     )
     .await;
@@ -408,6 +418,8 @@ pub async fn subscribe<'a>(
         ctx.data.clone(),
         "subscribe_subreddit",
         Some(HashMap::from([("subreddit", subreddit.clone())])),
+        command.guild_id,
+        Some(command.channel_id),
         &format!("user_{}", command.user.id.get()),
     )
     .await;

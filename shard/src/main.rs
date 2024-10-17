@@ -2,7 +2,8 @@
 
 use futures::FutureExt;
 use log::trace;
-use serenity::all::{AutocompleteChoice, CreateActionRow, CreateAutocompleteResponse, CreateButton, Emoji, ReactionType};
+use serde_json::{json, Value};
+use serenity::all::{AutocompleteChoice, ChannelId, CreateActionRow, CreateAutocompleteResponse, CreateButton, CreateCommand, Emoji, GuildId, ReactionType};
 use serenity::gateway::ShardStageUpdateEvent;
 use serenity::model::Colour;
 use stubborn_io::tokio::{StubbornIo, UnderlyingIo};
@@ -19,6 +20,7 @@ use tracing_subscriber::{
 use rslash_types::{InteractionResponseMessage, ResponseFallbackMethod};
 use std::collections::HashMap;
 use std::env;
+use std::fmt::Debug;
 use std::io::Write;
 use std::pin::Pin;
 use std::task::Poll;
@@ -87,12 +89,16 @@ pub fn redis_sanitise(input: &str) -> String {
 }
 
 #[instrument(skip(data))]
-pub async fn capture_event(
+pub async fn capture_event<T, U>(
     data: Arc<RwLock<TypeMap>>,
     event: &str,
     properties: Option<HashMap<&str, String>>,
+    guild_id: Option<T>,
+    channel_id: Option<U>,
     distinct_id: &str,
-) {
+) where T: Into<u64> + Debug + Send + Clone + 'static,
+        U: Into<u64> + Debug + Send + Clone + 'static
+{
     let event = event.to_string();
     let properties = match properties {
         Some(properties) => Some(
@@ -122,7 +128,7 @@ pub async fn capture_event(
             }
         }
 
-        match client.capture(&event, properties_map, &distinct_id).await {
+        match client.capture(&event, properties_map, guild_id.clone(), channel_id.clone(), &distinct_id).await {
             Ok(_) => {}
             Err(e) => {
                 warn!("Error capturing event: {:?}", e);
@@ -195,6 +201,34 @@ async fn get_command_response<'a>(
 
         "autopost" => command_handlers::autopost(&command, &ctx, tracker).await,
 
+        "help" => {
+            capture_event(
+                ctx.data.clone(),
+                "cmd_help",
+                None,
+                command.guild_id,
+                Some(command.channel_id),
+                &format!("user_{}", &command.user.id.get().to_string()),
+            )
+            .await;
+            tracker.send_response(InteractionResponse::Message(InteractionResponseMessage {
+                content: Some("# Get a new post from a subreddit\n \
+                Start typing `/get` in the message box. You can then either click the selection labelled `/get` or press enter.\n \
+                You'll then see a list of subreddits. Click the one you want! You can then either set a search query by selecting the search option, or just send the message to get the post!\n \
+                If you want to get another post from that subreddit, just click the :repeat: button underneath it!\n\
+                # Make the bot send a new post again and again\n\
+                Use the command `/autopost start` and select the subreddit you want to get posts from. Send that message.\n\
+                You should now see a popup asking for a `Delay`, that's how long the bot will wait between each post it sends.\n\
+                That popup also asks for how many times to post before stopping. For example if you say `10`, it'll send 10 posts and then you'll need to setup a new autopost.\n\
+                # Make the bot send every new post that's made in a subreddit\n\
+                Use the `/subscribe` command with the subreddit you want the bot to post from. Whenever someone makes a new post on that subreddit, it'll automatically post to the channel you used the command in.\n\
+                # How do I use different subreddits that aren't in the list?\n\
+                For $1.30 a month you can use all of the bot's commands with *any* subreddit you want! Click [here](https://ko-fi.com/rslash) to find out more and purchase.".to_string()),
+                ..Default::default()
+            })).await
+
+        }
+
         _ => Err(anyhow!("Unknown command"))?,
     }
 }
@@ -222,13 +256,72 @@ impl EventHandler for Handler {
         if let Some(x) = is_new {
             // First time client has seen the guild
             if x {
+                let config = ctx.data
+                    .read()
+                    .await
+                    .get::<ConfigStruct>()
+                    .unwrap()
+                    .clone();
+
+                let client = config.posthog;
+
+                let payload = json!({
+                    "api_key": client.api_key,
+                    "event": "$groupidentify",
+                    "properties": {
+                        "distinct_id": guild.id.get().to_string(),
+                        "$group_type": "guild",
+                        "$group_key": guild.id.get().to_string(),
+                        "$group_set": {
+                            "name": guild.name,
+                            "member_count_at_join": guild.member_count,
+                            "owner_id": guild.owner_id.get().to_string(),
+                            "joined_at": guild.joined_at.to_rfc3339(),
+                        },
+                    }
+                });
+
+                let body = serde_json::to_string(&payload).unwrap();
+                debug!("{:?}", body);
+                if let Err(e) = client
+                    .client
+                    .post(format!("{}/capture", client.host))
+                    .body(body)
+                    .header("Content-Type", "application/json")
+                    .send()
+                    .await {
+                        error!("Error sending group identity: {:?}", e);
+                };
+
                 capture_event(
                     ctx.data.clone(),
                     "guild_join",
                     None,
-                    &format!("guild_{}", guild.id.get().to_string()),
+                    Some(guild.id),
+                    None::<ChannelId>,
+                    &format!("guild_{}", guild.id.get()),
                 )
                 .await;
+
+                let posthog = conf.posthog.clone();
+                let feature_flags = match posthog.get_feature_flags(&format!("guild_{}", guild.id.get()), Some(guild.id)).await {
+                    Ok(x) => x,
+                    Err(e) => {
+                        error!("Error getting feature flags: {:?}", e);
+                        return;
+                    }
+                };
+
+                if let Some(variant) = feature_flags.get("help_command") {
+                    if variant == "enabled" {
+                        let _ = guild
+                        .create_command(&ctx.http,  
+                            CreateCommand::new("help")
+                                .description("Learn how to use the bot")
+                        )
+                        .await;
+                    }
+                };
             }
         }
     }
@@ -252,6 +345,8 @@ impl EventHandler for Handler {
             ctx.data.clone(),
             "guild_leave",
             None,
+            Some(incomplete.id),
+            None::<ChannelId>,
             &format!("guild_{}", incomplete.id.get().to_string()),
         )
         .await;
@@ -263,6 +358,8 @@ impl EventHandler for Handler {
             ctx.data,
             "on_ready",
             None,
+            None::<GuildId>,
+            None::<ChannelId>,
             &format!("shard_{}", ready.shard.unwrap().id.0.to_string()),
         )
         .await;
@@ -803,6 +900,7 @@ fn main() {
                         || meta.target().contains("request")
                         || meta.target().contains("hyper")
                         || meta.target().contains("h2")
+                        || meta.target().contains("rustls")
                     {
                         return false;
                     };
@@ -863,7 +961,7 @@ fn main() {
             .expect("POSTHOG_API_KEY not set")
             .parse()
             .expect("Failed to convert POSTHOG_API_KEY to string");
-        let posthog = posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
+        let posthog = posthog::Client::new(posthog_key, "https://eu.i.posthog.com".to_string());
 
         println!("Connecting to mongodb...");
         let mut client_options = ClientOptions::parse("mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false").await.unwrap();

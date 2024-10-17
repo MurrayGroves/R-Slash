@@ -21,6 +21,8 @@ pub async fn autopost_create<'a>(
         ctx.data.clone(),
         "autopost_start",
         None,
+        modal.guild_id,
+        Some(modal.channel_id),
         &format!("user_{}", modal.user.id.get()),
     )
     .await;

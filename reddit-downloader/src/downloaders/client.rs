@@ -269,7 +269,8 @@ impl<'a> Client<'a> {
                     output.status.to_string(),
                     output.status
                 )))
-                .with_context(|| format!("path: {}", full_path))?;
+                .with_context(|| format!("path: {}", full_path))
+                .with_context(|| format!("STDERR: {}", String::from_utf8_lossy(&output.stderr)))?;
             }
 
             span.finish();

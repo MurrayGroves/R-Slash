@@ -7,7 +7,7 @@ use indexmap::IndexSet;
 use itertools::Itertools;
 use ordermap::OrderMap;
 use post_subscriber::SubscriberClient;
-use sentry::{Hub, SentryFutureExt};
+use sentry::{integrations::anyhow::capture_anyhow, Hub, SentryFutureExt};
 use std::collections::HashMap;
 use std::iter::{self, FromIterator};
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use stubborn_io::{ReconnectOptions, StubbornTcpStream};
 use tarpc::tokio_serde::formats::Bincode;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
@@ -623,7 +623,7 @@ async fn get_subreddit(
                         return;
                     }
                 };
-                debug!("{:?} - {:?}", post["title"], post["url"]);
+                trace!("{:?} - {:?}", post["title"], post["url"]);
 
                 // Redis key for this post
                 let key: String = format!("subreddit:{}:post:{}", post["subreddit"].to_string().replace("\"", ""), &post["id"].to_string().replace('"', ""));
@@ -648,7 +648,6 @@ async fn get_subreddit(
                             Err(x) => {
                                 let txt = format!("Failed to remove post from DB: {}", x);
                                 warn!("{}", txt);
-                                sentry::capture_message(&txt, sentry::Level::Warning);
                             }
                         };
                     }
@@ -663,11 +662,10 @@ async fn get_subreddit(
                 } else {
                     let txt = "Failed to check if post has deleted media";
                     warn!("{}", txt);
-                    sentry::capture_message(&txt, sentry::Level::Warning);
                 }
 
                 if exists {
-                    debug!("Post already exists in DB");
+                    trace!("Post already exists in DB");
                     post_list.add_post(&key, true).await;
 
                     // Update post's score with new score
@@ -680,7 +678,7 @@ async fn get_subreddit(
                         }
                     };
                 } else {
-                    debug!("Post does not exist in DB");
+                    debug!("New post not in DB: {:?} - {:?}", post["title"], post["url"]);
 
                     tokio::spawn(async move {
                         let mut url = post["url"].to_string().replace('"', "");
@@ -715,8 +713,8 @@ async fn get_subreddit(
                                         return;
                                     } else {
                                         let txt = format!("Failed to download media with post URL: {}, URL: {}, Error: {}, root cause: {}", post["permalink"], &url, x, x.root_cause());
-                                        warn!("{}", txt);
-                                        sentry::capture_message(&txt, sentry::Level::Warning);
+                                        log::warn!("{}", txt);
+                                        capture_anyhow(&x.context(format!("Post URL: {}, media URL: {}", post["permalink"], &url)));
                                         post_list.set_failed(&key).await;
                                         return;
                                     }

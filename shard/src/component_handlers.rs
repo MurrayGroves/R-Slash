@@ -57,6 +57,8 @@ pub async fn unsubscribe<'a>(
         ctx.data.clone(),
         "unsubscribe_subreddit",
         Some(HashMap::from([("subreddit", subreddit.clone())])),
+        interaction.guild_id,
+        Some(interaction.channel_id),
         &format!("user_{}", &interaction.user.id.get().to_string()),
     )
     .await;
@@ -117,6 +119,8 @@ pub async fn autopost_cancel<'a>(
         ctx.data.clone(),
         "cancel_autopost",
         None,
+        interaction.guild_id,
+        Some(interaction.channel_id),
         &format!("user_{}", interaction.user.id.get().to_string()),
     )
     .await;
@@ -152,6 +156,8 @@ pub async fn post_again<'a>(
             ("button", "true".to_string()),
             ("search_enabled", search_enabled.to_string()),
         ])),
+        interaction.guild_id,
+        Some(interaction.channel_id),
         &format!("user_{}", interaction.user.id.get().to_string()),
     )
     .await;
