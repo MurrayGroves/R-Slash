@@ -95,42 +95,37 @@ impl<'a> Client<'a> {
     #[instrument(skip(self))]
     async fn request_image(&self, id: &str) -> Result<String, Error> {
         self.limiter.wait().await;
-        let gif = format!("https://i.imgur.com/{}.gif", id);
-        let head = self
+
+        let response = self
             .client
-            .head(&gif)
+            .get(&format!("https://api.imgur.com/3/image/{}", id))
             .header("Authorization", format!("Client-ID {}", self.client_id))
             .send()
             .await?;
 
         self.limiter
-            .update_headers(head.headers(), head.status())
+            .update_headers(response.headers(), response.status())
             .await?;
 
-        if head
-            .headers()
-            .get("Content-Type")
-            .ok_or(Error::msg("Failed to get content type"))?
-            .to_str()?
-            == "image/gif"
-        {
-            return Ok(gif);
+        if response.status() == 404 {
+            bail!("Deleted")
         }
 
-        let mp4 = format!("https://i.imgur.com/{}.mp4", id);
-        let exists = self
-            .client
-            .head(&mp4)
-            .header("Authorization", format!("Client-ID {}", self.client_id))
-            .send()
-            .await?
-            .status()
-            .is_success();
-        if exists {
-            return Ok(mp4);
-        }
+        let txt = response.text().await?;
+        let json = match serde_json::from_str::<serde_json::Value>(&txt) {
+            Ok(json) => json,
+            Err(e) => {
+                debug!("Imgur image response for id {}: {}", id, txt);
+                bail!(e);
+            }
+        };
 
-        Ok(format!("https://i.imgur.com/{}.jpg", id))
+        Ok(json["data"]["link"]
+            .as_str()
+            .ok_or(Error::msg(
+                "Failed to extract image link from Imgur response",
+            ))?
+            .to_string())
     }
 
     /// Download a single image from a url, and return the path to the image, or URL if no conversion is needed
