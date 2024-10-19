@@ -349,16 +349,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "connection_pooler"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serenity",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "convert_case"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1257,7 +1247,6 @@ dependencies = [
 name = "memberships"
 version = "0.1.0"
 dependencies = [
- "connection_pooler",
  "log",
  "mongodb",
  "rslash_types",
@@ -1574,6 +1563,7 @@ checksum = "d231b230927b5e4ad203db57bbcbee2802f6bce620b1e4a9024a07d94e2907ec"
 name = "posthog"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "env_logger",
  "log",
  "reqwest 0.12.7",
@@ -1899,6 +1889,7 @@ dependencies = [
 name = "rslash_types"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "mongodb",
  "posthog",
  "redis",

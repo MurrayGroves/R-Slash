@@ -32,6 +32,9 @@
 		},
 		{
 			"path": "posthog"
+		},
+		{
+			"path": "memberships"
 		}
 	],
 	"settings": {}

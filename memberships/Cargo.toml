@@ -29,5 +29,4 @@ sentry = "0.29.3"
 serde_derive = "*"
 serde = "*"
 
-connection_pooler = { path = "../connection-pooler" }
 rslash_types = { path = "../rslash_types" }

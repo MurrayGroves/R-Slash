@@ -1,13 +1,43 @@
-use std::{ops::Deref, time::Duration};
+use std::{ops::Deref, sync::Arc, time::Duration};
 
 use auto_poster::PostMemory;
-use mongodb::bson::doc;
+use mongodb::bson::{de, doc};
 use post_api::queue_subreddit;
 use serenity::all::CreateMessage;
 use tokio::{select, time::Instant};
 use tracing::{debug, error, warn};
 
-use crate::AutoPostServer;
+use crate::{AutoPostServer, UnsafeMemory};
+
+async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) {
+    let mut autoposts = server.autoposts.write().await;
+    autoposts.by_id.remove(&autopost.id);
+    match autoposts.by_channel.get_mut(&autopost.channel) {
+        Some(x) => {
+            x.remove(&*autopost);
+            if x.len() == 0 {
+                autoposts.by_channel.remove(&autopost.channel);
+            };
+        }
+        None => {
+            error!("Tried to get channel to remove autopost from it but channel didn't exist");
+        }
+    };
+    drop(autoposts);
+    let client = server.db.lock().await;
+    let coll: mongodb::Collection<PostMemory> = client.database("state").collection("autoposts");
+
+    let filter = doc! {
+        "id": autopost.id as i64,
+    };
+
+    match coll.delete_one(filter).await {
+        Ok(_) => (),
+        Err(e) => {
+            error!("Failed to delete autopost from database: {:?}", e);
+        }
+    };
+}
 
 pub async fn timer_loop(
     server: AutoPostServer,
@@ -43,34 +73,7 @@ pub async fn timer_loop(
                             autopost.get_mut().next_post = autopost.next_post + autopost.interval;
                             autoposts.queue.push(autopost.clone());
                         } else {
-                            let mut autoposts = server.autoposts.write().await;
-                            autoposts.by_id.remove(&autopost.id);
-                            match autoposts.by_channel.get_mut(&autopost.channel) {
-                                Some(x) => {
-                                    x.remove(&*autopost);
-                                    if x.len() == 0 {
-                                        autoposts.by_channel.remove(&autopost.channel);
-                                    };
-                                }
-                                None => {
-                                    error!("Tried to get channel to remove autopost from it but channel didn't exist");
-                                }
-                            };
-                            drop(autoposts);
-                            let client = server.db.lock().await;
-                            let coll: mongodb::Collection<PostMemory> =
-                                client.database("state").collection("autoposts");
-
-                            let filter = doc! {
-                                "id": autopost.id as i64,
-                            };
-
-                            match coll.delete_one(filter).await {
-                                Ok(_) => (),
-                                Err(e) => {
-                                    error!("Failed to delete autopost from database: {:?}", e);
-                                }
-                            };
+                            delete_auto_post(&server, autopost.clone()).await;
                         }
                     } else {
                         let mut autoposts = server.autoposts.write().await;
@@ -82,10 +85,11 @@ pub async fn timer_loop(
                     let http = server.discords[&bot].clone();
                     let autopost_clone = autopost.clone();
                     let redis = server.redis.clone();
+                    let server_clone = server.clone();
 
                     let is_custom = !server.default_subs.contains(&autopost.subreddit);
                     tokio::spawn(async move {
-                        let mut redis = redis.clone();
+                        let mut server = server_clone;
 
                         if is_custom {
                             match queue_subreddit(
@@ -106,14 +110,14 @@ pub async fn timer_loop(
                             post_api::get_subreddit_search(
                                 autopost_clone.subreddit.clone(),
                                 search,
-                                &mut redis,
+                                &mut server.redis,
                                 autopost_clone.channel,
                             )
                             .await
                         } else {
                             post_api::get_subreddit(
                                 autopost_clone.subreddit.clone(),
-                                &mut redis,
+                                &mut server.redis,
                                 autopost_clone.channel,
                             )
                             .await
@@ -169,7 +173,16 @@ pub async fn timer_loop(
                             debug!("Sent message");
                             to_return
                         } {
-                            warn!("Error sending message: {:?}", why);
+                            if let serenity::Error::Http(e) = &why {
+                                if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
+                                    // Unknown channel (we got removed from server)
+                                    if e.error.code == 10003 {
+                                        delete_auto_post(&server, autopost).await;
+                                    }
+                                }
+                            } else {
+                                warn!("Error sending message: {:?}", why);
+                            }
                         }
                     });
 
