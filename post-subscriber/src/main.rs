@@ -1,26 +1,22 @@
 use futures::{Future, StreamExt};
-use mongodb::bson::{doc, Bson};
+use mongodb::bson::doc;
 use mongodb::options::ClientOptions;
 use redis::AsyncCommands;
-use serde_derive::{Deserialize, Serialize};
-use serenity::all::{ChannelId, CreateMessage, DiscordJsonError, GatewayIntents, Http, HttpError};
+use serenity::all::{ChannelId, CreateMessage, GatewayIntents, GuildId, Http};
 use serenity::json::json;
 use serenity::{all::EventHandler, async_trait};
 
-use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::Write;
-use std::net::SocketAddr;
 use std::sync::Arc;
-use tarpc::server::incoming::Incoming;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::interval;
 
-use futures::future::{self, Ready};
+use futures::future;
 use tarpc::{
-    client, context,
+    context,
     server::{self, Channel},
     tokio_serde::formats::Bincode,
 };
@@ -292,6 +288,8 @@ impl Subscriber for SubscriberServer {
             .capture(
                 "subreddit_new_post",
                 json!([("subreddit", &subreddit)]),
+                None::<GuildId>,
+                None::<ChannelId>,
                 "post-subscriber",
             )
             .await;

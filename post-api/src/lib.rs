@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::thread::current;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Error};
+use anyhow::{anyhow, bail, ensure, Context, Error};
 use async_recursion::async_recursion;
 use log::warn;
 use redis::aio::MultiplexedConnection;
@@ -38,6 +37,29 @@ fn redis_sanitise(input: &str) -> String {
     output = output.replace("\n", " ");
 
     output
+}
+
+#[derive(Debug)]
+pub enum PostApiError {
+    NoPostsFound { subreddit: String },
+    PostNotFoundInList { list: String, index: u16 },
+    PostNotFound { post_id: String },
+}
+
+impl std::fmt::Display for PostApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            PostApiError::NoPostsFound { subreddit } => {
+                write!(f, "No posts found in subreddit: {}", subreddit)
+            }
+            PostApiError::PostNotFoundInList { list, index } => {
+                write!(f, "No post found in list: {} at index: {}", list, index)
+            }
+            PostApiError::PostNotFound { post_id } => {
+                write!(f, "Post not found: {}", post_id)
+            }
+        }
+    }
 }
 
 #[instrument(skip(con))]
@@ -125,9 +147,10 @@ pub async fn get_post_at_list_index(
         .query_async(con)
         .await?;
 
-    if results.is_empty() {
-        bail!("No results found in list: {} at index: {}", list, index);
-    }
+    ensure!(
+        !results.is_empty(),
+        PostApiError::PostNotFoundInList { list, index }
+    );
 
     span.finish();
     Ok(results.remove(0))
@@ -143,9 +166,12 @@ pub async fn get_post_by_id<'a>(
 
     let post: HashMap<String, redis::Value> = con.hgetall(&post_id).await?;
 
-    if post.is_empty() {
-        bail!("Post not found: {}", post_id);
-    }
+    ensure!(
+        !post.is_empty(),
+        PostApiError::PostNotFound {
+            post_id: post_id.to_string()
+        }
+    );
 
     let subreddit = post_id.split(":").collect::<Vec<&str>>()[1].to_string();
 
@@ -268,10 +294,8 @@ pub async fn get_subreddit<'a>(
         .lrange(format!("subreddit:{}:posts", &subreddit), 0, -1)
         .await?;
 
-    let mut post_id: Result<String, Error> =
-        Err(anyhow!("No posts found for subreddit: {}", subreddit));
-
     // Find the first post that the channel has not seen before
+    let mut post_id: Option<String> = None;
     let mut minimum_post: Option<(String, u64)> = None;
     for post in posts.into_iter() {
         if fetched_posts.contains_key(&post) {
@@ -284,24 +308,26 @@ pub async fn get_subreddit<'a>(
                 minimum_post = Some((post, timestamp));
             }
         } else {
-            post_id = Ok(post);
+            post_id = Some(post);
             break;
         }
     }
 
     // If all posts have been seen, find the post that the channel saw longest ago
-    if post_id.is_err() {
+    if post_id.is_none() {
         match minimum_post {
             Some((post, _)) => {
-                post_id = Ok(post.to_string());
+                post_id = Some(post.to_string());
             }
             None => {}
         };
     }
 
     let post_id = match post_id {
-        Ok(id) => id,
-        Err(e) => bail!(e),
+        Some(id) => id,
+        None => bail!(PostApiError::NoPostsFound {
+            subreddit: subreddit
+        }),
     };
 
     let _: () = con

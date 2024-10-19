@@ -127,6 +127,7 @@ pub async fn timer_loop(
                             Ok(x) => x,
                             Err(e) => {
                                 warn!("Error getting subreddit for autopost: {}", e);
+                                delete_auto_post(&server, autopost.clone()).await;
                                 rslash_types::InteractionResponse::Message(
                                 rslash_types::InteractionResponseMessage {
                                     content: Some(

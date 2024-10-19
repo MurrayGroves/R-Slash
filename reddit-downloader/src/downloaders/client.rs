@@ -3,12 +3,9 @@ use std::io::Write;
 use std::process::Command;
 use std::sync::Arc;
 
-use anyhow::bail;
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, bail, Context, Error, Result};
 use base64::Engine;
 use reqwest::StatusCode;
-use sentry::Scope;
-use serde_json::json;
 use serde_json::Value;
 use tracing::debug;
 use tracing::info;

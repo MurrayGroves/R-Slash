@@ -750,6 +750,30 @@ pub async fn autopost<'a>(
                     .ok_or(anyhow!("Subreddit parameter couldn't be string"))?
                     .to_string()
                     .to_lowercase();
+
+                match check_subreddit_valid(&subreddit).await? {
+                    SubredditStatus::Valid => {}
+                    SubredditStatus::Invalid(reason) => {
+                        debug!("Subreddit response not 200: {}", reason);
+                        return tracker
+                            .send_response(InteractionResponse::Message(
+                                InteractionResponseMessage {
+                                    embed: Some(
+                                        CreateEmbed::default()
+                                            .title("Subreddit Inaccessible")
+                                            .description(format!(
+                                                "r/{} is private or does not exist.",
+                                                subreddit
+                                            ))
+                                            .color(0xff0000)
+                                            .to_owned(),
+                                    ),
+                                    ..Default::default()
+                                },
+                            ))
+                            .await;
+                    }
+                }
                 let search = match options.get(1) {
                     Some(x) => x.value.clone(),
                     None => CommandDataOptionValue::Number(0 as f64),
