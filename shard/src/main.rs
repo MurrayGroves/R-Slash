@@ -55,6 +55,7 @@ mod command_handlers;
 mod component_handlers;
 mod discord;
 mod modal_handlers;
+mod feature_flags;
 
 use rslash_types::ConfigStruct;
 use rslash_types::InteractionResponse;

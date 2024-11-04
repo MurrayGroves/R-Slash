@@ -78,7 +78,3 @@ auto_poster = { path = "../auto-poster" }
 name = "discord-shard"
 path = "src/main.rs"
 
-[profile.release]
-debug = "full"
-split-debuginfo = "packed"
-lto = "thin"
