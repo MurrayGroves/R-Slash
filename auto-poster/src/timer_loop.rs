@@ -2,14 +2,29 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 
 use auto_poster::PostMemory;
 use mongodb::bson::{de, doc};
-use post_api::queue_subreddit;
-use serenity::all::CreateMessage;
+use post_api::{queue_subreddit, SubredditStatus};
+use rslash_types::{InteractionResponse, InteractionResponseMessage};
+use serenity::all::{CreateEmbed, CreateMessage};
 use tokio::{select, time::Instant};
 use tracing::{debug, error, warn};
 
 use crate::{AutoPostServer, UnsafeMemory};
 
 async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) {
+    let client = server.db.lock().await;
+    let coll: mongodb::Collection<PostMemory> = client.database("state").collection("autoposts");
+
+    let filter = doc! {
+        "id": autopost.id as i64,
+    };
+
+    match coll.delete_one(filter).await {
+        Ok(_) => (),
+        Err(e) => {
+            error!("Failed to delete autopost from database: {:?}", e);
+        }
+    };
+
     let mut autoposts = server.autoposts.write().await;
     autoposts.by_id.remove(&autopost.id);
     match autoposts.by_channel.get_mut(&autopost.channel) {
@@ -24,19 +39,6 @@ async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) 
         }
     };
     drop(autoposts);
-    let client = server.db.lock().await;
-    let coll: mongodb::Collection<PostMemory> = client.database("state").collection("autoposts");
-
-    let filter = doc! {
-        "id": autopost.id as i64,
-    };
-
-    match coll.delete_one(filter).await {
-        Ok(_) => (),
-        Err(e) => {
-            error!("Failed to delete autopost from database: {:?}", e);
-        }
-    };
 }
 
 pub async fn timer_loop(
@@ -127,17 +129,37 @@ pub async fn timer_loop(
                             Ok(x) => x,
                             Err(e) => {
                                 warn!("Error getting subreddit for autopost: {}", e);
-                                delete_auto_post(&server, autopost.clone()).await;
-                                rslash_types::InteractionResponse::Message(
-                                rslash_types::InteractionResponseMessage {
-                                    content: Some(
-                                        "Error getting subreddit for auto-post, please report in the support server."
-                                            .to_string(),
+                                let validity = match post_api::check_subreddit_valid(
+                                    &autopost_clone.subreddit,
+                                )
+                                .await
+                                {
+                                    Ok(x) => x,
+                                    Err(e) => {
+                                        warn!("Error checking subreddit validity: {}", e);
+                                        SubredditStatus::Valid
+                                    }
+                                };
+                                match validity {
+                                    SubredditStatus::Valid => {}
+                                    SubredditStatus::Invalid(reason) => {
+                                        debug!("Subreddit response not 200: {}", reason);
+                                        delete_auto_post(&server, autopost_clone.clone()).await;
+                                    }
+                                };
+                                InteractionResponse::Message(InteractionResponseMessage {
+                                    embed: Some(
+                                        CreateEmbed::default()
+                                            .title("Subreddit Inaccessible")
+                                            .description(format!(
+                                                "Deleted autopost for r/{} because it's private or does not exist.",
+                                                autopost_clone.subreddit
+                                            ))
+                                            .color(0xff0000)
+                                            .to_owned(),
                                     ),
-                                    ephemeral: true,
                                     ..Default::default()
-                                },
-                            )
+                                })
                             }
                         } {
                             rslash_types::InteractionResponse::Message(message) => message,
