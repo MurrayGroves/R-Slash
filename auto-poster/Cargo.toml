@@ -30,7 +30,12 @@ chrono = "*"
 timer = "*"
 async-recursion = "*"
 integer-hasher = "*"
-sentry = { version = "*", features = ["tracing", "anyhow", "debug-images"] }
+sentry = { version = "0.34", features = [
+    "tracing",
+    "anyhow",
+    "debug-images",
+    "tokio",
+] }
 tracing = "*"
 tracing-subscriber = { version = "*" }
 

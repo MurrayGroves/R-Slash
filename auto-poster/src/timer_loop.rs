@@ -129,17 +129,13 @@ pub async fn timer_loop(
                             Ok(x) => x,
                             Err(e) => {
                                 warn!("Error getting subreddit for autopost: {}", e);
-                                let validity = match post_api::check_subreddit_valid(
+                                let validity = post_api::check_subreddit_valid(
                                     &autopost_clone.subreddit,
                                 )
-                                .await
-                                {
-                                    Ok(x) => x,
-                                    Err(e) => {
-                                        warn!("Error checking subreddit validity: {}", e);
-                                        SubredditStatus::Valid
-                                    }
-                                };
+                                    .await.unwrap_or_else(|e| {
+                                    warn!("Error checking subreddit validity: {}", e);
+                                    SubredditStatus::Valid
+                                });
                                 match validity {
                                     SubredditStatus::Valid => {}
                                     SubredditStatus::Invalid(reason) => {
