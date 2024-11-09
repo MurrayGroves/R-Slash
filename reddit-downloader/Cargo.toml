@@ -61,6 +61,7 @@ stubborn-io = "*"
 lazy_static = "*"
 ordermap = "*"
 indexmap = "*"
+atomic-counter = "*"
 
 post_subscriber = { path = "../post-subscriber" }
 
