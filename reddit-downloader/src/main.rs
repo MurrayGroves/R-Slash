@@ -31,9 +31,13 @@ use std::env;
 use atomic_counter::RelaxedCounter;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{ClientOptions, FindOptions};
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::trace;
 use serde_json::Value::Null;
 
 use tarpc::{client, context, serde_transport::Transport};
+use rslash_types::span_filter;
 
 mod downloaders;
 
@@ -536,6 +540,8 @@ async fn get_subreddit(
 	let mut post_list: Vec<Post> = Vec::new();
 	post_list.reserve(existing_posts.len() + 1000);
 
+	let mut subreddit_name = None;
+
 	// Fetch pages of posts
 	for x in 0..pages.unwrap_or(10) {
 		debug!("Making {}th request to reddit", x);
@@ -683,6 +689,10 @@ async fn get_subreddit(
 			// Redis key for this post
 			let key: String = format!("subreddit:{}:post:{}", post["subreddit"].to_string().replace("\"", ""), &post["id"].to_string().replace('"', ""));
 
+			if subreddit_name.is_none() {
+				subreddit_name = Some(post["subreddit"].to_string().replace("\"", ""));
+			}
+
 			let exists = existing_posts.iter().any(|x| match x {
 				Post::Existing(x) => x == &key,
 				_ => false,
@@ -792,7 +802,7 @@ async fn get_subreddit(
 				};
 
 				// Notify subscriber service that a new post has been detected
-				match subscriber.notify(context::current(), subreddit.to_string(), post["id"].to_string().replace('"', "")).await {
+				match subscriber.notify(context::current(), post["subreddit"].to_string().replace("\"", ""), post["id"].to_string().replace('"', "")).await {
 					Ok(_) => {}
 					Err(x) => {
 						let txt = format!("Failed to notify subscriber: {}", x);
@@ -800,6 +810,8 @@ async fn get_subreddit(
 						sentry::capture_message(&txt, sentry::Level::Warning);
 					}
 				};
+
+				post_list.push(post_object.into());
 
 				let mut post_keys: Vec<&String> = post_list.iter().filter(|p| match p {
 					Post::New(p) => !p.needs_processing,
@@ -828,9 +840,9 @@ async fn get_subreddit(
 					)
 					.query_async::<()>(con)
 					.await?;
+			} else {
+				post_list.push(post_object.into());
 			}
-
-			post_list.push(post_object.into());
 
 			transaction.finish();
 		}
@@ -840,8 +852,10 @@ async fn get_subreddit(
 	let existing_posts: Vec<Post> = existing_posts.into_iter().filter(|x| !post_list.contains(x)).collect();
 	post_list = post_list.into_iter().chain(existing_posts.into_iter()).collect();
 
-	// Add to processing queue
-	downloaders_client.process_subreddit(&subreddit, post_list).await?;
+	if let Some(subreddit_name) = subreddit_name {
+		// Add to processing queue
+		downloaders_client.queue_subreddit_for_processing(&subreddit_name, post_list).await?;
+	}
 
 	Ok(after)
 }
@@ -1158,26 +1172,38 @@ async fn download_loop<'a>(
 
 #[tokio::main]
 async fn main() {
+	let tracer_provider = opentelemetry_otlp::new_pipeline()
+		.tracing()
+		.with_exporter(
+			opentelemetry_otlp::new_exporter()
+				.tonic()
+				.with_endpoint("http://100.67.30.19:4317")
+		)
+		.with_trace_config(
+			trace::config().with_resource(opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
+				opentelemetry_semantic_conventions::resource::SERVICE_NAME,
+				"reddit_downloader".to_string(),
+			)])),
+		)
+		.install_batch(opentelemetry_sdk::runtime::Tokio).unwrap();
+	let tracer = tracer_provider.tracer("reddit_downloader");
+
+	let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 	tracing_subscriber::Registry::default()
 		.with(console_subscriber::spawn())
-		.with(sentry::integrations::tracing::layer().event_filter(|md| {
-			let level_filter = match md.level() {
-				&tracing::Level::ERROR => sentry::integrations::tracing::EventFilter::Event,
-				&tracing::Level::WARN => sentry::integrations::tracing::EventFilter::Event,
-				&tracing::Level::TRACE => sentry::integrations::tracing::EventFilter::Ignore,
-				_ => sentry::integrations::tracing::EventFilter::Breadcrumb,
-			};
-			return if md.target().contains("reddit_downloader") {
-				level_filter
-			} else {
-				sentry::integrations::tracing::EventFilter::Ignore
-			};
-		}))
+		.with(telemetry.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+			span_filter!(meta, cx);
+		})))
+		.with(sentry::integrations::tracing::layer().with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+			span_filter!(meta, cx);
+		})))
 		.with(
 			tracing_subscriber::fmt::layer()
 				.compact()
 				.with_ansi(false)
-				.with_filter(filter::Targets::new().with_target("reddit_downloader", tracing_subscriber::filter::LevelFilter::DEBUG).with_default(tracing_subscriber::filter::LevelFilter::WARN))
+				.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+					span_filter!(meta, cx);
+				}))
 		)
 		.init();
 

@@ -64,6 +64,15 @@ indexmap = "*"
 atomic-counter = "*"
 
 post_subscriber = { path = "../post-subscriber" }
+rslash_types = { path = "../rslash_types" }
+
+tracing-opentelemetry = "*"
+opentelemetry-otlp = "*"
+tonic = "*"
+opentelemetry = "0.26.0"
+opentelemetry_sdk = { version = "0.26.0", features = ["rt-tokio"] }
+opentelemetry-semantic-conventions = "*"
+
 
 [patch.crates-io]
 protobuf-src = { git = "https://github.com/emarsden/rust-protobuf-native" }

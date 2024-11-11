@@ -7,21 +7,27 @@ use serenity::json::json;
 use serenity::{all::EventHandler, async_trait};
 
 use log::{debug, error, info, warn};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
-use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::interval;
+use tokio::time::{interval, Instant};
 
 use futures::future;
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{trace, Resource};
 use tarpc::{
 	context,
 	server::{self, Channel},
 	tokio_serde::formats::Bincode,
 };
-
+use tonic::metadata::MetadataMap;
+use tracing_subscriber::{filter, Layer};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use post_subscriber::{Bot, Subscriber, Subscription};
+use rslash_types::span_filter;
 
 struct Subscriptions {
 	by_subreddit: HashMap<String, HashSet<Arc<Subscription>>>,
@@ -31,6 +37,7 @@ struct Subscriptions {
 struct PostAlert {
 	message: CreateMessage,
 	subscriptions: Vec<Arc<Subscription>>,
+	timestamp: Instant,
 }
 
 #[derive(Clone)]
@@ -41,24 +48,30 @@ struct SubscriberServer {
 	discord_rs: Arc<Http>,
 	redis: redis::aio::MultiplexedConnection,
 	posthog: posthog::Client,
-	queued_alerts: Arc<Mutex<Vec<PostAlert>>>,
+	queued_alerts: Arc<Mutex<VecDeque<PostAlert>>>,
 }
 
 impl SubscriberServer {
+	#[tracing::instrument(skip(self))]
 	async fn watch_alerts(self) {
-		let mut outer_interval = interval(tokio::time::Duration::from_secs(1));
-		let mut inner_interval = interval(tokio::time::Duration::from_millis(1000 / 25)); // Send alerts at max of 25 per second (Discord global rate limit is 50 reqs per second)
+		let mut outer_interval = interval(tokio::time::Duration::from_millis(100));
+		let inner_duration = tokio::time::Duration::from_millis(1000 / 35); // Send alerts at max of 35 per second (Discord global rate limit is 50 reqs per second)
 		loop {
 			outer_interval.tick().await;
 			let mut queued_alerts = self.queued_alerts.lock().await;
-			let next_alert = match queued_alerts.pop() {
+			let next_alert = match queued_alerts.pop_front() {
 				Some(x) => x,
 				None => continue,
 			};
 			drop(queued_alerts);
 
+			let mut last_alert = Instant::now() - inner_duration;
 			for alert in next_alert.subscriptions {
-				inner_interval.tick().await;
+				// Ensure we don't send more than 35 messages per second
+				if last_alert.elapsed() < inner_duration {
+					tokio::time::sleep(inner_duration - last_alert.elapsed()).await;
+				}
+				last_alert = Instant::now();
 				let channel: ChannelId = alert.channel.into();
 				let http = match alert.bot {
 					Bot::BB => &self.discord_bb,
@@ -66,7 +79,7 @@ impl SubscriberServer {
 				};
 
 				match channel.send_message(http, next_alert.message.clone()).await {
-					Ok(_) => debug!("Sent message to channel {}", channel),
+					Ok(_) => debug!("Sent {} to channel {}, was added {} seconds ago", alert.subreddit, channel, next_alert.timestamp.elapsed().as_secs()),
 					Err(e) => {
 						if let serenity::Error::Http(e) = e {
 							if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
@@ -100,6 +113,7 @@ impl SubscriberServer {
 }
 
 impl Subscriber for SubscriberServer {
+	#[tracing::instrument(skip(self))]
 	async fn register_subscription(
 		self,
 		_: context::Context,
@@ -152,6 +166,7 @@ impl Subscriber for SubscriberServer {
 		Ok(())
 	}
 
+	#[tracing::instrument(skip(self))]
 	async fn delete_subscription(
 		self,
 		_: context::Context,
@@ -205,6 +220,7 @@ impl Subscriber for SubscriberServer {
 	}
 
 	// List subscriptions for a channel
+	#[tracing::instrument(skip(self))]
 	async fn list_subscriptions(
 		self,
 		_: context::Context,
@@ -230,6 +246,7 @@ impl Subscriber for SubscriberServer {
 	}
 
 	// Notify subscribers of a new post
+	#[tracing::instrument(skip(self))]
 	async fn notify(
 		self,
 		_: context::Context,
@@ -287,7 +304,7 @@ impl Subscriber for SubscriberServer {
 			.posthog
 			.capture(
 				"subreddit_new_post",
-				json!([("subreddit", &subreddit)]),
+				json!({"subreddit": &subreddit}),
 				None::<GuildId>,
 				None::<ChannelId>,
 				"post-subscriber",
@@ -299,14 +316,16 @@ impl Subscriber for SubscriberServer {
 		let alert = PostAlert {
 			message: message.clone(),
 			subscriptions: filtered.into_iter().map(|x| (*x).clone()).collect(),
+			timestamp: Instant::now(),
 		};
 
 		let mut queued_alerts = self.queued_alerts.lock().await;
-		queued_alerts.push(alert);
+		queued_alerts.push_back(alert);
 
 		Ok(())
 	}
 
+	#[tracing::instrument(skip(self))]
 	async fn watched_subreddits(self, _: context::Context) -> Result<HashSet<String>, String> {
 		info!("Listing watched subreddits");
 		let subscriptions = self.subscriptions.read().await;
@@ -334,11 +353,43 @@ impl EventHandler for Handler {}
 
 #[tokio::main]
 async fn main() {
-	env_logger::builder()
-		.format(|buf, record| writeln!(buf, "{}: {}", record.level(), record.args()))
-		.init();
-
 	debug!("Starting...");
+
+	let tracer_provider = opentelemetry_otlp::new_pipeline()
+		.tracing()
+		.with_exporter(
+			opentelemetry_otlp::new_exporter()
+				.tonic()
+				.with_endpoint("http://100.67.30.19:4317")
+		)
+		.with_trace_config(
+			trace::config().with_resource(Resource::new(vec![opentelemetry::KeyValue::new(
+				opentelemetry_semantic_conventions::resource::SERVICE_NAME,
+				"post_subscriber".to_string(),
+			)])),
+		)
+		.install_batch(opentelemetry_sdk::runtime::Tokio).unwrap();
+
+	let tracer = tracer_provider.tracer("post_subscriber");
+
+	let telemetry = tracing_opentelemetry::layer().with_tracer(tracer).with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+		span_filter!(meta, cx);
+	}));
+
+	tracing_subscriber::Registry::default()
+		.with(telemetry)
+		.with(sentry::integrations::tracing::layer().with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+			span_filter!(meta, cx);
+		})))
+		.with(
+			tracing_subscriber::fmt::layer()
+				.compact()
+				.with_ansi(false)
+				.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+					span_filter!(meta, cx);
+				}))
+		)
+		.init();
 
 	let _guard = sentry::init(("https://d0d89bf871ce425c84eddf6f419dcc7e@o4504774745718784.ingest.us.sentry.io/4508247476600832", sentry::ClientOptions {
 		release: sentry::release_name!(),
@@ -444,7 +495,7 @@ async fn main() {
 		discord_rs: http_rs,
 		redis,
 		posthog: posthog_client,
-		queued_alerts: Arc::new(Mutex::new(Vec::new())),
+		queued_alerts: Arc::new(Mutex::new(VecDeque::new())),
 	};
 
 	tokio::spawn(server.clone().watch_alerts());

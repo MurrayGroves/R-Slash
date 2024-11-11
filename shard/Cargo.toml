@@ -51,6 +51,14 @@ sentry = { version = "0.34", features = [
 ] }
 tracing = "*"
 tracing-subscriber = { version = "*" }
+tracing-opentelemetry = "*"
+opentelemetry-otlp = "*"
+tonic = "*"
+opentelemetry = "0.26.0"
+opentelemetry_sdk = { version = "0.26.0", features = ["rt-tokio"] }
+opentelemetry-semantic-conventions = "*"
+
+
 compile-time = "*"
 chrono = "*"
 async-recursion = "*"

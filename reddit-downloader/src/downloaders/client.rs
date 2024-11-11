@@ -254,10 +254,102 @@ impl Client {
 		Ok(new)
 	}
 
-	#[tracing::instrument(skip(self))]
+	#[tracing::instrument(skip(self, posts))]
+	async fn process_subreddit_posts(&mut self, subreddit: String, mut posts: Vec<Post>) -> Result<()> {
+		debug!("Processing media for subreddit: {}", subreddit);
+
+		let mut subreddits_queued = self.subreddits_queued.lock().await;
+		subreddits_queued.insert(subreddit.clone());
+		drop(subreddits_queued);
+
+		let mut started_at = self.subreddit_started_at.lock().await;
+		*started_at = Some(tokio::time::Instant::now());
+		drop(started_at);
+
+		for i in 0..posts.len() {
+			// If post has already been processed, or is existing post, skip
+			let post = if let Some(Post::New(post)) = posts.get_mut(i) {
+				if post.needs_processing {
+					post
+				} else {
+					continue;
+				}
+			} else {
+				continue;
+			};
+
+			debug!("Processing media for post: {}", post.id);
+			post.embed_url = match self.resolve_embed_url(&post.embed_url, &post.id).await {
+				Ok(url) => url,
+				Err(e) => {
+					warn!("Failed to process media: {:?}", e);
+					continue;
+				}
+			};
+
+			if !post.embed_url.starts_with("http") {
+				post.embed_url = format!("https://cdn.rsla.sh/gifs/{}", post.embed_url);
+			};
+
+			post.needs_processing = false;
+
+			let redis_key = post.redis_key.clone();
+			let post_id = post.id.clone();
+
+			let post = Vec::from(post.clone());
+
+			let post_keys: Vec<&String> = posts.iter().filter(|p| match p {
+				Post::New(p) => !p.needs_processing,
+				Post::Existing(_) => true,
+			}).map(|p| match p {
+				Post::New(p) => &p.redis_key,
+				Post::Existing(key) => &key,
+			}).collect();
+
+			// Push post to Redis
+			match self.redis.hset_multiple::<&str, String, String, redis::Value>(&redis_key, &post).await.context("Setting post details in Redis") {
+				Ok(_) => {}
+				Err(x) => {
+					warn!("{:?}", x);
+					capture_anyhow(&x);
+				}
+			};
+
+			// Notify subscriber service that a new post has been detected
+			match self.subscriber_client.notify(context::current(), subreddit.to_string(), post_id).await.context("Notifying subscriber") {
+				Ok(_) => {}
+				Err(x) => {
+					warn!("{:?}", x);
+					capture_anyhow(&x);
+				}
+			};
+
+			// Update redis with new post keys
+			redis::pipe()
+				.atomic()
+				.del::<String>(format!("subreddit:{}:posts", subreddit))
+				.rpush::<String, Vec<&String>>(
+					format!("subreddit:{}:posts", subreddit),
+					post_keys,
+				)
+				.query_async::<()>(&mut self.redis)
+				.await?;
+		}
+
+		let mut started_at = self.subreddit_started_at.lock().await;
+		*started_at = None;
+		drop(started_at);
+		let mut subreddits_queued = self.subreddits_queued.lock().await;
+		subreddits_queued.remove(&subreddit);
+
+		debug!("Finished media for subreddit: {}", subreddit);
+
+		Ok(())
+	}
+
 	async fn process_queue(mut self) -> Result<()> {
 		loop {
-			let (subreddit, mut posts) = {
+			let (subreddit, posts) = {
 				let mut interval = tokio::time::interval(Duration::from_millis(100));
 				loop {
 					interval.tick().await;
@@ -271,95 +363,13 @@ impl Client {
 				requests.pop_front().ok_or(anyhow!("Failed to pop request"))?
 			};
 
-			debug!("Processing media for subreddit: {}", subreddit);
-
-			let mut subreddits_queued = self.subreddits_queued.lock().await;
-			subreddits_queued.insert(subreddit.clone());
-			drop(subreddits_queued);
-
-			let mut started_at = self.subreddit_started_at.lock().await;
-			*started_at = Some(Instant::now());
-			drop(started_at);
-
-			for i in 0..posts.len() {
-				// If post has already been processed, or is existing post, skip
-				let post = if let Some(Post::New(post)) = posts.get_mut(i) {
-					if post.needs_processing {
-						post
-					} else {
-						continue;
-					}
-				} else {
-					continue;
-				};
-
-				debug!("Processing media for post: {}", post.id);
-				post.embed_url = match self.request(&post.embed_url, &post.id).await {
-					Ok(url) => url,
-					Err(e) => {
-						warn!("Failed to process media: {:?}", e);
-						continue;
-					}
-				};
-
-				post.needs_processing = false;
-
-				let redis_key = post.redis_key.clone();
-				let post_id = post.id.clone();
-
-				let post = Vec::from(post.clone());
-
-				let post_keys: Vec<&String> = posts.iter().filter(|p| match p {
-					Post::New(p) => !p.needs_processing,
-					Post::Existing(_) => true,
-				}).map(|p| match p {
-					Post::New(p) => &p.redis_key,
-					Post::Existing(key) => &key,
-				}).collect();
-
-				// Push post to Redis
-				match self.redis.hset_multiple::<&str, String, String, redis::Value>(&redis_key, &post).await.context("Setting post details in Redis") {
-					Ok(_) => {}
-					Err(x) => {
-						warn!("{:?}", x);
-						capture_anyhow(&x);
-					}
-				};
-
-				// Notify subscriber service that a new post has been detected
-				match self.subscriber_client.notify(context::current(), subreddit.to_string(), post_id).await.context("Notifying subscriber") {
-					Ok(_) => {}
-					Err(x) => {
-						warn!("{:?}", x);
-						capture_anyhow(&x);
-					}
-				};
-
-				// Update redis with new post keys
-				redis::pipe()
-					.atomic()
-					.del::<String>(format!("subreddit:{}:posts", subreddit))
-					.rpush::<String, Vec<&String>>(
-						format!("subreddit:{}:posts", subreddit),
-						post_keys,
-					)
-					.query_async::<()>(&mut self.redis)
-					.await?;
-			}
-
-			let mut started_at = self.subreddit_started_at.lock().await;
-			*started_at = None;
-			drop(started_at);
-			let mut subreddits_queued = self.subreddits_queued.lock().await;
-			subreddits_queued.remove(&subreddit);
-
-			debug!("Finished media for subreddit: {}", subreddit);
+			self.process_subreddit_posts(subreddit, posts).await?;
 		}
 	}
 
 	/// Convert a single mp4 to a gif, and return the path to the gif
 	#[tracing::instrument(skip(self))]
-	async fn process(&self, path: &str) -> Result<String, Error> {
+	async fn mp4_to_gif(&self, path: &str) -> Result<String, Error> {
 		let _lock = self.process_lock.lock().await;
 		let parent_span = sentry::configure_scope(|scope| scope.get_span());
 		let span: sentry::TransactionOrSpan = match &parent_span {
@@ -486,7 +496,7 @@ impl Client {
 
 	/// Download a single mp4 from a url, and return the path to the gif
 	#[tracing::instrument(skip(self))]
-	async fn request(&self, url: &str, filename: &str) -> Result<String, Error> {
+	async fn resolve_embed_url(&self, url: &str, filename: &str) -> Result<String, Error> {
 		debug!("Requesting: {} for filename {}", url, filename);
 		let mut path = if url.contains("redgifs.com") {
 			match &self.redgifs {
@@ -526,7 +536,7 @@ impl Client {
                     "File is small enough to convert to GIF ({} KB)",
                     size / 1024
                 );
-				path = self.process(&path).await.context("Processing gif")?;
+				path = self.mp4_to_gif(&path).await.context("Processing gif")?;
 			} else {
 				debug!("File is too large to convert to GIF ({} KB)", size / 1024);
 			}
@@ -548,7 +558,7 @@ impl Client {
 	}
 
 	/// Add subreddit to process queue
-	pub async fn process_subreddit(&self, subreddit: &str, posts: Vec<Post>) -> Result<()> {
+	pub async fn queue_subreddit_for_processing(&self, subreddit: &str, posts: Vec<Post>) -> Result<()> {
 		debug!("Adding subreddit to process queue: {}, {:?}", subreddit, posts);
 		let mut requests = self.requests.lock().await;
 		requests.push_back((subreddit.to_string(), posts));
