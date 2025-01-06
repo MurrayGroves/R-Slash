@@ -258,10 +258,6 @@ impl Client {
 	async fn process_subreddit_posts(&mut self, subreddit: String, mut posts: Vec<Post>) -> Result<()> {
 		debug!("Processing media for subreddit: {}", subreddit);
 
-		let mut subreddits_queued = self.subreddits_queued.lock().await;
-		subreddits_queued.insert(subreddit.clone());
-		drop(subreddits_queued);
-
 		let mut started_at = self.subreddit_started_at.lock().await;
 		*started_at = Some(tokio::time::Instant::now());
 		drop(started_at);
@@ -339,8 +335,6 @@ impl Client {
 		let mut started_at = self.subreddit_started_at.lock().await;
 		*started_at = None;
 		drop(started_at);
-		let mut subreddits_queued = self.subreddits_queued.lock().await;
-		subreddits_queued.remove(&subreddit);
 
 		debug!("Finished media for subreddit: {}", subreddit);
 
@@ -363,7 +357,9 @@ impl Client {
 				requests.pop_front().ok_or(anyhow!("Failed to pop request"))?
 			};
 
-			self.process_subreddit_posts(subreddit, posts).await?;
+			self.process_subreddit_posts(subreddit.clone(), posts).await?;
+			let mut subreddits_queued = self.subreddits_queued.lock().await;
+			subreddits_queued.remove(&subreddit);
 		}
 	}
 
@@ -547,6 +543,7 @@ impl Client {
 
 	/// Check if previous requests for subreddit have finished
 	pub async fn is_finished(&self, subreddit: &str) -> bool {
+		let subreddit = subreddit.to_lowercase();
 		if let Some(started_at) = self.subreddit_started_at.lock().await.as_ref() {
 			if started_at.elapsed() > Duration::from_secs(600) {
 				error!("Some subreddit has been processing for over 10 minutes, currently queued are: {:?}, requests queue is {:?}", self.subreddits_queued.lock().await, self.requests.lock().await);
@@ -554,14 +551,26 @@ impl Client {
 		}
 
 		let subreddits_queued = self.subreddits_queued.lock().await;
-		!subreddits_queued.contains(subreddit)
+		let finished = !subreddits_queued.contains(&subreddit);
+		debug!("Returning {} for subreddit: {}, with queue {:?}", finished, subreddit, subreddits_queued);
+		finished
 	}
 
 	/// Add subreddit to process queue
 	pub async fn queue_subreddit_for_processing(&self, subreddit: &str, posts: Vec<Post>) -> Result<()> {
+		let subreddit = subreddit.to_lowercase();
 		debug!("Adding subreddit to process queue: {}, {:?}", subreddit, posts);
+
 		let mut requests = self.requests.lock().await;
+		debug!("Requests queue: {:?}", requests.iter().map(|(sub, _)| sub).collect::<Vec<&String>>());
 		requests.push_back((subreddit.to_string(), posts));
+		drop(requests);
+		let mut subreddits_queued = self.subreddits_queued.lock().await;
+		if subreddits_queued.contains(&subreddit) {
+			warn!("Subreddit already queued for processing: {}", subreddit);
+			debug!("Subreddits queued: {:?}", subreddits_queued);
+		}
+		subreddits_queued.insert(subreddit);
 		Ok(())
 	}
 }

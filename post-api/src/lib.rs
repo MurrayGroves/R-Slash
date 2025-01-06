@@ -11,7 +11,7 @@ use serenity::all::{
 	ButtonStyle, ChannelId, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor,
 };
 use tokio::time::sleep;
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, error_span, instrument};
 
 use rslash_types::{InteractionResponse, InteractionResponseMessage, ResponseFallbackMethod};
 
@@ -346,10 +346,14 @@ pub async fn get_subreddit<'a>(
 
 	// If the post is not found, some bug has occurred, remove the post from the subreddit list and call this function again to get a new one
 	if let Err(e) = post {
-		error!("Error getting post by ID: {:?}", e);
-		let _: () = con
-			.lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
-			.await?;
+		let span = error_span!("delete_post_from_list");
+		{
+			let _ = span.enter();
+			error!("Error getting post by ID: {:?}", e);
+			let _: () = con
+				.lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
+				.await?;
+		}
 		post = get_subreddit(subreddit, con, channel).await;
 	}
 

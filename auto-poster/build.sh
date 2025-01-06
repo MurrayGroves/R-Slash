@@ -4,7 +4,7 @@ source ../secrets.env
 
 cargo build --release
 mkdir -p build
-cp ../target/release/auto-poster build/
+cp ../target/release/auto_poster build/
 docker build -t registry.murraygrov.es/auto-poster -f Dockerfile build/
 docker push registry.murraygrov.es/auto-poster
 
