@@ -13,3 +13,4 @@ badge-server/Cargo.lock linguist-generated
 connection-pooler/Cargo.lock linguist-generated
 discord-interface/Cargo.lock linguist-generated
 memberships/Cargo.lock linguist-generated
+**/*.lock linguist-generated
