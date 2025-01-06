@@ -1,12 +1,9 @@
-use serenity::futures::{stream, StreamExt};
-use tracing::{warn, info, trace, debug};
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 #[derive(Debug)]
 struct LockedResource<T: Send + Sync> {
@@ -15,8 +12,7 @@ struct LockedResource<T: Send + Sync> {
 }
 
 impl<T: Send + Sync> LockedResource<T> {
-    fn new(contents: T) -> Self
-    {
+    fn new(contents: T) -> Self {
         Self {
             last_accessed: Arc::new(Mutex::new(Instant::now())),
             data: Arc::new(Mutex::new(contents)),
@@ -25,13 +21,16 @@ impl<T: Send + Sync> LockedResource<T> {
 }
 
 #[derive(Clone)]
-pub struct ResourceManager<T: Send + Sync > {
+pub struct ResourceManager<T: Send + Sync> {
     resources: Arc<Mutex<Vec<Arc<LockedResource<T>>>>>,
     maker: Arc<dyn Fn() -> Arc<Mutex<Pin<Box<dyn Future<Output = T> + Send>>>> + Send + Sync>,
 }
 
-
-impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
+impl<T> ResourceManager<T>
+where
+    T: Send + Sync + 'static,
+    Self: Sized,
+{
     pub fn clone(&self) -> Self {
         Self {
             resources: self.resources.clone(),
@@ -39,7 +38,9 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
         }
     }
 
-    pub async fn new(maker: impl Fn() -> Arc<Mutex<Pin<Box<dyn Future<Output = T> + Send>>>> + Send + Sync + 'static) -> Self {
+    pub async fn new(
+        maker: impl Fn() -> Arc<Mutex<Pin<Box<dyn Future<Output = T> + Send>>>> + Send + Sync + 'static,
+    ) -> Self {
         let new = Self {
             resources: Arc::new(Mutex::new(Vec::new())),
             maker: Arc::new(maker),
@@ -69,10 +70,8 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
                 Ok(_) => {
                     available = Some(Arc::clone(resource));
                     break;
-                },
-                Err(_) => {
-
                 }
+                Err(_) => {}
             }
         }
         drop(resources);
@@ -80,7 +79,17 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
         let available = match available {
             Some(resource) => resource,
             None => {
-                let new = Arc::<serenity::prelude::Mutex<std::pin::Pin<Box<(dyn std::future::Future<Output = T> + std::marker::Send + 'static)>>>>::try_unwrap(self.maker.clone()()).unwrap_or_else(|_| panic!("Failed to unwrap maker")).into_inner();
+                let new = Arc::<
+                    serenity::prelude::Mutex<
+                        std::pin::Pin<
+                            Box<
+                                (dyn std::future::Future<Output = T> + std::marker::Send + 'static),
+                            >,
+                        >,
+                    >,
+                >::try_unwrap(self.maker.clone()())
+                .unwrap_or_else(|_| panic!("Failed to unwrap maker"))
+                .into_inner();
                 let resource: Arc<LockedResource<T>> = Arc::new(LockedResource::new(new.await));
                 self.add(resource.clone()).await;
                 resource
@@ -90,20 +99,20 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
         *available.last_accessed.lock().await = Instant::now();
 
         available.data.clone()
-
     }
 
     // Remove one unavailable resource if it has been unavailable for more than 2 minutes
     async fn remove_unavailable(&self) {
-        let mut resources_lock: tokio::sync::MutexGuard<'_, Vec<Arc<LockedResource<T>>>> = self.resources.lock().await;
+        let mut resources_lock: tokio::sync::MutexGuard<'_, Vec<Arc<LockedResource<T>>>> =
+            self.resources.lock().await;
 
         let mut to_remove = None;
         for (i, resource) in resources_lock.iter().enumerate() {
             let _ = resource.data.try_lock();
             let locked = resource.data.try_lock().is_err();
-            if resource.last_accessed.lock().await.elapsed() > Duration::from_secs(120)  && locked{
+            if resource.last_accessed.lock().await.elapsed() > Duration::from_secs(120) && locked {
                 to_remove = Some(i);
-                break
+                break;
             }
         }
         match to_remove {
@@ -111,7 +120,7 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
             Some(to_remove) => {
                 let resources = &mut *resources_lock;
                 resources.swap_remove(to_remove);
-            },
+            }
         }
     }
 
@@ -119,9 +128,8 @@ impl <T> ResourceManager<T> where T: Send + Sync + 'static, Self: Sized {
         let mut resources = self.resources.lock().await;
         resources.push(resource);
     }
-
 }
 
-impl <T: 'static + Send + Sync> serenity::prelude::TypeMapKey for ResourceManager<T> {
+impl<T: 'static + Send + Sync> serenity::prelude::TypeMapKey for ResourceManager<T> {
     type Value = ResourceManager<T>;
 }

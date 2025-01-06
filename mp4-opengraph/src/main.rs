@@ -18,7 +18,10 @@ struct PostQuery {
     redirect: String,
 }
 
-async fn handle(req: Request<hyper::body::Incoming>, base_html: Arc<String>) -> Result<Response<Full<Bytes>>, Error> {
+async fn handle(
+    req: Request<hyper::body::Incoming>,
+    base_html: Arc<String>,
+) -> Result<Response<Full<Bytes>>, Error> {
     let uri = req.uri().to_string();
     if !uri.starts_with("/render") {
         return Ok(Response::new(Full::new(Bytes::from("Invalid URL"))));
@@ -26,16 +29,21 @@ async fn handle(req: Request<hyper::body::Incoming>, base_html: Arc<String>) -> 
 
     println!("Request: {}", uri);
 
-    let url = url::Url::parse(
-        &format!("https://r-slash.b-cdn.net{}", uri)
-    ).context("Converting into URL")?;
+    let url =
+        url::Url::parse(&format!("https://cdn.rsla.sh{}", uri)).context("Converting into URL")?;
     let params: PostQuery = serde_qs::from_str(url.query().unwrap_or("Invalid params"))?;
 
-    let video = url.path().split("/render").collect::<Vec<&str>>().get(1)
-        .ok_or(anyhow!("Couldn't parse url"))?.split("?").next()
+    let video = url
+        .path()
+        .split("/render")
+        .collect::<Vec<&str>>()
+        .get(1)
+        .ok_or(anyhow!("Couldn't parse url"))?
+        .split("?")
+        .next()
         .ok_or(anyhow!("Couldn't remove query from url"))?;
 
-    let video = format!("https://r-slash.b-cdn.net/gifs{}", video);
+    let video = format!("https://cdn.rsla.sh/gifs{}", video);
 
     let mut html: String = base_html.to_string();
     html = html.replace("REPLACE_TITLE", &params.title);

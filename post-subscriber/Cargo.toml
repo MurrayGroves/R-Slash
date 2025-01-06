@@ -7,20 +7,42 @@ edition = "2021"
 
 [dependencies]
 serenity = "0.12"
-redis = "0.24"
-tokio = {version="1.36", features = ["rt-multi-thread"]}
+redis = { version = "*", features = ["aio", "tokio-comp"] }
+tokio = { version = "1.36", features = ["rt-multi-thread"] }
 env_logger = "0.11"
 log = "*"
-posthog = {path = "../posthog"}
+posthog = { path = "../posthog" }
 mongodb = "*"
-tarpc = {version="*", features = ["serde-transport", "tcp", "serde-transport-bincode"]}
+tarpc = { version = "*", features = [
+    "serde-transport",
+    "tcp",
+    "serde-transport-bincode",
+] }
 anyhow = "*"
 futures = "*"
 serde_derive = "*"
 serde = "*"
 chrono = "*"
 
-post_api = {path = "../post-api"}
+sentry = { version = "0.34", features = [
+    "tracing",
+    "anyhow",
+    "debug-images",
+    "tokio",
+] }
+
+tracing = "*"
+
+post_api = { path = "../post-api" }
+rslash_types = { path = "../rslash_types" }
+
+tracing-subscriber = "0.3.18"
+tracing-opentelemetry = "*"
+opentelemetry-otlp = "*"
+tonic = "*"
+opentelemetry = "0.26.0"
+opentelemetry_sdk = { version = "0.26.0", features = ["rt-tokio"] }
+opentelemetry-semantic-conventions = "*"
 
 [lib]
 name = "post_subscriber"

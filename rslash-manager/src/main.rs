@@ -372,6 +372,26 @@ impl EventHandler for Handler {
                             "The search to use when getting posts",
                         )),
                     )
+                    .add_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::SubCommand,
+                            "custom",
+                            "Setup an autopost for a custom subreddit in this channel",
+                        )
+                        .add_sub_option(
+                            CreateCommandOption::new(
+                                CommandOptionType::String,
+                                "subreddit",
+                                "The search to use when getting posts",
+                            )
+                            .required(true),
+                        )
+                        .add_sub_option(CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "search",
+                            "The search to use when getting posts",
+                        )),
+                    )
                     .add_option(CreateCommandOption::new(
                         CommandOptionType::SubCommand,
                         "stop",

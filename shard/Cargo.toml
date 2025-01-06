@@ -6,49 +6,83 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serde = {version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-futures = { version = "0.3"}
+futures = { version = "0.3" }
 log = "0.4"
 env_logger = "*"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time", "full"]}
-reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"]}
-serenity = { version = "0.12", default-features = false, features = ["cache", "client", "gateway", "rustls_backend", "model", "unstable_discord_api", "builder", "http"] }
-redis = { version = "*", features = ["aio", "tokio-comp", "connection-manager"] }
-rand = { version = "*", features = ["alloc"]}
+futures-util = { version = "0.3", default-features = false, features = [
+    "sink",
+    "std",
+] }
+tokio = { version = "*", features = [
+    "macros",
+    "sync",
+    "rt-multi-thread",
+    "time",
+    "full",
+] }
+reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"] }
+serenity = { version = "0.12", default-features = false, features = [
+    "cache",
+    "client",
+    "gateway",
+    "rustls_backend",
+    "model",
+    "unstable_discord_api",
+    "builder",
+    "http",
+] }
+redis = { version = "*", features = [
+    "aio",
+    "tokio-comp",
+    "connection-manager",
+] }
+rand = { version = "*", features = ["alloc"] }
 mongodb = "2.3"
 serde_derive = "1.0"
 pretty_env_logger = "*"
 anyhow = { version = "*", features = ["backtrace"] }
-sentry = { version = "0.29.3", features = ["tracing", "anyhow", "debug-images"] }
+sentry = { version = "0.34", features = [
+    "tracing",
+    "anyhow",
+    "debug-images",
+    "tokio",
+] }
 tracing = "*"
-tracing-subscriber = { version = "*"}
+tracing-subscriber = { version = "*" }
+tracing-opentelemetry = "*"
+opentelemetry-otlp = "*"
+tonic = "*"
+opentelemetry = "0.26.0"
+opentelemetry_sdk = { version = "0.26.0", features = ["rt-tokio"] }
+opentelemetry-semantic-conventions = "*"
+
+
 compile-time = "*"
 chrono = "*"
 async-recursion = "*"
 url = "*"
-tarpc = {version="*", features = ["serde-transport", "tcp", "serde-transport-bincode"]}
+tarpc = { version = "*", features = [
+    "serde-transport",
+    "tcp",
+    "serde-transport-bincode",
+] }
 stubborn-io = "*"
 sentry-anyhow = "*"
+sentry-backtrace = "*"
 pretty-duration = "*"
+lazy_static = "*"
 
-posthog = {path = "../posthog"}
-memberships = {path = "../memberships"}
-rslash_types = {path = "../rslash_types"}
-connection_pooler = {path = "../connection-pooler"}
-post_api = {path = "../post-api"}
-post_subscriber = {path = "../post-subscriber"}
-auto_poster = {path = "../auto-poster"}
+posthog = { path = "../posthog" }
+memberships = { path = "../memberships" }
+rslash_types = { path = "../rslash_types" }
+post_api = { path = "../post-api" }
+post_subscriber = { path = "../post-subscriber" }
+auto_poster = { path = "../auto-poster" }
 
-[patch.crates-io]
-serenity = { path = "../../serenity" }
 
 [[bin]]
 name = "discord-shard"
 path = "src/main.rs"
 
-[profile.release]
-debug = 0
-split-debuginfo = "packed"
-lto = "thin"
