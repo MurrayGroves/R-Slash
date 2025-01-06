@@ -61,12 +61,7 @@ impl Eq for UnsafeMemory {}
 impl Ord for UnsafeMemory {
 	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
 		return unsafe {
-			let to_ret = (&*(self.0.get())).cmp(&*(other.0.get()));
-			println!(
-				"UnsafeMemory Comparing {:?} and {:?} got {:?}",
-				self, other, to_ret
-			);
-			to_ret
+			(&*(self.0.get())).cmp(&*(other.0.get()))
 		};
 	}
 }

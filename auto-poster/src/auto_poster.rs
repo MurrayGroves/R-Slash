@@ -61,7 +61,6 @@ impl From<PostMemoryIntermediate> for PostMemory {
 
 impl From<PostMemory> for PostMemoryIntermediate {
 	fn from(value: PostMemory) -> Self {
-		println!("Converting postmemory");
 		Self {
 			channel: value.channel.get(),
 			subreddit: value.subreddit,
@@ -99,13 +98,14 @@ impl Eq for PostMemory {}
 impl Hash for PostMemory {
 	fn hash<H: Hasher>(&self, state: &mut H) {
 		self.id.hash(state);
+		self.next_post.hash(state);
+		self.current.hash(state);
 	}
 }
 
 impl Ord for PostMemory {
 	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
 		let to_ret = self.next_post.cmp(&other.next_post).reverse();
-		println!("Comparing {:?} and {:?} - {:?}", self, other, to_ret);
 		to_ret
 	}
 }
