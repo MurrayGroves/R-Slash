@@ -1,0 +1,16 @@
+on: 
+  push:
+    branches:
+      - 'main'
+
+jobs:
+  send-to-discord:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send to Discord
+        uses: fjogeleit/http-request-action@v1
+        with:
+          url: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          method: POST
+          data: '{"content": "**New Update:**\n ${{ github.event.head_commit.message }}"}'
+          customHeaders: '{"Content-Type": "application/json"}'
