@@ -69,3 +69,7 @@ auto-poster/build/
 *.patch
 
 **/build/
+
+website/.svelte-kit/
+
+scripts/to_delete.json
