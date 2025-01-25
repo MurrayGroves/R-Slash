@@ -73,3 +73,5 @@ auto-poster/build/
 website/.svelte-kit/
 
 scripts/to_delete.json
+
+r-slash.code-workspace
