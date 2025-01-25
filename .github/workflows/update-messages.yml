@@ -14,3 +14,4 @@ jobs:
           method: POST
           data: '{"content": "**New Update:**\n ${{ github.event.head_commit.message }}"}'
           customHeaders: '{"Content-Type": "application/json"}'
+          escapeData: true
