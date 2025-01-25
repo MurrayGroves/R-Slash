@@ -1,12 +1,16 @@
 <script>
 
-	import { Bot } from '$lib/types';
+	import { Bot, botShorthand } from '$lib/types';
+
+	import { PUBLIC_HOST } from '$env/static/public';
 
 	import BootyBotLogo from '$lib/assets/bootybot.png?enhanced';
 	import RSlashLogo from '$lib/assets/rslash.png?enhanced';
 
 	import { fly } from 'svelte/transition';
-
+	import { Button } from 'flowbite-svelte';
+	import { UserManager } from 'oidc-client-ts';
+	import { onMount } from 'svelte';
 
 	let { data } = $props();
 
@@ -19,6 +23,36 @@
 	setInterval(() => {
 		currentSubreddit = currentSubreddit === subreddits.length - 1 ? 0 : currentSubreddit + 1;
 	}, 1500);
+
+	let userManager = new UserManager({
+		authority: 'https://discord.com/oauth2/authorize',
+		client_id: data.bot === Bot.BB ? '278550142356029441' : '282921751141285888',
+		redirect_uri: `${PUBLIC_HOST}/${botShorthand(data.bot)}`,
+		response_type: 'code',
+		scope: 'identify email',
+		post_logout_redirect_uri: `${PUBLIC_HOST}/${botShorthand(data.bot)}`,
+		metadata: {
+			issuer: 'https://discord.com',
+			authorization_endpoint: 'https://discord.com/oauth2/authorize',
+			token_endpoint: 'https://discord.com/api/oauth2/token',
+			userinfo_endpoint: 'https://discord.com/api/users/@me',
+			end_session_endpoint: 'https://discord.com/api/oauth2/token/revoke'
+		}
+	});
+
+	let user = null;
+
+	onMount(async () => {
+		user = await userManager.getUser();
+		if (!user) {
+			if (window.location.search.includes('code')) {
+				user = await userManager.signinCallback(window.location.toString());
+				window.location.href = `${PUBLIC_HOST}/${botShorthand(data.bot)}`;
+			}
+		}
+
+		console.log('User', user);
+	});
 </script>
 
 <div class="bg-slate-800 min-h-screen text-gray-200">
@@ -28,9 +62,11 @@
 			<h1 class="my-auto text-2xl md:text-4xl">
 				{data.bot}
 			</h1>
-			<div class="ml-auto mr-3 md:mr-[15em] my-auto bg-[#5865F2] p-2.5 rounded-md">
-				<p>Login with Discord</p>
-			</div>
+			<Button class="ml-auto mr-3 md:mr-[15em] my-auto bg-[#5865F2] p-2.5 rounded-md" on:click={() => {
+				userManager.signinRedirect();
+			}}>
+				Login with Discord
+			</Button>
 		</div>
 	</div>
 
