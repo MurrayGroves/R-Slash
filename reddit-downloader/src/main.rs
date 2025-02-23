@@ -221,7 +221,7 @@ async fn get_access_token(
 			let access_token = token_results.0;
 			let expires_at = token_results.1;
 
-			con.hset(
+			let _:() = con.hset(
 				"reddit_tokens",
 				token_name.clone(),
 				format!("{},{}", access_token, expires_at),
@@ -251,7 +251,7 @@ async fn get_access_token(
 		access_token = token_results.0;
 		let expires_at = token_results.1;
 
-		con.hset(
+		let _:() = con.hset(
 			"reddit_tokens",
 			token_name,
 			format!("{},{}", access_token, expires_at),
@@ -1159,9 +1159,9 @@ async fn download_loop<'a>(
 			// If we've fetched all the pages, remove the subreddit from the list
 			if subreddit_state.pages_left == 0 && !subreddit_state.always_fetch {
 				subreddits.remove(&subreddit);
-				con.set(&subreddit, get_epoch_ms()?).await?;
+				let _:() = con.set(&subreddit, get_epoch_ms()?).await?;
 				info!("Got custom subreddit: {:?}", &subreddit);
-				con.lrem("custom_subreddits_queue", 0, &subreddit).await?;
+				let _:() = con.lrem("custom_subreddits_queue", 0, &subreddit).await?;
 			} else if subreddit_state.pages_left == 0 {
 				subreddit_state.pages_left = 10;
 				subreddit_state.fetched_up_to = None;
