@@ -44,7 +44,7 @@ mod downloaders;
 lazy_static! {
     static ref MULTI_LOCK: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     static ref REDDIT_LIMITER: downloaders::client::Limiter =
-        downloaders::client::Limiter::new(Some(100));
+        downloaders::client::Limiter::new(Some(80));
 }
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
@@ -1059,6 +1059,8 @@ async fn download_loop<'a>(
 				sentry::capture_message(&txt, sentry::Level::Error);
 			}
 		}
+
+		debug!("Subreddits: {:?}", subreddits);
 
 		let mut next_subreddit = None;
 
