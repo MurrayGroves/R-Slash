@@ -1174,43 +1174,6 @@ async fn download_loop<'a>(
 
 #[tokio::main]
 async fn main() {
-	let tracer_provider = opentelemetry_otlp::new_pipeline()
-		.tracing()
-		.with_exporter(
-			opentelemetry_otlp::new_exporter()
-				.tonic()
-				.with_endpoint("http://100.67.30.19:4317")
-		)
-		.with_trace_config(
-			trace::config().with_resource(opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
-				opentelemetry_semantic_conventions::resource::SERVICE_NAME,
-				"reddit_downloader".to_string(),
-			)])),
-		)
-		.install_batch(opentelemetry_sdk::runtime::Tokio).unwrap();
-	let tracer = tracer_provider.tracer("reddit_downloader");
-
-	let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-	tracing_subscriber::Registry::default()
-		.with(console_subscriber::spawn())
-		.with(telemetry.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-			span_filter!(meta, cx);
-		})))
-		.with(sentry::integrations::tracing::layer().with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-			span_filter!(meta, cx);
-		})))
-		.with(
-			tracing_subscriber::fmt::layer()
-				.compact()
-				.with_ansi(false)
-				.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-					span_filter!(meta, cx);
-				}))
-		)
-		.init();
-
-	println!("Initialised tracing!");
-
 	let _guard = sentry::init((
 		"https://75873f85a862465795299365b603fbb5@us.sentry.io/4504774760660992",
 		sentry::ClientOptions {
