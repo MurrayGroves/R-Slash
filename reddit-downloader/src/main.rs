@@ -355,6 +355,12 @@ impl FromRedisValue for Post {
 	}
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum SubredditExists {
+	Exists,
+	DoesntExist,
+}
+
 /// Get the top 1000 most recent media posts and store them in the DB
 /// Returns the ID of the last post processed, or None if there were no posts.
 ///
@@ -391,7 +397,7 @@ async fn get_subreddit(
 	pages: Option<u8>,
 	downloaders_client: downloaders::client::Client,
 	subscriber: SubscriberClient,
-) -> Result<Option<String>, anyhow::Error> {
+) -> Result<(SubredditExists, Option<String>), anyhow::Error> {
 	debug!(
         "Fetching subreddit: {}, after: {:?}",
         subreddit, after
@@ -399,7 +405,7 @@ async fn get_subreddit(
 
 	if !downloaders_client.is_finished(&subreddit).await {
 		debug!("Previous iteration not finished processing, skipping for now");
-		return Ok(after);
+		return Ok((SubredditExists::Exists,after));
 	}
 
 	let access_token = get_access_token(
@@ -482,7 +488,7 @@ async fn get_subreddit(
 				let txt = format!("Failed to get text from reddit: {}", x);
 				warn!("{}", txt);
 				sentry::capture_message(&txt, sentry::Level::Warning);
-				return Ok(after);
+				return Ok((SubredditExists::Exists, after));
 			}
 		};
 
@@ -495,7 +501,7 @@ async fn get_subreddit(
 				let txt = format!("Failed to parse JSON from Reddit: {}", text);
 				warn!("{}", txt);
 				sentry::capture_message(&txt, sentry::Level::Warning);
-				return Ok(after);
+				return Ok((SubredditExists::Exists, after));
 			}
 		};
 
@@ -510,7 +516,7 @@ async fn get_subreddit(
 							let txt = format!("Failed to convert field `children` in reddit response to array: {}", text);
 							warn!("{}", txt);
 							sentry::capture_message(&txt, sentry::Level::Warning);
-							return Ok(after);
+							return Ok((SubredditExists::Exists, after));
 						}
 					},
 					None => {
@@ -520,7 +526,7 @@ async fn get_subreddit(
 						);
 						warn!("{}", txt);
 						sentry::capture_message(&txt, sentry::Level::Warning);
-						return Ok(after);
+						return Ok((SubredditExists::Exists, after));
 					}
 				}
 			}
@@ -528,7 +534,15 @@ async fn get_subreddit(
 				let txt = format!("Failed to get field `data` in reddit response: {}", text);
 				warn!("{}", txt);
 				sentry::capture_message(&txt, sentry::Level::Warning);
-				return Ok(after);
+
+				if let Some(err) =  results.get("error") {
+					if let Some(err_code) = err.as_u64() {
+						if err_code == 404 {
+							return Ok((SubredditExists::DoesntExist, None));
+						}
+					}
+				}
+				return Ok((SubredditExists::Exists, after));
 			}
 		};
 
@@ -746,7 +760,7 @@ async fn get_subreddit(
 		downloaders_client.queue_subreddit_for_processing(&subreddit_name, post_list).await?;
 	}
 
-	Ok(after)
+	Ok((SubredditExists::Exists, after))
 }
 
 // Check if RediSearch index exists
@@ -1029,7 +1043,17 @@ async fn download_loop<'a>(
 			)
 				.await
 			{
-				Ok(x) => x,
+				Ok(x) => {
+					// If the subreddit doesn't exist/isn't accessible, remove it from the list of subreddits to process
+					if x.0 == SubredditExists::DoesntExist {
+						subreddits.remove(&subreddit);
+						let _:() = con.set(&subreddit, get_epoch_ms()?).await?;
+						info!("Got custom subreddit: {:?}", &subreddit);
+						let _:() = con.lrem("custom_subreddits_queue", 0, &subreddit).await?;
+						continue;
+					};
+					x.1
+				}
 				Err(x) => {
 					let txt = format!("Failed to get subreddit: {:?}", x);
 					error!("{}", txt);

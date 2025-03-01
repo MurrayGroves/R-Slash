@@ -356,8 +356,6 @@ impl Client {
 					interval.tick().await;
 					if !self.requests.lock().await.is_empty() {
 						break;
-					} else {
-						trace!("No requests in queue, waiting...");
 					}
 				}
 				let mut requests = self.requests.lock().await;

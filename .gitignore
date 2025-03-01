@@ -75,3 +75,7 @@ website/.svelte-kit/
 scripts/to_delete.json
 
 r-slash.code-workspace
+
+website/.env.development
+
+website/.env.production
