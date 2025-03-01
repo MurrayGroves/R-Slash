@@ -6,6 +6,8 @@ use async_recursion::async_recursion;
 use log::warn;
 use redis::aio::MultiplexedConnection;
 use redis::{from_redis_value, AsyncCommands};
+use reqwest::header;
+use reqwest::header::HeaderMap;
 use serde_json::json;
 use serenity::all::{
     ButtonStyle, ChannelId, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor,
@@ -470,8 +472,11 @@ pub enum SubredditStatus {
 }
 
 pub async fn check_subreddit_valid(subreddit: &str) -> Result<SubredditStatus, Error> {
+	let mut default_headers = HeaderMap::new();
+	default_headers.insert(header::COOKIE, header::HeaderValue::from_static("_options={%22pref_gated_sr_optin%22:true}"));
     let web_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+		.default_headers(default_headers)
         .user_agent(format!(
             "Discord:RSlash:{} (by /u/murrax2)",
             env!("CARGO_PKG_VERSION")

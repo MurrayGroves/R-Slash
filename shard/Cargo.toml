@@ -50,13 +50,13 @@ sentry = { version = "0.34", features = [
     "tokio",
 ] }
 tracing = "*"
-tracing-subscriber = { version = "*" }
+tracing-subscriber = { version = "*", features = ["env-filter"]}
 tracing-opentelemetry = "*"
-opentelemetry-otlp = "*"
+opentelemetry-otlp = {version="*", features = ["tonic", "grpc-tonic"]}
 tonic = "*"
-opentelemetry = "0.26.0"
-opentelemetry_sdk = { version = "0.26.0", features = ["rt-tokio"] }
-opentelemetry-semantic-conventions = "*"
+opentelemetry = "0.28.0"
+opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
+opentelemetry-appender-tracing = "*"
 
 
 compile-time = "*"

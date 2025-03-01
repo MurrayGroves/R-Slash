@@ -13,9 +13,7 @@ use tarpc::tokio_serde::formats::Bincode;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{instrument, Metadata};
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::{
-	prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, Layer,
-};
+use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 use rslash_types::{span_filter, InteractionResponseMessage, ResponseFallbackMethod};
 use std::collections::HashMap;
@@ -49,9 +47,10 @@ use serenity::model::application::{CommandInteraction, Interaction};
 use serenity::model::guild::{Guild, UnavailableGuild};
 
 use anyhow::anyhow;
+use opentelemetry::{global, KeyValue};
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::trace;
+use opentelemetry_sdk::{logs, trace};
 use sentry_anyhow::capture_anyhow;
 use tonic::metadata::MetadataMap;
 
@@ -872,6 +871,41 @@ where
 	}
 }
 
+fn init_tracer_provider(shard_id: u32, application_id: u64) -> Result<trace::SdkTracerProvider, opentelemetry::trace::TraceError> {
+	let exporter = opentelemetry_otlp::SpanExporter::builder()
+		.with_tonic()
+		.with_endpoint("http://100.67.30.19:4317")
+		.build()?;
+
+	Ok(trace::SdkTracerProvider::builder()
+		.with_batch_exporter(exporter)
+		.with_resource(
+			opentelemetry_sdk::Resource::builder()
+				.with_service_name("discord-shard")
+				.with_attributes(vec![KeyValue::new("shard", shard_id.to_string()), KeyValue::new("application_id", application_id.to_string())])
+				.build(),
+		)
+		.build())
+}
+
+fn init_logging_provider(shard_id: u32, application_id: u64) -> Result<logs::SdkLoggerProvider, opentelemetry_sdk::logs::LogError> {
+	let exporter = opentelemetry_otlp::LogExporter::builder()
+		.with_tonic()
+		.with_endpoint("http://100.67.30.19:4317")
+		.build()?;
+
+	Ok(logs::SdkLoggerProvider::builder()
+		.with_batch_exporter(exporter)
+		.with_resource(
+			opentelemetry_sdk::Resource::builder()
+				.with_service_name("discord-shard")
+				.with_attributes(vec![KeyValue::new("shard", shard_id.to_string()), KeyValue::new("application_id", application_id.to_string())])
+				.build(),
+		)
+		.build())
+}
+
+
 fn main() {
 	let application_id: u64 = env::var("DISCORD_APPLICATION_ID")
 		.expect("DISCORD_APPLICATION_ID not set")
@@ -919,9 +953,35 @@ fn main() {
 		.unwrap()
 		.block_on(async {
 			println!("Starting up...");
-			
+
+			let tracing_provider = init_tracer_provider(shard_id, application_id).expect("Failed to create tracing provider");
+			let logging_provider = init_logging_provider(shard_id, application_id).expect("Failed to create logging provider");
+
+			let tracer = tracing_provider.tracer("discord-shard");
+			global::set_tracer_provider(tracing_provider.clone());
+			let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+
+			let filter_otel = EnvFilter::new("trace")
+				.add_directive("hyper=off".parse().unwrap())
+				.add_directive("opentelemetry=off".parse().unwrap())
+				.add_directive("tonic=off".parse().unwrap())
+				.add_directive("h2=off".parse().unwrap())
+				.add_directive("tarpc=off".parse().unwrap())
+				.add_directive("redis=off".parse().unwrap())
+				.add_directive("mongodb=off".parse().unwrap())
+				.add_directive("tower=off".parse().unwrap())
+				.add_directive("runtime=off".parse().unwrap())
+				.add_directive("tokio=off".parse().unwrap())
+				.add_directive("serenity=off".parse().unwrap())
+				.add_directive("tungstenite=off".parse().unwrap())
+				.add_directive("reqwest=off".parse().unwrap());
+
+			let otel_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logging_provider).with_filter(filter_otel);
 
 			tracing_subscriber::Registry::default()
+				.with(telemetry.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+					span_filter!(meta, cx);
+				}))) // Tracing layer
 				.with(
 					tracing_subscriber::fmt::layer()
 						.compact()
@@ -930,12 +990,15 @@ fn main() {
 						.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
 							span_filter!(meta, cx);
 						})),
-				)
+				) // STDOUT Layer
+				.with(otel_layer.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+					span_filter!(meta, cx);
+				}))) // Logging Layer
 				.with(sentry::integrations::tracing::layer()
 					.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
 						span_filter!(meta, cx);
 					}))
-				)
+				) // Sentry Layer
 				.init();
 
 			trace!("TRACE");

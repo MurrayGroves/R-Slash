@@ -38,6 +38,7 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::logs::LogError;
 use opentelemetry_sdk::{logs, trace};
+use reqwest::header;
 use serde_json::Value::Null;
 
 use tarpc::{client, context, serde_transport::Transport};
@@ -805,9 +806,12 @@ async fn download_loop<'a>(
 		.await
 		.expect("Can't connect to redis");
 
+	let mut default_headers = HeaderMap::new();
+	default_headers.insert(header::COOKIE, header::HeaderValue::from_static("_options={%22pref_gated_sr_optin%22:true}"));
 	let web_client = reqwest::Client::builder()
 		.timeout(Duration::from_secs(60))
 		.user_agent("Discord:RSlash:v1.0.1 (by /u/murrax2)")
+		.default_headers(default_headers)
 		.build()
 		.expect("Failed to build client");
 
