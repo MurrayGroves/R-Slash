@@ -149,9 +149,16 @@ impl Limiter {
 				state.reset = reset.to_str()?.parse()?;
 			} else {
 				if status == StatusCode::TOO_MANY_REQUESTS {
-					// Wait 10 minutes if we hit the rate limit and they didn't tell us when to try again
-					state.reset = chrono::Utc::now().timestamp() + 600;
+					// Wait 1 minute if we hit the rate limit and they didn't tell us when to try again
+					state.reset = chrono::Utc::now().timestamp() + 60;
 					state.remaining = 0;
+				}
+
+				if let Some(remaining) = headers.get("x-ratelimit-remaining") {
+					state.remaining = remaining.to_str()?.split(".").nth(0).ok_or(Error::msg("Failed to parse rate limit"))?.parse()?;
+				}
+				if let Some(reset) = headers.get("x-ratelimit-reset") {
+					state.reset = reset.to_str()?.parse()?;
 				}
 			}
 		}
@@ -176,7 +183,7 @@ impl Limiter {
 	#[tracing::instrument(skip(self))]
 	pub async fn wait(&self) {
 		let state = self.state.lock().await;
-		if state.remaining == 0 && state.reset > chrono::Utc::now().timestamp() {
+		if state.remaining < 3 && state.reset > chrono::Utc::now().timestamp() {
 			let wait = state.reset - chrono::Utc::now().timestamp();
 			drop(state);
 			info!("Waiting {} seconds for rate limit", wait);
@@ -532,7 +539,52 @@ impl Client {
                     "File is small enough to convert to GIF ({} KB)",
                     size / 1024
                 );
-				path = self.mp4_to_gif(&path).await.context("Processing gif")?;
+
+				// Check if file contains audio streams
+				let output = Command::new("ffprobe")
+					.arg("-i")
+					.arg(format!("{}/{}", self.path, path))
+					.arg("-show_streams")
+					.arg("-select_streams")
+					.arg("a")
+					.arg("-loglevel")
+					.arg("error")
+					.output()?;
+
+				let process_to_gif = if (output.stdout.len() > 10) {
+					debug!("File contains audio streams, checking average volume");
+					let output = Command::new("ffmpeg")
+						.arg("-i")
+						.arg(format!("{}/{}", self.path, path))
+						.arg("-filter:a")
+						.arg("astats")
+						.arg("-f")
+						.arg("null")
+						.arg("/dev/null")
+						.output()?;
+
+					// Find the average volume line
+					let volume = String::from_utf8_lossy(&output.stdout)
+						.lines()
+						.find(|line| line.contains("RMS level dB"))
+						.ok_or(Error::msg("Failed to find mean volume"))?.to_string();
+
+					// Extract the volume from the line
+					let volume = volume
+						.split(":")
+						.nth(1)
+						.ok_or(Error::msg("Failed to extract volume"))?;
+
+					let silent = volume.contains("inf") || volume.parse::<f32>()? < -60.0;
+
+					silent
+				} else {
+					false
+				};
+
+				if process_to_gif {
+					path = self.mp4_to_gif(&path).await.context("Processing gif")?
+				};
 			} else {
 				debug!("File is too large to convert to GIF ({} KB)", size / 1024);
 			}

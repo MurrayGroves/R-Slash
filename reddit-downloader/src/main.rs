@@ -15,10 +15,12 @@ use stubborn_io::{ReconnectOptions, StubbornTcpStream};
 use tarpc::tokio_serde::formats::Bincode;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
+
 use tracing::{debug, error, info, trace, warn};
+use opentelemetry_sdk::trace::{SdkTracerProvider};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{filter, Layer};
+use tracing_subscriber::{filter, EnvFilter, Layer};
 use truncrate::*;
 
 use anyhow::{anyhow, Context};
@@ -31,12 +33,15 @@ use std::env;
 use atomic_counter::RelaxedCounter;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{ClientOptions, FindOptions};
+use opentelemetry::global;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::trace;
+use opentelemetry_sdk::logs::LogError;
+use opentelemetry_sdk::{logs, trace};
 use serde_json::Value::Null;
 
 use tarpc::{client, context, serde_transport::Transport};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 use rslash_types::span_filter;
 
 mod downloaders;
@@ -44,7 +49,7 @@ mod downloaders;
 lazy_static! {
     static ref MULTI_LOCK: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     static ref REDDIT_LIMITER: downloaders::client::Limiter =
-        downloaders::client::Limiter::new(Some(80));
+        downloaders::client::Limiter::new(None);
 }
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
@@ -131,7 +136,6 @@ async fn request_access_token(
 	};
 
 	REDDIT_LIMITER.wait().await;
-	REDDIT_LIMITER.update().await;
 
 	let res = web_client
 		.post("https://www.reddit.com/api/v1/access_token")
@@ -139,6 +143,8 @@ async fn request_access_token(
 		.basic_auth(reddit_client, Some(reddit_secret))
 		.send()
 		.await?;
+
+	REDDIT_LIMITER.update_headers(res.headers(), res.status()).await?;
 
 	let text = match res.text().await {
 		Ok(x) => x,
@@ -459,9 +465,11 @@ async fn get_subreddit(
 		debug!("{:?}", headers);
 
 		REDDIT_LIMITER.wait().await;
-		REDDIT_LIMITER.update().await;
 
 		let res = web_client.get(&url).headers(headers).send().await?;
+
+		REDDIT_LIMITER.update_headers(res.headers(), res.status()).await?;
+
 
 		debug!("Finished request");
 		debug!("Response Headers: {:?}", res.headers());
@@ -850,9 +858,8 @@ async fn download_loop<'a>(
 		let coll = db.collection::<Document>("settings");
 
 		let filter = doc! {"id": "subreddit_list".to_string()};
-		let find_options = FindOptions::builder().build();
 		let mut cursor = coll
-			.find(filter.clone(), find_options.clone())
+			.find(filter.clone())
 			.await?;
 
 		let doc = cursor.try_next().await?.unwrap();
@@ -1052,8 +1059,82 @@ async fn download_loop<'a>(
 	}
 }
 
+fn init_tracer_provider() -> Result<trace::SdkTracerProvider, opentelemetry::trace::TraceError> {
+	let exporter = opentelemetry_otlp::SpanExporter::builder()
+		.with_tonic()
+		.with_endpoint("http://100.67.30.19:4317")
+		.build()?;
+
+	Ok(trace::SdkTracerProvider::builder()
+		.with_batch_exporter(exporter)
+		.with_resource(
+			opentelemetry_sdk::Resource::builder()
+				.with_service_name("reddit-downloader")
+				.build(),
+		)
+		.build())
+}
+
+fn init_logging_provider() -> Result<logs::SdkLoggerProvider, LogError> {
+	let exporter = opentelemetry_otlp::LogExporter::builder()
+		.with_tonic()
+		.with_endpoint("http://100.67.30.19:4317")
+		.build()?;
+
+	Ok(logs::SdkLoggerProvider::builder()
+		.with_batch_exporter(exporter)
+		.with_resource(
+			opentelemetry_sdk::Resource::builder()
+				.with_service_name("reddit-downloader")
+				.build(),
+		)
+		.build())
+}
+
 #[tokio::main]
 async fn main() {
+	let provider = init_tracer_provider().expect("Failed to initialise tracer");
+	let logger_provider = init_logging_provider().expect("Failed to initialise logger");
+
+	let tracer = provider.tracer("reddit-downloader");
+	global::set_tracer_provider(provider.clone());
+	let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+
+	let filter_otel = EnvFilter::new("trace")
+		.add_directive("hyper=off".parse().unwrap())
+		.add_directive("opentelemetry=off".parse().unwrap())
+		.add_directive("tonic=off".parse().unwrap())
+		.add_directive("h2=off".parse().unwrap())
+		.add_directive("tarpc=off".parse().unwrap())
+		.add_directive("redis=off".parse().unwrap())
+		.add_directive("mongodb=off".parse().unwrap())
+		.add_directive("tower=off".parse().unwrap())
+		.add_directive("runtime=off".parse().unwrap())
+		.add_directive("tokio=off".parse().unwrap())
+		.add_directive("reqwest=off".parse().unwrap());
+	let otel_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider).with_filter(filter_otel);
+
+	tracing_subscriber::Registry::default()
+		.with(console_subscriber::spawn())
+		.with(otel_layer)
+		.with(telemetry.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+			span_filter!(meta, cx);
+		})))
+		.with(sentry::integrations::tracing::layer().with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+			span_filter!(meta, cx);
+		})))
+		.with(
+			tracing_subscriber::fmt::layer()
+				.compact()
+				.with_ansi(false)
+				.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+					span_filter!(meta, cx);
+				}))
+		)
+		.init();
+
+	println!("Initialised tracing!");
+
 	let _guard = sentry::init((
 		"https://75873f85a862465795299365b603fbb5@us.sentry.io/4504774760660992",
 		sentry::ClientOptions {

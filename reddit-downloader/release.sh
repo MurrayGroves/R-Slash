@@ -2,7 +2,7 @@ set -e
 source ../secrets.env
 
 RUSTFLAGS="--cfg tokio_unstable" cargo build --release
-docker build -f Dockerfile -t registry.murraygrov.es/reddit-downloader ../target/release
+docker build -f Dockerfile -t registry.murraygrov.es/reddit-downloader --network=host ../target/release
 docker push registry.murraygrov.es/reddit-downloader
 
 sentry-cli --auth-token ${SENTRY_TOKEN} upload-dif --org r-slash --project downloader ../target/release/
