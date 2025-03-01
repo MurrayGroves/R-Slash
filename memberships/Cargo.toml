@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-mongodb = "2.3"
+mongodb = "*"
 tokio = { version = "*", features = [
     "macros",
     "sync",
@@ -29,4 +29,4 @@ sentry = "0.29.3"
 serde_derive = "*"
 serde = "*"
 
-rslash_types = { path = "../rslash_types" }
+rslash_common = { path = "../rslash_common" }

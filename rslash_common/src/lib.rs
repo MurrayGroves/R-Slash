@@ -176,7 +176,7 @@ macro_rules! span_filter {
             "auto_poster",
             "memberships",
             "posthog",
-            "rslash_types",
+            "rslash_common",
         ];
         //const BAD_TARGETS: [&str;2] = ["runtime", "tokio"];
         const BAD_TARGETS: [&str; 4] = ["runtime", "hyper", "tokio", "h2"];
@@ -218,4 +218,84 @@ pub fn error_response(error_title: &str, error_desc: &str) -> InteractionRespons
         ),
         ..Default::default()
     })
+}
+
+#[macro_export]
+macro_rules! initialise_observability {
+	($service_name: literal) => {initialise_observability!($service_name,)};
+    ($service_name:literal, $(($key:literal, $value:ident),)*) => {
+        let trace_exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint("http://100.67.30.19:4317")
+            .build().expect("Failed to create trace exporter");
+
+        let tracing_provider = trace::SdkTracerProvider::builder()
+            .with_batch_exporter(trace_exporter)
+            .with_resource(
+                opentelemetry_sdk::Resource::builder()
+                    .with_service_name($service_name)
+					$(.with_attribute(KeyValue::new($key, $value.to_string())))*
+                    .build(),
+            )
+            .build();
+
+		let log_exporter = opentelemetry_otlp::LogExporter::builder()
+			.with_tonic()
+			.with_endpoint("http://100.67.30.19:4317")
+			.build().expect("Failed to create log exporter");
+
+		let logging_provider = logs::SdkLoggerProvider::builder()
+			.with_batch_exporter(log_exporter)
+			.with_resource(
+				opentelemetry_sdk::Resource::builder()
+					.with_service_name($service_name)
+					$(.with_attribute(KeyValue::new($key, $value.to_string())))*
+					.build(),
+			)
+			.build();
+
+		let tracer = opentelemetry::trace::TracerProvider::tracer(&tracing_provider, $service_name);
+		global::set_tracer_provider(tracing_provider.clone());
+		let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+
+		let filter_otel = EnvFilter::new("trace")
+			.add_directive("hyper=off".parse().unwrap())
+			.add_directive("opentelemetry=off".parse().unwrap())
+			.add_directive("tonic=off".parse().unwrap())
+			.add_directive("h2=off".parse().unwrap())
+			.add_directive("tarpc=off".parse().unwrap())
+			.add_directive("redis=off".parse().unwrap())
+			.add_directive("mongodb=off".parse().unwrap())
+			.add_directive("tower=off".parse().unwrap())
+			.add_directive("runtime=off".parse().unwrap())
+			.add_directive("tokio=off".parse().unwrap())
+			.add_directive("serenity=off".parse().unwrap())
+			.add_directive("tungstenite=off".parse().unwrap())
+			.add_directive("reqwest=off".parse().unwrap());
+
+		let otel_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logging_provider).with_filter(filter_otel);
+
+		tracing_subscriber::Registry::default()
+			.with(telemetry.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+				span_filter!(meta, cx);
+			}))) // Tracing layer
+			.with(
+				tracing_subscriber::fmt::layer()
+					.compact()
+					.with_ansi(false)
+					.with_filter(tracing_subscriber::filter::LevelFilter::DEBUG)
+					.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+						span_filter!(meta, cx);
+					})),
+			) // STDOUT Layer
+			.with(otel_layer.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+				span_filter!(meta, cx);
+			}))) // Logging Layer
+			.with(sentry::integrations::tracing::layer()
+				.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+					span_filter!(meta, cx);
+				}))
+			) // Sentry Layer
+			.init();
+    };
 }

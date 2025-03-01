@@ -36,12 +36,20 @@ sentry = { version = "0.34", features = [
     "debug-images",
     "tokio",
 ] }
+
 tracing = "*"
-tracing-subscriber = { version = "*" }
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+tracing-opentelemetry = "*"
+opentelemetry-otlp = { version = "*", features = ["tonic", "grpc-tonic"] }
+tonic = "*"
+opentelemetry = "0.28.0"
+opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
+opentelemetry-appender-tracing = "*"
+
+
 
 post_api = { path = "../post-api" }
-rslash_types = { path = "../rslash_types" }
-
+rslash_common = { path = "../rslash_common" }
 
 #[patch.crates-io]
 #serenity = { path = "../../serenity" }

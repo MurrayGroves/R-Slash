@@ -15,7 +15,7 @@ use serenity::all::{
 use tokio::time::sleep;
 use tracing::{debug, error, error_span, instrument};
 
-use rslash_types::{InteractionResponse, InteractionResponseMessage, ResponseFallbackMethod};
+use rslash_common::{InteractionResponse, InteractionResponseMessage, ResponseFallbackMethod};
 
 /// Returns current milliseconds since the Epoch
 fn get_epoch_ms() -> u64 {
@@ -472,11 +472,14 @@ pub enum SubredditStatus {
 }
 
 pub async fn check_subreddit_valid(subreddit: &str) -> Result<SubredditStatus, Error> {
-	let mut default_headers = HeaderMap::new();
-	default_headers.insert(header::COOKIE, header::HeaderValue::from_static("_options={%22pref_gated_sr_optin%22:true}"));
+    let mut default_headers = HeaderMap::new();
+    default_headers.insert(
+        header::COOKIE,
+        header::HeaderValue::from_static("_options={%22pref_gated_sr_optin%22:true}"),
+    );
     let web_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-		.default_headers(default_headers)
+        .default_headers(default_headers)
         .user_agent(format!(
             "Discord:RSlash:{} (by /u/murrax2)",
             env!("CARGO_PKG_VERSION")
@@ -508,7 +511,8 @@ pub async fn queue_subreddit(
 
         if !already_queued {
             debug!("Queueing subreddit for download");
-            con.rpush::<_, _, ()>("custom_subreddits_queue", &subreddit).await?;
+            con.rpush::<_, _, ()>("custom_subreddits_queue", &subreddit)
+                .await?;
 
             let selector = if bot == 278550142356029441 {
                 "nsfw"
@@ -552,7 +556,8 @@ pub async fn queue_subreddit(
         debug!("Subreddit last cached more than an hour ago, updating...");
         // Tell downloader to update the subreddit, but use outdated posts for now.
         if !already_queued {
-            con.rpush::<_, _, ()>("custom_subreddits_queue", &subreddit).await?;
+            con.rpush::<_, _, ()>("custom_subreddits_queue", &subreddit)
+                .await?;
         }
     }
 

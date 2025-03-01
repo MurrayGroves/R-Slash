@@ -4,12 +4,11 @@ use log::*;
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 
-use rslash_types::ConfigStruct;
+use rslash_common::ConfigStruct;
 use serenity::all::UserId;
 use serenity::futures::TryStreamExt;
 
 use serde_derive::{Deserialize, Serialize};
-
 
 #[cfg(test)]
 mod tests {
@@ -63,21 +62,14 @@ pub async fn get_user_tiers<'a>(
     let coll = db.collection::<Document>("users");
 
     let filter = doc! {"discord_id": user};
-    let find_options = FindOptions::builder().build();
-    let mut cursor = coll
-        .find(filter.clone(), find_options.clone())
-        .await
-        .unwrap();
+    let mut cursor = coll.find(filter.clone()).await.unwrap();
 
-    let doc = match cursor.try_next().await.unwrap() {
-        Some(doc) => doc, // If user information exists, return it
-        None => {
-            // If user information doesn't exist, return a document that indicates no active memberships.
-            doc! {
+    let doc = cursor.try_next().await.unwrap().unwrap_or_else(|| {
+		// If user information doesn't exist, return a document that indicates no active memberships.
+		doc! {
                 "active": []
             }
-        }
-    };
+	});
 
     debug!("User document: {:?}", doc);
 

@@ -209,10 +209,14 @@ dependencies = [
  "integer-hasher",
  "log",
  "mongodb 3.2.1",
+ "opentelemetry 0.28.0",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk 0.28.0",
  "post_api",
  "posthog",
  "redis",
- "rslash_types",
+ "rslash_common",
  "sentry 0.34.0",
  "serde",
  "serde_derive",
@@ -222,7 +226,9 @@ dependencies = [
  "tarpc",
  "timer",
  "tokio",
+ "tonic",
  "tracing",
+ "tracing-opentelemetry 0.29.0",
  "tracing-subscriber",
 ]
 
@@ -996,7 +1002,7 @@ dependencies = [
  "lazy_static",
  "log",
  "memberships",
- "mongodb 2.8.2",
+ "mongodb 3.2.1",
  "opentelemetry 0.28.0",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -1009,7 +1015,7 @@ dependencies = [
  "rand 0.9.0",
  "redis",
  "reqwest 0.12.12",
- "rslash_types",
+ "rslash_common",
  "sentry 0.34.0",
  "sentry-anyhow 0.36.0",
  "sentry-backtrace 0.36.0",
@@ -2523,8 +2529,8 @@ name = "memberships"
 version = "0.1.0"
 dependencies = [
  "log",
- "mongodb 2.8.2",
- "rslash_types",
+ "mongodb 3.2.1",
+ "rslash_common",
  "sentry 0.29.3",
  "serde",
  "serde_derive",
@@ -2984,12 +2990,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1cefe0543875379e47eb5f1e68ff83f45cc41366a92dfd0d073d513bf68e9a05"
 
 [[package]]
-name = "opentelemetry-semantic-conventions"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fb3a2f78c2d55362cd6c313b8abedfbc0142ab3c2676822068fd2ab7d51f9b7"
-
-[[package]]
 name = "opentelemetry_sdk"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2999,15 +2999,11 @@ dependencies = [
  "futures-channel",
  "futures-executor",
  "futures-util",
- "glob",
  "once_cell",
  "opentelemetry 0.26.0",
  "percent-encoding",
  "rand 0.8.5",
- "serde_json",
  "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]
@@ -3230,7 +3226,7 @@ dependencies = [
  "rand 0.9.0",
  "redis",
  "reqwest 0.12.12",
- "rslash_types",
+ "rslash_common",
  "sentry 0.29.3",
  "serde",
  "serde_derive",
@@ -3252,21 +3248,20 @@ dependencies = [
  "futures",
  "log",
  "mongodb 3.2.1",
- "opentelemetry 0.26.0",
+ "opentelemetry 0.28.0",
+ "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
- "opentelemetry-semantic-conventions 0.28.0",
- "opentelemetry_sdk 0.26.0",
+ "opentelemetry_sdk 0.28.0",
  "post_api",
  "posthog",
  "redis",
- "rslash_types",
+ "rslash_common",
  "sentry 0.34.0",
  "serde",
  "serde_derive",
  "serenity",
  "tarpc",
  "tokio",
- "tonic",
  "tracing",
  "tracing-opentelemetry 0.29.0",
  "tracing-subscriber",
@@ -3679,20 +3674,18 @@ dependencies = [
  "opentelemetry 0.28.0",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
- "opentelemetry-semantic-conventions 0.28.0",
  "opentelemetry_sdk 0.28.0",
  "ordermap",
  "post_subscriber",
  "posthog",
  "redis",
  "reqwest 0.12.12",
- "rslash_types",
+ "rslash_common",
  "sentry 0.36.0",
  "serde_json",
  "stubborn-io",
  "tarpc",
  "tokio",
- "tonic",
  "tracing",
  "tracing-opentelemetry 0.29.0",
  "tracing-subscriber",
@@ -3904,16 +3897,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "rslash_types"
+name = "rslash_common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "mongodb 2.8.2",
+ "mongodb 3.2.1",
+ "opentelemetry 0.28.0",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk 0.28.0",
  "posthog",
  "redis",
  "serenity",
  "tokio",
- "typemap_rev",
+ "tonic",
+ "tracing",
+ "tracing-opentelemetry 0.29.0",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5106,7 +5106,7 @@ dependencies = [
  "futures",
  "humantime",
  "opentelemetry 0.26.0",
- "opentelemetry-semantic-conventions 0.16.0",
+ "opentelemetry-semantic-conventions",
  "pin-project",
  "rand 0.8.5",
  "serde",

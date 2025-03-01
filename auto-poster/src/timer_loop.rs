@@ -3,7 +3,7 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 use auto_poster::PostMemory;
 use mongodb::bson::{de, doc};
 use post_api::{queue_subreddit, PostApiError, SubredditStatus};
-use rslash_types::{InteractionResponse, InteractionResponseMessage};
+use rslash_common::{InteractionResponse, InteractionResponseMessage};
 use serenity::all::{CreateEmbed, CreateMessage};
 use tokio::{select, time::Instant};
 use tracing::{debug, error, warn};
@@ -26,7 +26,6 @@ async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) 
     };
 
     let mut autoposts = server.autoposts.write().await;
-    autoposts.by_id.remove(&autopost.id);
     match autoposts.by_channel.get_mut(&autopost.channel) {
         Some(x) => {
             x.remove(&*autopost);
@@ -133,7 +132,7 @@ pub async fn timer_loop(
                                         if let Some(x) = e.downcast_ref::<PostApiError>() {
                                             match x {
                                                 PostApiError::NoPostsFound { subreddit } => {
-													rslash_types::error_response(
+													rslash_common::error_response(
 														"No posts found",
 														&format!("Deleted autopost for r/{} because no supported posts were found. For example, they might all be text posts.", subreddit)
 													)
@@ -141,7 +140,7 @@ pub async fn timer_loop(
                                                 }
                                                 _ => {
                                                     error!("Error getting subreddit for auto-post: {:?}", e);
-                                                    rslash_types::error_response(
+                                                    rslash_common::error_response(
 														"Unexpected Error",
 														&format!("Deleted autopost for r/{} due to an unexpected error.", autopost_clone.subreddit)
 													)
@@ -152,7 +151,7 @@ pub async fn timer_loop(
                                                 "Error getting subreddit for auto-post: {:?}",
                                                 e
                                             );
-                                            rslash_types::error_response(
+                                            rslash_common::error_response(
                                                 "Unexpected Error",
                                                 &format!("Deleted autopost for r/{} due to an unexpected error.", autopost_clone.subreddit)
                                             )
@@ -160,7 +159,7 @@ pub async fn timer_loop(
                                     }
                                     SubredditStatus::Invalid(reason) => {
                                         debug!("Subreddit response not 200: {}", reason);
-                                        rslash_types::error_response(
+                                        rslash_common::error_response(
 											"Subreddit Inaccessible",
 											&format!("Deleted autopost for r/{} because it's either private, does not exist, or has been banned.", autopost_clone.subreddit)
 										)
@@ -168,7 +167,7 @@ pub async fn timer_loop(
                                 }
                             }
                         } {
-                            rslash_types::InteractionResponse::Message(message) => message,
+                            rslash_common::InteractionResponse::Message(message) => message,
                             _ => {
                                 warn!("Invalid response from post_api");
                                 InteractionResponseMessage {

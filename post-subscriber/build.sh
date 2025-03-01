@@ -2,7 +2,7 @@ set -e
 source ../secrets.env
 
 cargo build --release
-docker build -t registry.murraygrov.es/post-subscriber -f Dockerfile ../target/release
+docker build -t registry.murraygrov.es/post-subscriber -f Dockerfile --network=host ../target/release
 docker push registry.murraygrov.es/post-subscriber
 
 sentry-cli --auth-token ${SENTRY_TOKEN} upload-dif --org r-slash --project post-subscriber ../target/release/

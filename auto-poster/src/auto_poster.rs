@@ -17,7 +17,7 @@ pub trait AutoPoster {
 		interaction_id: u64,
 	) -> Result<i64, String>;
 
-	async fn delete_autopost(id: i64) -> Result<PostMemory, String>;
+	async fn delete_autopost(id: i64, channel_id: u64) -> Result<PostMemory, String>;
 
 	async fn list_autoposts(channel: u64, bot: u64) -> Result<Vec<PostMemory>, String>;
 

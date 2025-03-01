@@ -1,0 +1,23 @@
+[package]
+name = "rslash_common"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "*"
+mongodb = "*"
+posthog = { path = "../posthog" }
+serenity = "*"
+redis = { version = "*", features = ["aio", "tokio-comp"] }
+tokio = "*"
+
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+tracing-opentelemetry = "*"
+opentelemetry-otlp = { version = "*", features = ["tonic", "grpc-tonic"] }
+tonic = "*"
+opentelemetry = "0.28.0"
+opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
+opentelemetry-appender-tracing = "*"

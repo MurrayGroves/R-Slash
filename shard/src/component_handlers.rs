@@ -1,16 +1,16 @@
 use std::{collections::HashMap, time::Duration};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use auto_poster::AutoPosterClient;
 use post_api::{get_subreddit, get_subreddit_search};
 use post_subscriber::{Bot, SubscriberClient};
-use rslash_types::{ConfigStruct, InteractionResponse, InteractionResponseMessage};
+use rslash_common::{ConfigStruct, InteractionResponse, InteractionResponseMessage};
 use serenity::all::{ComponentInteraction, ComponentInteractionDataKind, Context};
 use tarpc::context;
 use tokio::time::timeout;
 use tracing::{debug, instrument};
 
-use crate::{capture_event, discord::ResponseTracker, NAMESPACE};
+use crate::{NAMESPACE, capture_event, discord::ResponseTracker};
 
 #[instrument(skip(ctx, interaction, tracker))]
 pub async fn unsubscribe<'a>(
@@ -94,7 +94,7 @@ pub async fn autopost_cancel<'a>(
         .get::<AutoPosterClient>()
         .ok_or(anyhow!("Auto-poster client not found"))?;
 
-    let autopost = match client.delete_autopost(context::current(), id).await? {
+    let autopost = match client.delete_autopost(context::current(), id, interaction.channel_id.get()).await? {
         Ok(x) => x,
         Err(e) => {
             bail!(e);

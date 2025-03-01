@@ -41,8 +41,7 @@ sentry = { version = "0.36.0", features = [
 ] }
 
 
-tracing = "*"
-tracing-subscriber = { version = "*" }
+
 log = "*"
 anyhow = { version = "*", features = ["backtrace"] }
 chrono = "*"
@@ -64,14 +63,14 @@ indexmap = "*"
 atomic-counter = "*"
 
 post_subscriber = { path = "../post-subscriber" }
-rslash_types = { path = "../rslash_types" }
+rslash_common = { path = "../rslash_common" }
 
+tracing = "*"
+tracing-subscriber = { version = "*" }
 tracing-opentelemetry = "*"
 opentelemetry-otlp = { version = "*", features = ["tonic", "grpc-tonic"] }
-tonic = "*"
 opentelemetry = "0.28.0"
 opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
-opentelemetry-semantic-conventions = "*"
 opentelemetry-appender-tracing = "*"
 
 

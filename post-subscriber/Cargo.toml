@@ -31,18 +31,17 @@ sentry = { version = "0.34", features = [
     "tokio",
 ] }
 
-tracing = "*"
-
 post_api = { path = "../post-api" }
-rslash_types = { path = "../rslash_types" }
+rslash_common = { path = "../rslash_common" }
 
-tracing-subscriber = "0.3.18"
+tracing = "*"
+tracing-subscriber = { version = "*" }
 tracing-opentelemetry = "*"
-opentelemetry-otlp = "*"
-tonic = "*"
-opentelemetry = "0.26.0"
-opentelemetry_sdk = { version = "0.26.0", features = ["rt-tokio"] }
-opentelemetry-semantic-conventions = "*"
+opentelemetry-otlp = { version = "*", features = ["tonic", "grpc-tonic"] }
+opentelemetry = "0.28.0"
+opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
+opentelemetry-appender-tracing = "*"
+
 
 [lib]
 name = "post_subscriber"

@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use rslash_types::{InteractionResponse, InteractionResponseMessage};
+use rslash_common::{InteractionResponse, InteractionResponseMessage};
 
 use serenity::all::{
     CreateInteractionResponse, CreateInteractionResponseFollowup, CreateModal, Http, Interaction,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use tracing::{debug, instrument};
 
 pub struct ResponseTracker<'a> {

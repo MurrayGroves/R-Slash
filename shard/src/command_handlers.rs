@@ -6,7 +6,7 @@ use serenity::all::{
     CommandDataOptionValue, CreateButton, CreateInputText, CreateModal, CreateSelectMenu,
     CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
 };
-use serenity::model::{guild, Colour};
+use serenity::model::{Colour, guild};
 use tarpc::context;
 use tracing::debug;
 use tracing::instrument;
@@ -20,20 +20,20 @@ use serenity::builder::{CreateActionRow, CreateEmbed, CreateEmbedFooter};
 use serenity::prelude::*;
 
 use redis::{self};
-use redis::{from_redis_value, AsyncCommands};
+use redis::{AsyncCommands, from_redis_value};
 
 use serenity::model::application::CommandInteraction;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 use memberships::*;
 
 use post_api::*;
-use rslash_types::InteractionResponse;
-use rslash_types::{ConfigStruct, InteractionResponseMessage};
+use rslash_common::InteractionResponse;
+use rslash_common::{ConfigStruct, InteractionResponseMessage};
 
 use crate::discord::ResponseTracker;
-use crate::{capture_event, NAMESPACE};
+use crate::{NAMESPACE, capture_event};
 
 // Return error interaction response from current function if bot doesn't have permission to send messages in the channel
 macro_rules! error_if_no_send_message_perm {
