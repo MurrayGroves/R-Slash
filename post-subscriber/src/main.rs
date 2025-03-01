@@ -355,42 +355,6 @@ impl EventHandler for Handler {}
 async fn main() {
 	debug!("Starting...");
 
-	let tracer_provider = opentelemetry_otlp::new_pipeline()
-		.tracing()
-		.with_exporter(
-			opentelemetry_otlp::new_exporter()
-				.tonic()
-				.with_endpoint("http://100.67.30.19:4317")
-		)
-		.with_trace_config(
-			trace::config().with_resource(Resource::new(vec![opentelemetry::KeyValue::new(
-				opentelemetry_semantic_conventions::resource::SERVICE_NAME,
-				"post_subscriber".to_string(),
-			)])),
-		)
-		.install_batch(opentelemetry_sdk::runtime::Tokio).unwrap();
-
-	let tracer = tracer_provider.tracer("post_subscriber");
-
-	let telemetry = tracing_opentelemetry::layer().with_tracer(tracer).with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-		span_filter!(meta, cx);
-	}));
-
-	tracing_subscriber::Registry::default()
-		.with(telemetry)
-		.with(sentry::integrations::tracing::layer().with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-			span_filter!(meta, cx);
-		})))
-		.with(
-			tracing_subscriber::fmt::layer()
-				.compact()
-				.with_ansi(false)
-				.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-					span_filter!(meta, cx);
-				}))
-		)
-		.init();
-
 	let _guard = sentry::init(("https://d0d89bf871ce425c84eddf6f419dcc7e@o4504774745718784.ingest.us.sentry.io/4508247476600832", sentry::ClientOptions {
 		release: sentry::release_name!(),
 		traces_sample_rate: 0.2,

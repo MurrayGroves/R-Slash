@@ -44,7 +44,7 @@ mod downloaders;
 lazy_static! {
     static ref MULTI_LOCK: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     static ref REDDIT_LIMITER: downloaders::client::Limiter =
-        downloaders::client::Limiter::new(Some(100));
+        downloaders::client::Limiter::new(Some(80));
 }
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
@@ -221,7 +221,7 @@ async fn get_access_token(
 			let access_token = token_results.0;
 			let expires_at = token_results.1;
 
-			con.hset(
+			let _:() = con.hset(
 				"reddit_tokens",
 				token_name.clone(),
 				format!("{},{}", access_token, expires_at),
@@ -251,7 +251,7 @@ async fn get_access_token(
 		access_token = token_results.0;
 		let expires_at = token_results.1;
 
-		con.hset(
+		let _:() = con.hset(
 			"reddit_tokens",
 			token_name,
 			format!("{},{}", access_token, expires_at),
@@ -262,126 +262,6 @@ async fn get_access_token(
 	debug!("Reddit Token: {}", access_token.replace("\"", ""));
 	Ok(access_token)
 }
-
-#[derive(Debug)]
-struct PostStatus {
-	failed: bool,
-	finished: bool,
-}
-
-#[derive(Clone, Debug)]
-struct SubredditPostList {
-	subreddit: String,
-	posts: Arc<RwLock<OrderMap<String, PostStatus>>>,
-	existing_posts: Arc<IndexSet<String>>,
-	con: redis::aio::MultiplexedConnection,
-}
-
-impl SubredditPostList {
-	fn new(subreddit: String, con: redis::aio::MultiplexedConnection) -> Self {
-		Self {
-			subreddit,
-			posts: Arc::new(RwLock::new(OrderMap::new())),
-			existing_posts: Arc::new(IndexSet::new()),
-			con,
-		}
-	}
-
-	// Wait for all posts to be finished processing - means if the subreddit is being fetched again before the previous run has finished, it will wait for the previous run to finish before starting the new one
-	// This is to stop ordering issues
-	// When it's finished, it will reset its state so the next run can start
-	#[tracing::instrument(skip(self, existing_posts))]
-	async fn wait_all_finished_and_reset(&mut self, existing_posts: IndexSet<String>) {
-		self.existing_posts = Arc::new(existing_posts);
-	}
-
-	async fn add_post(&self, id: &str, finished: bool) {
-		let mut posts = self.posts.write().await;
-		let post = PostStatus {
-			failed: false,
-			finished,
-		};
-		posts.insert(id.to_string(), post);
-	}
-
-	async fn set_failed(&self, id: &str) {
-		let mut posts = self.posts.write().await;
-		let post = posts.get_mut(id).unwrap();
-		(*post).failed = true;
-	}
-
-	// Set given post ID as finished processing and update vector of finished posts in Redis
-	#[tracing::instrument(skip(self))]
-	async fn set_finished(&self, id: &str) -> Result<(), anyhow::Error> {
-		debug!("Setting post as finished: {:?}", id);
-		let mut posts = self.posts.write().await;
-		debug!("Acquired mutex for setting post as finished: {:?}", id);
-		match posts.get_mut(id) {
-			None => {
-				posts.insert(
-					id.to_string(),
-					PostStatus {
-						failed: false,
-						finished: true,
-					},
-				);
-			}
-			Some(x) => {
-				(*x).finished = true;
-				(*x).failed = false;
-			}
-		};
-
-		let existing_posts: IndexSet<&String> = (*self.existing_posts).iter().collect();
-		// Generate list of finished posts including existing posts
-		let finished_posts: Vec<&String> = posts
-			.iter()
-			.filter(|x| x.1.finished)
-			.map(|x| x.0)
-			.collect::<IndexSet<&String>>()
-			.union(&existing_posts)
-			.map(|x| *x)
-			.collect();
-
-		if finished_posts.len() != 0 {
-			let parent_span = sentry::configure_scope(|scope| scope.get_span());
-			let span: sentry::TransactionOrSpan = match &parent_span {
-				Some(parent) => parent
-					.start_child("redis_push", "pushing new post list to redis")
-					.into(),
-				None => {
-					let ctx = sentry::TransactionContext::new(
-						"redis_push",
-						"pushing new post list to redis",
-					);
-					sentry::start_transaction(ctx).into()
-				}
-			};
-			let mut con = self.con.clone();
-			redis::pipe()
-				.atomic()
-				.del::<String>(format!("subreddit:{}:posts", self.subreddit))
-				.rpush::<String, Vec<&String>>(
-					format!("subreddit:{}:posts", self.subreddit),
-					finished_posts,
-				)
-				.query_async::<()>(&mut con)
-				.await?;
-
-			span.finish();
-		};
-
-		debug!("Finished setting post as finished: {:?}", id);
-		Ok(())
-	}
-
-	async fn exists(&self, id: &str) -> bool {
-		let posts = self.posts.read().await;
-		posts.iter().any(|x| x.0 == id && !x.1.failed)
-			|| self.existing_posts.iter().any(|x| *x == id)
-	}
-}
-
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct NewPost {
@@ -1060,6 +940,8 @@ async fn download_loop<'a>(
 			}
 		}
 
+		debug!("Subreddits: {:?}", subreddits);
+
 		let mut next_subreddit = None;
 
 		// If there's a subreddit that hasn't been fetched yet, make that the next one
@@ -1157,9 +1039,9 @@ async fn download_loop<'a>(
 			// If we've fetched all the pages, remove the subreddit from the list
 			if subreddit_state.pages_left == 0 && !subreddit_state.always_fetch {
 				subreddits.remove(&subreddit);
-				con.set(&subreddit, get_epoch_ms()?).await?;
+				let _:() = con.set(&subreddit, get_epoch_ms()?).await?;
 				info!("Got custom subreddit: {:?}", &subreddit);
-				con.lrem("custom_subreddits_queue", 0, &subreddit).await?;
+				let _:() = con.lrem("custom_subreddits_queue", 0, &subreddit).await?;
 			} else if subreddit_state.pages_left == 0 {
 				subreddit_state.pages_left = 10;
 				subreddit_state.fetched_up_to = None;
@@ -1172,43 +1054,6 @@ async fn download_loop<'a>(
 
 #[tokio::main]
 async fn main() {
-	let tracer_provider = opentelemetry_otlp::new_pipeline()
-		.tracing()
-		.with_exporter(
-			opentelemetry_otlp::new_exporter()
-				.tonic()
-				.with_endpoint("http://100.67.30.19:4317")
-		)
-		.with_trace_config(
-			trace::config().with_resource(opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
-				opentelemetry_semantic_conventions::resource::SERVICE_NAME,
-				"reddit_downloader".to_string(),
-			)])),
-		)
-		.install_batch(opentelemetry_sdk::runtime::Tokio).unwrap();
-	let tracer = tracer_provider.tracer("reddit_downloader");
-
-	let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-	tracing_subscriber::Registry::default()
-		.with(console_subscriber::spawn())
-		.with(telemetry.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-			span_filter!(meta, cx);
-		})))
-		.with(sentry::integrations::tracing::layer().with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-			span_filter!(meta, cx);
-		})))
-		.with(
-			tracing_subscriber::fmt::layer()
-				.compact()
-				.with_ansi(false)
-				.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-					span_filter!(meta, cx);
-				}))
-		)
-		.init();
-
-	println!("Initialised tracing!");
-
 	let _guard = sentry::init((
 		"https://75873f85a862465795299365b603fbb5@us.sentry.io/4504774760660992",
 		sentry::ClientOptions {

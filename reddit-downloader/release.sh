@@ -1,5 +1,5 @@
 set -e
-source ./secrets.env
+source ../secrets.env
 
 RUSTFLAGS="--cfg tokio_unstable" cargo build --release
 docker build -f Dockerfile -t registry.murraygrov.es/reddit-downloader ../target/release

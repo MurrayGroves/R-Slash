@@ -919,34 +919,9 @@ fn main() {
 		.unwrap()
 		.block_on(async {
 			println!("Starting up...");
-
-			let mut map = MetadataMap::with_capacity(1);
-
-			map.insert("shard_id", shard_id.to_string().parse().unwrap());
-
-			let tracer_provider = opentelemetry_otlp::new_pipeline()
-				.tracing()
-				.with_exporter(
-					opentelemetry_otlp::new_exporter()
-						.tonic()
-						.with_endpoint("http://100.67.30.19:4317")
-				)
-				.with_trace_config(
-					trace::config().with_resource(opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new(
-						opentelemetry_semantic_conventions::resource::SERVICE_NAME,
-						"discord_shard".to_string(),
-					)])),
-				)
-				.install_batch(opentelemetry_sdk::runtime::Tokio).unwrap();
-			let tracer = tracer_provider.tracer("discord_shard");
-
-			let telemetry = tracing_opentelemetry::layer().with_tracer(tracer).with_filter(tracing_subscriber::filter::LevelFilter::DEBUG)
-				.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-					span_filter!(meta, cx);
-				}));
+			
 
 			tracing_subscriber::Registry::default()
-				.with(telemetry)
 				.with(
 					tracing_subscriber::fmt::layer()
 						.compact()

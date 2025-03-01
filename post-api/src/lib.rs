@@ -503,7 +503,7 @@ pub async fn queue_subreddit(
 
         if !already_queued {
             debug!("Queueing subreddit for download");
-            con.rpush("custom_subreddits_queue", &subreddit).await?;
+            con.rpush::<_, _, ()>("custom_subreddits_queue", &subreddit).await?;
 
             let selector = if bot == 278550142356029441 {
                 "nsfw"
@@ -511,7 +511,7 @@ pub async fn queue_subreddit(
                 "sfw"
             };
 
-            con.hset(
+            con.hset::<_, _, _, ()>(
                 &format!("custom_sub:{}:{}", selector, subreddit),
                 "name",
                 &subreddit,
@@ -547,7 +547,7 @@ pub async fn queue_subreddit(
         debug!("Subreddit last cached more than an hour ago, updating...");
         // Tell downloader to update the subreddit, but use outdated posts for now.
         if !already_queued {
-            con.rpush("custom_subreddits_queue", &subreddit).await?;
+            con.rpush::<_, _, ()>("custom_subreddits_queue", &subreddit).await?;
         }
     }
 
