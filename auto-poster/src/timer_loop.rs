@@ -1,7 +1,7 @@
 use std::{ops::Deref, sync::Arc, time::Duration};
 
 use auto_poster::PostMemory;
-use mongodb::bson::{de, doc};
+use mongodb::bson::doc;
 use post_api::{queue_subreddit, PostApiError, SubredditStatus};
 use rslash_common::{InteractionResponse, InteractionResponseMessage};
 use serenity::all::{CreateEmbed, CreateMessage};
@@ -15,7 +15,7 @@ async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) 
     let coll: mongodb::Collection<PostMemory> = client.database("state").collection("autoposts");
 
     let filter = doc! {
-        "id": autopost.id as i64,
+        "id": autopost.id,
     };
 
     match coll.delete_one(filter).await {
@@ -43,6 +43,54 @@ async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) 
     drop(autoposts);
 }
 
+async fn post_error_to_message(e: anyhow::Error, subreddit: &str) -> InteractionResponse {
+    let validity = post_api::check_subreddit_valid(subreddit)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Error checking subreddit validity: {}", e);
+            SubredditStatus::Valid
+        });
+
+    match validity {
+        SubredditStatus::Valid => {
+            if let Some(x) = e.downcast_ref::<PostApiError>() {
+                match x {
+					PostApiError::NoPostsFound { subreddit } => {
+						rslash_common::error_response(
+							"No posts found",
+							&format!("Deleted autopost for r/{} because no supported posts were found. For example, they might all be text posts.", subreddit)
+						)
+
+					}
+					_ => {
+						error!("Error getting subreddit for auto-post: {:?}", e);
+						rslash_common::error_response(
+							"Unexpected Error",
+							&format!("Deleted autopost for r/{} due to an unexpected error.", subreddit)
+						)
+					}
+				}
+            } else {
+                error!("Error getting subreddit for auto-post: {:?}", e);
+                rslash_common::error_response(
+                    "Unexpected Error",
+                    &format!(
+                        "Deleted autopost for r/{} due to an unexpected error.",
+                        subreddit
+                    ),
+                )
+            }
+        }
+        SubredditStatus::Invalid(reason) => {
+            debug!("Subreddit response not 200: {}", reason);
+            rslash_common::error_response(
+				"Subreddit Inaccessible",
+				&format!("Deleted autopost for r/{} because it's either private, does not exist, or has been banned.", subreddit)
+			)
+        }
+    }
+}
+
 pub async fn timer_loop(
     server: AutoPostServer,
     mut new_memory_alert: tokio::sync::mpsc::Receiver<()>,
@@ -55,6 +103,7 @@ pub async fn timer_loop(
                 if memory.next_post <= now {
                     debug!("Running {:?} behind", now - memory.next_post);
 
+                    // Get next autopost from queue, removing it from the queue
                     drop(autoposts);
                     let mut autoposts = server.autoposts.write().await;
                     let autopost = match autoposts.queue.pop() {
@@ -76,9 +125,11 @@ pub async fn timer_loop(
                     let server_clone = server.clone();
 
                     let is_custom = !server.default_subs.contains(&autopost.subreddit);
+                    // Spawn task to post the autopost
                     tokio::spawn(async move {
                         let mut server = server_clone;
 
+                        // Queue subreddit for downloading if it's a custom subreddit
                         if is_custom {
                             match queue_subreddit(
                                 &autopost_clone.subreddit,
@@ -94,6 +145,7 @@ pub async fn timer_loop(
                             };
                         }
 
+                        // Get subreddit post
                         let message = if let Some(search) = autopost_clone.search.clone() {
                             post_api::get_subreddit_search(
                                 autopost_clone.subreddit.clone(),
@@ -111,66 +163,25 @@ pub async fn timer_loop(
                             .await
                         };
 
+                        // If an error occurred getting the post, delete the autopost, and prepare an error message
                         let mut failed = false;
-                        let message = match match message {
+                        let message = match message {
                             Ok(x) => x,
                             Err(e) => {
                                 warn!("Error getting subreddit for autopost: {}", e);
                                 delete_auto_post(&server, autopost_clone.clone()).await;
                                 failed = true;
 
-                                let validity =
-                                    post_api::check_subreddit_valid(&autopost_clone.subreddit)
-                                        .await
-                                        .unwrap_or_else(|e| {
-                                            warn!("Error checking subreddit validity: {}", e);
-                                            SubredditStatus::Valid
-                                        });
-
-                                match validity {
-                                    SubredditStatus::Valid => {
-                                        if let Some(x) = e.downcast_ref::<PostApiError>() {
-                                            match x {
-                                                PostApiError::NoPostsFound { subreddit } => {
-													rslash_common::error_response(
-														"No posts found",
-														&format!("Deleted autopost for r/{} because no supported posts were found. For example, they might all be text posts.", subreddit)
-													)
-
-                                                }
-                                                _ => {
-                                                    error!("Error getting subreddit for auto-post: {:?}", e);
-                                                    rslash_common::error_response(
-														"Unexpected Error",
-														&format!("Deleted autopost for r/{} due to an unexpected error.", autopost_clone.subreddit)
-													)
-                                                }
-                                            }
-                                        } else {
-                                            error!(
-                                                "Error getting subreddit for auto-post: {:?}",
-                                                e
-                                            );
-                                            rslash_common::error_response(
-                                                "Unexpected Error",
-                                                &format!("Deleted autopost for r/{} due to an unexpected error.", autopost_clone.subreddit)
-                                            )
-                                        }
-                                    }
-                                    SubredditStatus::Invalid(reason) => {
-                                        debug!("Subreddit response not 200: {}", reason);
-                                        rslash_common::error_response(
-											"Subreddit Inaccessible",
-											&format!("Deleted autopost for r/{} because it's either private, does not exist, or has been banned.", autopost_clone.subreddit)
-										)
-                                    }
-                                }
+                                post_error_to_message(e, &autopost_clone.subreddit).await
                             }
-                        } {
-                            rslash_common::InteractionResponse::Message(message) => message,
-                            _ => {
-                                warn!("Invalid response from post_api");
-                                InteractionResponseMessage {
+                        };
+
+                        // If the post API didn't return an error, but returned an invalid response, prepare a new error message
+                        let message = if let InteractionResponse::Message(message) = message {
+                            message
+                        } else {
+                            warn!("Invalid response from post_api");
+                            InteractionResponseMessage {
 									embed: Some(
 										CreateEmbed::default()
 											.title("Unexpected Error")
@@ -180,65 +191,64 @@ pub async fn timer_loop(
 									),
 									..Default::default()
 								}
-                            }
                         };
 
-                        if let Err(why) = {
-                            let mut resp = CreateMessage::new();
-                            if let Some(embed) = message.embed.clone() {
-                                resp = resp.embed(embed);
-                            };
+                        // Send message
+                        let mut resp = CreateMessage::new();
+                        if let Some(embed) = message.embed.clone() {
+                            resp = resp.embed(embed);
+                        };
 
-                            if let Some(content) = message.content.clone() {
-                                resp = resp.content(content);
-                            };
+                        if let Some(content) = message.content.clone() {
+                            resp = resp.content(content);
+                        };
 
-                            debug!("Sending message: {:?}", resp);
-                            let to_return = select! {
-                                result = channel.send_message(http, resp) => result,
-                                _ = tokio::time::sleep(Duration::from_secs(10)) => {
-                                    Err(serenity::Error::Other("Sending message took more than 10 seconds"))
-                                }
-                            };
-                            debug!("Sent message");
+                        debug!("Sending message: {:?}", resp);
+                        let message_send_result = channel.send_message(http, resp).await;
+                        debug!("Sent message");
 
-                            if !failed {
-                                // Re-add autopost to queue if it hasn't reached its limit
-                                if let Some(limit) = autopost.limit {
-                                    let autoposts = server.autoposts.write().await;
-                                    (autopost.deref().get_mut()).current += 1;
-                                    drop(autoposts);
-                                    if autopost.current < limit {
-                                        let mut autoposts = server.autoposts.write().await;
-                                        (autopost.deref().get_mut()).next_post =
-                                            Instant::now() + autopost.interval;
-                                        autoposts.queue.push(autopost.clone());
-                                    } else {
-                                        delete_auto_post(&server, autopost.clone()).await;
-                                    }
-                                } else {
-                                    let mut autoposts = server.autoposts.write().await;
-                                    (autopost.deref().get_mut()).current += 1;
-                                    (autopost.deref().get_mut()).next_post =
-                                        Instant::now() + autopost.interval;
-                                    autoposts.queue.push(autopost.clone());
-                                };
-                            };
-                            to_return
-                        } {
+                        // Handle any errors sending the message
+                        if let Err(why) = message_send_result {
+                            // If we failed because we don't have permission to send to the channel, delete the autopost
                             if let serenity::Error::Http(e) = &why {
                                 if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
                                     // Unknown channel (we got removed from server)
                                     if e.error.code == 10003 {
-                                        delete_auto_post(&server, autopost).await;
+                                        delete_auto_post(&server, autopost.clone()).await;
+                                        failed = true;
                                     }
                                 }
                             } else {
                                 warn!("Error sending message: {:?}", why);
                             }
                         }
+
+                        // If we succeeded in sending the message, or it failed due to a temporary error, re-add the autopost to the queue
+                        if !failed {
+                            // Re-add autopost to queue if it hasn't reached its limit
+                            if let Some(limit) = autopost.limit {
+                                let autoposts = server.autoposts.write().await;
+                                autopost.deref().get_mut().current += 1;
+                                drop(autoposts);
+                                if autopost.current < limit {
+                                    let mut autoposts = server.autoposts.write().await;
+                                    autopost.deref().get_mut().next_post =
+                                        Instant::now() + autopost.interval;
+                                    autoposts.queue.push(autopost.clone());
+                                } else {
+                                    delete_auto_post(&server, autopost.clone()).await;
+                                }
+                            } else {
+                                let mut autoposts = server.autoposts.write().await;
+                                autopost.deref().get_mut().current += 1;
+                                autopost.deref().get_mut().next_post =
+                                    Instant::now() + autopost.interval;
+                                autoposts.queue.push(autopost.clone());
+                            };
+                        };
                     });
 
+                    // Calculate time to sleep to next post
                     let autoposts = server.autoposts.read().await;
                     if let Some(next) = autoposts.queue.peek() {
                         debug!("Memories: {:?}", autoposts.queue);
@@ -250,11 +260,13 @@ pub async fn timer_loop(
                         Duration::from_secs(3600)
                     }
                 } else {
+                    // We woke up too early and need to sleep more
                     let to_return = memory.next_post - now;
                     drop(autoposts);
                     to_return
                 }
             } else {
+                // There's no autoposts in the queue, sleep for an hour (we'll get interrupted when a new one is added)
                 drop(autoposts);
                 Duration::from_secs(3600)
             }
