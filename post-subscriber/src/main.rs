@@ -273,7 +273,7 @@ impl Subscriber for SubscriberServer {
         let subscriptions = self.subscriptions.read().await;
         debug!("Lock acquired, checking subscriptions");
 
-        let filtered = match subscriptions.by_subreddit.get(&subreddit) {
+        let filtered = match subscriptions.by_subreddit.get(&subreddit.to_lowercase()) {
             Some(x) => x,
             None => return Ok(()),
         };
