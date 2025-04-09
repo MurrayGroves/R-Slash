@@ -10,6 +10,9 @@ export default {
 		extend: {
 			fontFamily: {
 				sans: ['Open Sans', 'sans-serif']
+			},
+			colors: {
+				'slate-850': 'oklch(25.9% 0.041 260.031)'
 			}
 		}
 	},
