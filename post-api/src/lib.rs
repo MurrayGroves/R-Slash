@@ -477,6 +477,9 @@ pub async fn check_subreddit_valid(subreddit: &str) -> Result<SubredditStatus, E
         header::COOKIE,
         header::HeaderValue::from_static("_options={%22pref_gated_sr_optin%22:true}"),
     );
+
+    debug!("Checking subreddit validity: {}", subreddit);
+
     let web_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .default_headers(default_headers)
@@ -490,11 +493,11 @@ pub async fn check_subreddit_valid(subreddit: &str) -> Result<SubredditStatus, E
         .send()
         .await?;
 
-    return Ok(if res.status() == 200 {
+    Ok(if res.status() == 200 {
         SubredditStatus::Valid
     } else {
         SubredditStatus::Invalid(res.text().await?)
-    });
+    })
 }
 
 pub async fn queue_subreddit(

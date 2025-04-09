@@ -50,7 +50,7 @@ mod downloaders;
 lazy_static! {
     static ref MULTI_LOCK: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     static ref REDDIT_LIMITER: downloaders::client::Limiter =
-        downloaders::client::Limiter::new(None);
+        downloaders::client::Limiter::new(None, "reddit".to_string());
 }
 
 /// Represents a value stored in a [ConfigStruct](ConfigStruct)
@@ -549,10 +549,12 @@ async fn get_subreddit(
                 if let Some(err) = results.get("error") {
                     if let Some(err_code) = err.as_u64() {
                         if err_code == 404 {
+                            debug!("Subreddit doesn't exist.");
                             return Ok((SubredditExists::DoesntExist, None));
                         }
                     }
                 }
+                debug!("Subreddit exists");
                 return Ok((SubredditExists::Exists, after));
             }
         };
