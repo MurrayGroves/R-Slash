@@ -27,6 +27,7 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
+use tarpc::context::Context;
 use tracing_subscriber::{
     EnvFilter, Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
 };
@@ -350,6 +351,38 @@ impl Subscriber for SubscriberServer {
         info!("Listing watched subreddits {:?}", subreddits);
 
         Ok(subreddits)
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn remove_subreddit(self, _: Context, subreddit: String) -> Result<(), String> {
+        info!("Removing subreddit {}", subreddit);
+        let client = self.db.lock().await;
+        let coll: mongodb::Collection<Subscription> =
+            client.database("state").collection("subscriptions");
+        let filter = doc! {
+            "subreddit": &subreddit,
+        };
+
+        coll.delete_many(filter).await.map_err(|e| e.to_string())?;
+
+        drop(client);
+        let mut subscriptions = self.subscriptions.write().await;
+
+        for sub in subscriptions
+            .by_subreddit
+            .get(&subreddit)
+            .unwrap_or(&HashSet::new())
+            .clone()
+        {
+            subscriptions
+                .by_channel
+                .get_mut(&sub.channel)
+                .ok_or("Tried to remove subscription by channel that already didn't exist!")?
+                .remove(&*sub);
+        }
+
+        subscriptions.by_subreddit.remove(&subreddit);
+        Ok(())
     }
 }
 

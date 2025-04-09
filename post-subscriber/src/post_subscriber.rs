@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[tarpc::service]
 pub trait Subscriber {
     async fn register_subscription(subreddit: String, channel: u64, bot: Bot)
-        -> Result<(), String>;
+    -> Result<(), String>;
 
     async fn delete_subscription(subreddit: String, channel: u64, bot: Bot) -> Result<(), String>;
 
@@ -14,7 +14,11 @@ pub trait Subscriber {
 
     async fn notify(subreddit: String, post_id: String) -> Result<(), String>;
 
+    /// List subreddits that have at least one subscription
     async fn watched_subreddits() -> Result<HashSet<String>, String>;
+
+    /// Remove all subscriptions for a given subreddit (typically done when subreddit is banned)
+    async fn remove_subreddit(subreddit: String) -> Result<(), String>;
 }
 
 impl serenity::prelude::TypeMapKey for SubscriberClient {

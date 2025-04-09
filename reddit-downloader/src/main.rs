@@ -23,7 +23,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, filter};
 use truncrate::*;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, Error, anyhow};
 
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisResult, Value};
 
@@ -1155,10 +1155,14 @@ async fn download_loop<'a>(
                 Ok(x) => {
                     // If the subreddit doesn't exist/isn't accessible, remove it from the list of subreddits to process
                     if x.0 == SubredditExists::DoesntExist {
+                        info!("Subreddit doesn't exist, removing from list");
                         subreddits.remove(&subreddit);
                         let _: () = con.set(&subreddit, get_epoch_ms()?).await?;
-                        info!("Got custom subreddit: {:?}", &subreddit);
                         let _: () = con.lrem("custom_subreddits_queue", 0, &subreddit).await?;
+                        subscriber
+                            .remove_subreddit(context::current(), subreddit.clone())
+                            .await?
+                            .map_err(|e| Error::msg(e))?;
                         continue;
                     };
                     x.1
