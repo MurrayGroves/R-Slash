@@ -203,6 +203,10 @@ impl AutoPostServer {
             autoposts.by_channel.remove(&autopost.channel);
         }
 
+        // Remove from queue
+        let queue = &mut autoposts.queue;
+        queue.retain(|element| element.id != id);
+
         Ok(Arc::into_inner(autopost)
             .ok_or("Failed to take ownership of PostMemory".to_string())?
             .into_inner())
