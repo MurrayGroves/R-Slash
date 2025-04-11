@@ -20,6 +20,7 @@
 
 	onMount(async () => {
 		user = await getUser(config);
+		console.log(user);
 	});
 </script>
 
