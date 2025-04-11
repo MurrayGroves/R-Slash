@@ -1,9 +1,27 @@
 <script>
 	import { Button } from 'flowbite-svelte';
-	import { getConfig } from '$lib/shared';
+	import { getConfig, getGuilds, getGuildsChannels, getUser } from '$lib/shared';
+	import { onMount } from 'svelte';
+
+	import ChevronRight from '@lucide/svelte/icons/chevron-right';
+	import ChevronDown from '@lucide/svelte/icons/chevron-down';
 
 	let data = $props();
 	let config = getConfig(data);
+
+	let guilds = $state();
+	let channels = $state();
+
+	let selectedGuild = $state();
+
+	onMount(async () => {
+		let user = await getUser(config);
+		guilds = await getGuilds(user);
+		guilds = guilds.filter((guild) => (guild.permissions & 0x0000000000000020) === 0x0000000000000020);
+		console.log(guilds);
+		channels = await getGuildsChannels(user, guilds);
+		console.log(channels);
+	});
 </script>
 
 <div class="bg-slate-850 min-h-screen text-gray-200 flex-col flex">
@@ -14,7 +32,7 @@
 			<h1 class="my-auto text-2xl md:text-4xl flex-1">
 				{data.bot} Settings
 			</h1>
-			<Button class="self-end flex-10 md:mr-[3em] my-auto bg-[#5865F2] p-2.5 rounded-md min-w-32 font-bold" on:click={async () => {
+			<Button class="self-end flex-10 md:mr-5 my-auto bg-[#5865F2] p-2.5 rounded-md min-w-32 font-bold" on:click={async () => {
 				await config.userManager.removeUser()
 				window.location.href = `/${config.botShorthand}`
 			}}>
@@ -26,11 +44,28 @@
 	<div class="flex w-full min-h-full flex-grow">
 		<div class="flex-1 flex-shrink bg-slate-800 p-5">
 			<span class="text-2xl font-bold">Servers</span>
-			<hr class="mt-1">
+			<hr class="mt-1 mb-1">
+			<div role="tree">
+				{#each guilds as guild}
+					<div class="flex flex-row min-h-8" onmouseenter={() => {guild.hover = true}}
+							 onmouseleave={() => {guild.hover = false}}
+							 onclick={() => {guild.expanded = !guild.expanded; selectedGuild = guild}}
+							 role="treeitem" aria-selected={guild.selected}>
+						{#if guild.expanded}
+							<ChevronDown size={guild.hover ? 32 : 24} />
+						{:else}
+							<ChevronRight size={guild.hover ? 32 : 24} />
+						{/if}
+						<span class="mt-auto mb-auto">{`${guild.name}`}</span>
+					</div>
+				{/each}
+			</div>
 		</div>
 		<div class="flex-[4] p-5">
-			<span class="text-2xl font-bold">Settings for PLACEHOLDER</span>
-			<hr class="mt-1">
+			{#if selectedGuild}
+				<span class="text-2xl font-bold">Settings for {selectedGuild.name}</span>
+				<hr class="mt-1">
+			{/if}
 		</div>
 	</div>
 </div>

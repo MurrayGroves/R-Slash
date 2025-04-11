@@ -4,7 +4,7 @@ import { PUBLIC_HOST } from '$env/static/public';
 
 import BootyBotLogo from '$lib/assets/bootybot.png?enhanced';
 import RSlashLogo from '$lib/assets/rslash.png?enhanced';
-import { UserManager } from 'oidc-client-ts';
+import { User, UserManager } from 'oidc-client-ts';
 import type { Picture } from 'imagetools-core';
 
 interface SetupProps {
@@ -20,6 +20,19 @@ interface ConfigState {
 	botShorthand: string;
 }
 
+interface Guild {
+	name: string;
+	id: string;
+	permissions: number;
+}
+
+interface Channel {
+	name: string;
+	id: string;
+	position: number;
+	type: number;
+}
+
 /// Should be called when page is mounted
 export async function getUser(config: ConfigState) {
 	let user = null;
@@ -32,6 +45,7 @@ export async function getUser(config: ConfigState) {
 		}
 	}
 
+	console.log(user);
 	return user;
 }
 
@@ -51,7 +65,7 @@ export function getConfig(data: SetupProps): ConfigState {
 			client_id: data.bot === Bot.BB ? '278550142356029441' : '282921751141285888',
 			redirect_uri: `${PUBLIC_HOST}/${botShorthand(data.bot)}`,
 			response_type: 'code',
-			scope: 'identify email',
+			scope: 'identify email guilds',
 			post_logout_redirect_uri: `${PUBLIC_HOST}/${botShorthand(data.bot)}`,
 			metadata: {
 				issuer: 'https://discord.com',
@@ -63,4 +77,24 @@ export function getConfig(data: SetupProps): ConfigState {
 		}),
 		botShorthand: botShorthand(data.bot)
 	};
+}
+
+export async function getGuilds(user: User) {
+	if (!user) {
+		throw new Error('No user found.');
+	}
+	const endpoint = `https://discord.com/api/v10/users/@me/guilds`;
+	const headers = new Headers({
+		Authorization: `Bearer ${user.access_token}`
+	});
+	const guilds = await fetch(endpoint, { headers: headers });
+	return await guilds.json();
+}
+
+export async function getGuildsChannels(
+	user: User,
+	guilds: Guild[]
+): Promise<{ [Key: string]: Channel[] }> {
+	// TODO - Talk to internal API to get guild channels
+	return null;
 }
