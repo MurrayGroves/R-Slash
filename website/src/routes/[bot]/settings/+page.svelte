@@ -1,18 +1,25 @@
-<script>
+<script lang="ts">
 	import { Button } from 'flowbite-svelte';
-	import { getConfig, getGuilds, getGuildsChannels, getUser } from '$lib/shared';
+	import {
+		type Channel,
+		getConfig,
+		getGuilds,
+		getGuildsChannels,
+		getUser,
+		type Guild,
+		TypeOfSelection
+	} from '$lib/shared';
 	import { onMount } from 'svelte';
 
-	import ChevronRight from '@lucide/svelte/icons/chevron-right';
-	import ChevronDown from '@lucide/svelte/icons/chevron-down';
+	import { ChevronDown, ChevronRight } from '@lucide/svelte';
 
 	let data = $props();
 	let config = getConfig(data);
 
-	let guilds = $state();
-	let channels = $state();
+	let guilds: Guild[] = $state([]);
+	let channels: { [Key: string]: Channel[] } = $state({});
 
-	let selectedGuild = $state();
+	let selection: [TypeOfSelection, Guild | Channel | null] = $state([TypeOfSelection.None, null]);
 
 	onMount(async () => {
 		let user = await getUser(config);
@@ -21,6 +28,23 @@
 		console.log(guilds);
 		channels = await getGuildsChannels(user, guilds);
 		console.log(channels);
+		guilds = guilds.filter(guild => guild.id in channels);
+		for (const [key, value] of Object.entries(channels)) {
+			let newOrder = [];
+			const categories = value.filter(channel => channel.type === 4);
+			categories.sort((a, b) => a.position !== b.position ? a.position - b.position : a.id - b.id);
+			for (let category of categories) {
+				let categoryChannels = value.filter(channel => channel.parent_id === category.id && channel.type === 0);
+				if (categoryChannels.length > 0) {
+					newOrder.push(category);
+					categoryChannels.sort((a, b) => a.position !== b.position ? a.position - b.position : a.id - b.id);
+					newOrder = newOrder.concat(categoryChannels);
+				}
+			}
+			channels[key] = newOrder;
+		}
+		console.log(channels);
+
 	});
 </script>
 
@@ -47,23 +71,39 @@
 			<hr class="mt-1 mb-1">
 			<div role="tree">
 				{#each guilds as guild}
-					<div class="flex flex-row min-h-8" onmouseenter={() => {guild.hover = true}}
-							 onmouseleave={() => {guild.hover = false}}
-							 onclick={() => {guild.expanded = !guild.expanded; selectedGuild = guild}}
-							 role="treeitem" aria-selected={guild.selected}>
+					<button class="flex flex-row min-h-8" onmouseenter={() => {guild.hover = true}}
+									onmouseleave={() => {guild.hover = false}}
+									onclick={() => {guild.expanded = !guild.expanded; selection = [TypeOfSelection.Guild, guild];}}
+									role="treeitem" aria-selected={guild === selection[1]}>
 						{#if guild.expanded}
 							<ChevronDown size={guild.hover ? 32 : 24} />
 						{:else}
 							<ChevronRight size={guild.hover ? 32 : 24} />
 						{/if}
 						<span class="mt-auto mb-auto">{`${guild.name}`}</span>
-					</div>
+					</button>
+					{#if guild.expanded}
+						{#each channels[guild.id] as channel}
+							<div class="ml-10">
+								{#if channel.type === 4}
+									<div class="flex">
+										<hr class="flex-1 mt-auto mb-auto flex-grow">
+										<span class="flex-auto flex-shrink flex-grow-0 self-center text-lg">{channel.name}</span>
+										<hr class="flex-1 mt-auto mb-auto flex-grow">
+									</div>
+								{:else}
+									<button onclick={() => selection = [TypeOfSelection.Channel, channel]}>{channel.name}</button>
+									<br>
+								{/if}
+							</div>
+						{/each}
+					{/if}
 				{/each}
 			</div>
 		</div>
 		<div class="flex-[4] p-5">
-			{#if selectedGuild}
-				<span class="text-2xl font-bold">Settings for {selectedGuild.name}</span>
+			{#if selection[0] !== TypeOfSelection.None}
+				<span class="text-2xl font-bold">Settings for {selection[1].name}</span>
 				<hr class="mt-1">
 			{/if}
 		</div>

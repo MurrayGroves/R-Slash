@@ -351,7 +351,8 @@ pub async fn get_subreddit<'a>(
         let span = error_span!("delete_post_from_list");
         {
             let _ = span.enter();
-            error!("Error getting post by ID: {:?}", e);
+            debug!("Post not found: {:?}", e);
+            error!("Error getting post by ID");
             let _: () = con
                 .lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
                 .await?;

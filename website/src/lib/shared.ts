@@ -1,6 +1,6 @@
 import { Bot, botShorthand } from '$lib/types';
 
-import { PUBLIC_HOST } from '$env/static/public';
+import { PUBLIC_BACKEND_URL, PUBLIC_HOST } from '$env/static/public';
 
 import BootyBotLogo from '$lib/assets/bootybot.png?enhanced';
 import RSlashLogo from '$lib/assets/rslash.png?enhanced';
@@ -20,17 +20,24 @@ interface ConfigState {
 	botShorthand: string;
 }
 
-interface Guild {
+export interface Guild {
 	name: string;
 	id: string;
 	permissions: number;
 }
 
-interface Channel {
+export interface Channel {
 	name: string;
 	id: string;
 	position: number;
 	type: number;
+	parent_id: string;
+}
+
+export enum TypeOfSelection {
+	None,
+	Guild,
+	Channel
 }
 
 /// Should be called when page is mounted
@@ -79,7 +86,7 @@ export function getConfig(data: SetupProps): ConfigState {
 	};
 }
 
-export async function getGuilds(user: User) {
+export async function getGuilds(user: User): Promise<Guild[]> {
 	if (!user) {
 		throw new Error('No user found.');
 	}
@@ -95,6 +102,12 @@ export async function getGuildsChannels(
 	user: User,
 	guilds: Guild[]
 ): Promise<{ [Key: string]: Channel[] }> {
-	// TODO - Talk to internal API to get guild channels
-	return null;
+	const queryString = guilds.map((guild) => guild.id).join(',');
+	const req = await fetch(`${PUBLIC_BACKEND_URL}/guilds/batch/channels?guilds=${queryString}`);
+
+	if (req.status === 200) {
+		return await req.json();
+	} else {
+		throw new Error('Error fetching guild channels.');
+	}
 }

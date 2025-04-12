@@ -1,0 +1,15 @@
+[package]
+name = "website-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+warp = "*"
+tokio = { version = "*", features = ["rt", "rt-multi-thread", "macros"] }
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+env_logger = "0.11.6"
+log = "0.4.26"
+chrono = "0.4.40"
+serenity = "*"
+anyhow = "1.0.97"
