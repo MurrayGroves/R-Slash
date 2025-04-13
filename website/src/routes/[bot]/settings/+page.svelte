@@ -1,14 +1,6 @@
 <script lang="ts">
 	import { Button } from 'flowbite-svelte';
-	import {
-		type Channel,
-		getConfig,
-		getGuilds,
-		getGuildsChannels,
-		getUser,
-		type Guild,
-		TypeOfSelection
-	} from '$lib/shared';
+	import { Backend, type Channel, getConfig, type Guild, TypeOfSelection } from '$lib/shared';
 	import { onMount } from 'svelte';
 
 	import { ChevronDown, ChevronRight } from '@lucide/svelte';
@@ -16,17 +8,18 @@
 	let data = $props();
 	let config = getConfig(data);
 
+	let backend = $state(null);
 	let guilds: Guild[] = $state([]);
 	let channels: { [Key: string]: Channel[] } = $state({});
 
 	let selection: [TypeOfSelection, Guild | Channel | null] = $state([TypeOfSelection.None, null]);
 
 	onMount(async () => {
-		let user = await getUser(config);
-		guilds = await getGuilds(user);
+		backend = await Backend.create(data.bot);
+		guilds = await backend.getGuilds();
 		guilds = guilds.filter((guild) => (guild.permissions & 0x0000000000000020) === 0x0000000000000020);
 		console.log(guilds);
-		channels = await getGuildsChannels(user, guilds);
+		channels = await backend.getGuildsChannels(guilds);
 		console.log(channels);
 		guilds = guilds.filter(guild => guild.id in channels);
 		for (const [key, value] of Object.entries(channels)) {

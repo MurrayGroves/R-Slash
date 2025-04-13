@@ -13,3 +13,7 @@ log = "0.4.26"
 chrono = "0.4.40"
 serenity = "*"
 anyhow = "1.0.97"
+jwt = "*"
+hmac = "*"
+sha2 = "*"
+reqwest = { version = "*", features = ["json"] }
