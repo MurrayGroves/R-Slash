@@ -133,6 +133,7 @@ impl Limiter {
             self.name, headers
         );
 
+        // If this limiter is using a per minute limit
         if let Some(per_minute) = self.per_minute {
             if state.remaining != 0 {
                 state.remaining -= 1
@@ -153,9 +154,16 @@ impl Limiter {
             } else if let Some(reset) = headers.get("X-RateLimit-UserReset") {
                 state.reset = reset.to_str()?.parse()?;
             } else {
-                if status == StatusCode::TOO_MANY_REQUESTS {
-                    // Wait 1 minute if we hit the rate limit and they didn't tell us when to try again
-                    state.reset = chrono::Utc::now().timestamp() + 60;
+                if status == StatusCode::TOO_MANY_REQUESTS
+                    || status == StatusCode::FORBIDDEN
+                    || status == StatusCode::UNAUTHORIZED
+                {
+                    // Wait 10 minutes if we hit the rate limit, and they didn't tell us when to try again
+                    warn!(
+                        "We hit the rate limit for {} waiting 10 mins as a pre-caution with headers: {:?}",
+                        self.name, headers
+                    );
+                    state.reset = chrono::Utc::now().timestamp() + 600;
                     state.remaining = 0;
                 }
 
