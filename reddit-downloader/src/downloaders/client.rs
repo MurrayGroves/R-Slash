@@ -160,8 +160,8 @@ impl Limiter {
                 {
                     // Wait 10 minutes if we hit the rate limit, and they didn't tell us when to try again
                     warn!(
-                        "We hit the rate limit for {} waiting 10 mins as a pre-caution with headers: {:?}",
-                        self.name, headers
+                        "We hit the rate limit for {} with status {} waiting 10 mins as a pre-caution with headers: {:?}",
+                        self.name, status, headers
                     );
                     state.reset = chrono::Utc::now().timestamp() + 600;
                     state.remaining = 0;
@@ -176,7 +176,7 @@ impl Limiter {
                         .parse()?;
                 }
                 if let Some(reset) = headers.get("x-ratelimit-reset") {
-                    state.reset = reset.to_str()?.parse()?;
+                    state.reset = chrono::Utc::now().timestamp() + reset.to_str()?.parse::<i64>()?;
                 }
             }
         }

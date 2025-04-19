@@ -551,6 +551,13 @@ async fn get_subreddit(
                         if err_code == 404 {
                             debug!("Subreddit doesn't exist.");
                             return Ok((SubredditExists::DoesntExist, None));
+                        } else if err_code == 403 {
+                            if let Some(err_msg) = results.get("reason") {
+                                if err_msg == "private" {
+                                    debug!("Subreddit is private.");
+                                    return Ok((SubredditExists::DoesntExist, None));
+                                }
+                            }
                         }
                     }
                 }
