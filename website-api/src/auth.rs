@@ -8,7 +8,8 @@ use redis::AsyncTypedCommands;
 use redis::aio::MultiplexedConnection;
 use rslash_common::Bot;
 use serde_json::json;
-use serenity::all::{Channel, Guild, GuildId, GuildInfo, HttpError, User, UserId};
+use serenity::all::{Channel, Guild, GuildId, GuildInfo, HttpError, PartialGuild, User, UserId};
+use serenity::futures;
 use serenity::http::Http;
 use sha2::Sha256;
 use std::convert::Infallible;
@@ -94,7 +95,9 @@ impl AuthSystem {
 
     /// Login a user by their Discord OAuth code. Returns a JWT token for our backend.
     pub async fn login_to_discord(
-        &mut self,
+        &self,
+        bot: Bot,
+        server: &Server,
         client_id: &str,
         client_secret: &str,
         discord_code: &str,
@@ -164,20 +167,42 @@ impl AuthSystem {
             }
         };
 
+        // Filter guilds to only those that the user has `Manage Guild` or `Administrator` permission
         let guilds = guilds
             .into_iter()
             .filter(|guild| guild.permissions.manage_guild() || guild.permissions.administrator())
             .collect::<Vec<_>>();
 
+        // Filter guilds to only those that the bot is in
+        let http = &server.http[&bot];
+        let futures = guilds.iter().map(|guild| http.get_guild(guild.id));
+        let bot_guilds: Vec<Result<PartialGuild, _>> = futures::future::join_all(futures).await;
+        let bot_guilds: Vec<PartialGuild> = bot_guilds
+            .into_iter()
+            .filter_map(|guild| match guild {
+                Ok(guild) => Some(guild),
+                Err(err) => {
+                    debug!("Error fetching guild: {:?}", err);
+                    None
+                }
+            })
+            .collect();
+
         // Store Guilds in Redis for faster lookup later
         let guilds_json = guilds
             .iter()
+            .filter(|guild| {
+                bot_guilds
+                    .iter()
+                    .any(|bot_guild| bot_guild.id == guild.id)
+            })
             .filter_map(|guild| serde_json::to_string(guild).ok())
             .collect::<Vec<_>>();
 
-        self.redis
-            .lpush(format!("website:users:{}:guilds", me.id), guilds_json)
-            .await?;
+        let key = format!("website:users:{}:guilds", me.id);
+        let mut redis = self.redis.clone();
+        redis.del(&key).await?;
+        redis.lpush(key, guilds_json).await?;
 
         let claim = Claim {
             discord_id: me.id,
@@ -331,6 +356,8 @@ pub fn routes(
             let token = match server
                 .auth
                 .login_to_discord(
+                    bot,
+                    &server,
                     &server.bot_credentials[&bot].id,
                     &server.bot_credentials[&bot].secret,
                     &body.code,
