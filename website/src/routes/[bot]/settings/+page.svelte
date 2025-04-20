@@ -4,8 +4,10 @@
 	import { onMount } from 'svelte';
 
 	import { ChevronDown, ChevronRight } from '@lucide/svelte';
+	import ChannelSettings from '$lib/settings/ChannelSettings.svelte';
+	import { prettyPrintBot } from '$lib/types.js';
 
-	let data = $props();
+	let { data } = $props();
 	let config = getConfig(data);
 
 	let backend = $state(null);
@@ -15,6 +17,7 @@
 	let selection: [TypeOfSelection, Guild | Channel | null] = $state([TypeOfSelection.None, null]);
 
 	onMount(async () => {
+		console.log('props: ', data.bot);
 		backend = await Backend.create(data.bot);
 		guilds = await backend.getGuilds();
 		guilds = guilds.filter((guild) => (guild.permissions & 0x0000000000000020) === 0x0000000000000020);
@@ -47,7 +50,7 @@
 			<enhanced:img src={config.botProfile} class="size-[4rem] rounded-full aspect-square m-3 mx-3 md:mx-5 flex-1"
 										alt="Bot Logo" />
 			<h1 class="my-auto text-2xl md:text-4xl flex-1">
-				{data.bot} Settings
+				{prettyPrintBot(data.bot)} Settings
 			</h1>
 			<Button class="self-end flex-10 md:mr-5 my-auto bg-[#5865F2] p-2.5 rounded-md min-w-32 font-bold" on:click={async () => {
 				await config.userManager.removeUser()
@@ -98,6 +101,9 @@
 			{#if selection[0] !== TypeOfSelection.None}
 				<span class="text-2xl font-bold">Settings for {selection[1].name}</span>
 				<hr class="mt-1">
+			{/if}
+			{#if selection[0] === TypeOfSelection.Channel}
+				<ChannelSettings backend={backend} channel={selection[1]} />
 			{/if}
 		</div>
 	</div>

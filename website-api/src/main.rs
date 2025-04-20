@@ -1,24 +1,34 @@
 mod auth;
+mod request_handlers;
 mod utility;
 
 use crate::auth::{AuthSystem, filter_manages_guilds};
+#[macro_use]
 use crate::utility::{Server, get_channels_for_guild};
+use crate::utility::GenericError;
+use anyhow::anyhow;
 use hmac::Mac;
 use log::{debug, error};
+use rslash_common::Bot;
 use serenity::all::{Channel, GuildChannel, GuildId};
 use serenity::futures;
 use serenity::http::ErrorResponse;
 use serenity::http::HttpError::UnsuccessfulRequest;
 use std::collections::HashMap;
 use std::sync::Arc;
-use warp::http::StatusCode;
+use tarpc::context::Context;
+use warp::http::{HeaderValue, StatusCode};
+use warp::hyper::HeaderMap;
 use warp::{Filter, Rejection, reject};
 
 async fn get_channels_for_guilds(
+    bot: Bot,
     guilds: Vec<GuildId>,
     server: Server,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let futures = guilds.iter().map(|id| get_channels_for_guild(id, &server));
+    let futures = guilds
+        .iter()
+        .map(|id| get_channels_for_guild(bot, id, &server));
 
     let results: Vec<Result<Option<Vec<GuildChannel>>, anyhow::Error>> =
         futures::future::join_all(futures).await;
@@ -63,95 +73,52 @@ impl Into<Vec<GuildId>> for GuildListQuery {
     }
 }
 
-#[derive(Debug)]
-struct GenericError {
-    error: anyhow::Error,
-}
-
-impl GenericError {
-    fn new(error: anyhow::Error) -> Self {
-        Self { error }
-    }
-}
-
-impl warp::reject::Reject for GenericError {}
-
-async fn handle_generic_error(err: Rejection) -> Result<impl warp::Reply, warp::Rejection> {
-    if let Some(generic_error) = err.find::<GenericError>() {
-        error!("Generic error: {:?}", generic_error.error);
-        Ok(warp::reply::with_status(
-            "Internal server error",
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ))
-    } else {
-        error!("Unhandled rejection: {:?}", err);
-        Ok(warp::reply::with_status(
-            "Internal server error",
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ))
-    }
-}
-
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
-    let server = Server {
-        http: Arc::new(serenity::http::Http::new(
-            &*std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set"),
-        )),
-        auth: AuthSystem::new(
-            hmac::Hmac::<sha2::Sha256>::new_from_slice(
-                (&*std::env::var("JWT_SECRET").expect("JWT_SECRET must be set")).as_bytes(),
-            )
-            .expect("Invalid JWT secret"),
-        ),
-    };
+    let server = Server::new().await.expect("Failed to create server");
 
-    let get_channels = warp::path!("api" / "guilds" / "batch" / "channels")
+    let get_channels = warp::path!("api" / Bot / "guild" / "batch" / "channels")
         .and(warp::get())
         .and(filter_manages_guilds(server.auth.clone()))
         .and(with_server(server.clone()))
         .and(warp::query::<GuildListQuery>())
-        .and_then(|_, server, body: GuildListQuery| get_channels_for_guilds(body.into(), server))
-        .recover(auth::rejection_handler);
+        .and_then(|bot: Bot, _, server, body: GuildListQuery| {
+            get_channels_for_guilds(bot, body.into(), server)
+        });
 
-    let login = warp::path!("api" / "login")
-        .and(warp::post())
-        .and(with_server(server.clone()))
-        .and(warp::body::json())
-        .and_then(|server: Server, body: String| async move {
-            let token = match server.auth.retrieve_discord_id(&body).await {
-                Ok(token) => token,
-                Err(err) => {
-                    error!("Error retrieving Discord ID: {}", err);
-                    return Err(reject::custom(GenericError::new(err)));
-                }
-            };
-            Ok(warp::reply::json(&token))
-        })
+    let handler = get_channels
+        .or(request_handlers::channels::subscriptions::routes(
+            server.clone(),
+        ))
+        .or(auth::routes(server.clone()))
+        .or(request_handlers::user::guilds::routes(server.clone()))
         .recover(auth::rejection_handler)
-        .recover(handle_generic_error);
-
-    let handler = get_channels.or(login).with(warp::log("website_api")).with(
-        warp::cors()
-            .allow_any_origin()
-            .allow_origin("https://rsla.sh")
-            .allow_origin("http://localhost:5173")
-            .allow_origin("http://localhost:8080")
-            .allow_methods(vec!["GET", "POST", "OPTIONS"])
-            .allow_headers(vec![
-                "User-Agent",
-                "Sec-Fetch-Mode",
-                "Referer",
-                "Origin",
-                "Access-Control-Request-Method",
-                "Access-Control-Request-Headers",
-                "Access-Control-Allow-Origin",
-                "content-type",
-                "authorization",
-            ]),
-    );
+        .recover(utility::handle_generic_error)
+        .with(warp::log("website_api"))
+        .with(
+            warp::cors()
+                .allow_any_origin()
+                .allow_origin("https://rsla.sh")
+                .allow_origin("http://localhost:5173")
+                .allow_origin("http://localhost:8080")
+                .allow_methods(vec!["GET", "POST", "OPTIONS"])
+                .allow_credentials(true)
+                .allow_headers(vec![
+                    "User-Agent",
+                    "Sec-Fetch-Mode",
+                    "Referer",
+                    "Origin",
+                    "Access-Control-Request-Method",
+                    "Access-Control-Request-Headers",
+                    "Access-Control-Allow-Origin",
+                    "Access-Control-Allow-Credentials",
+                    "content-type",
+                    "Cookie",
+                    "Set-Cookie",
+                ]),
+        );
 
     warp::serve(handler).run(([0, 0, 0, 0], 8080)).await;
 }

@@ -15,8 +15,8 @@ use tokio::time::{Instant, interval};
 
 use futures::future;
 
-use post_subscriber::{Bot, Subscriber, Subscription};
-use rslash_common::{initialise_observability, span_filter};
+use post_subscriber::{Subscriber, Subscription};
+use rslash_common::{Bot, initialise_observability, span_filter};
 use tarpc::{
     context,
     server::{self, Channel},

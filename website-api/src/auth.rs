@@ -1,32 +1,43 @@
-use crate::utility::Server;
+use crate::utility::{GenericError, Server};
 use crate::{GuildListQuery, with_server};
+use anyhow::anyhow;
 use hmac::Hmac;
 use jwt::{SignWithKey, VerifyWithKey};
-use log::debug;
-use serenity::all::{Guild, GuildId, GuildInfo, HttpError, User, UserId};
+use log::{debug, error};
+use redis::AsyncTypedCommands;
+use redis::aio::MultiplexedConnection;
+use rslash_common::Bot;
+use serde_json::json;
+use serenity::all::{Channel, Guild, GuildId, GuildInfo, HttpError, User, UserId};
 use serenity::http::Http;
 use sha2::Sha256;
 use std::convert::Infallible;
 use std::sync::Arc;
+use tokio::join;
 use warp::hyper::StatusCode;
 use warp::{Filter, Rejection, reject};
 
 #[derive(serde::Deserialize, serde::Serialize)]
-struct Claim {
-    discord_id: UserId,
-    /// The guilds the user is a manager of
-    guilds: Vec<GuildId>,
+pub struct Claim {
+    pub discord_id: UserId,
+    /// The user the user is a manager of
+    pub guilds: Vec<GuildId>,
 }
 
 #[derive(Clone)]
 pub struct AuthSystem {
     key: Arc<Hmac<Sha256>>,
+    pub redis: MultiplexedConnection,
 }
 
 #[derive(Debug)]
 pub(crate) enum AuthError {
     NoPermission(String),
     TokenValidationFailed,
+    /// Failed to fetch the resource that authorisation was being checked against
+    FailedToFetchResource,
+    /// Some logic failure in the auth system
+    InternalError,
 }
 
 pub(crate) async fn rejection_handler(err: Rejection) -> Result<impl warp::Reply, Rejection> {
@@ -46,9 +57,19 @@ pub(crate) async fn rejection_handler(err: Rejection) -> Result<impl warp::Reply
 
 impl reject::Reject for AuthError {}
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct DiscordToken {
+    access_token: String,
+    expires_at: u64,
+    refresh_token: String,
+}
+
 impl AuthSystem {
-    pub fn new(key: Hmac<Sha256>) -> Self {
-        Self { key: Arc::new(key) }
+    pub async fn new(redis: MultiplexedConnection, key: Hmac<Sha256>) -> Self {
+        Self {
+            key: Arc::new(key),
+            redis,
+        }
     }
 
     /// Verify a JWT token
@@ -71,23 +92,92 @@ impl AuthSystem {
         }
     }
 
-    /// Create a JWT token from a Discord token
-    pub async fn retrieve_discord_id(&self, discord_token: &str) -> Result<String, anyhow::Error> {
-        let req = reqwest::Client::new()
-            .get("https://discord.com/api/v10/users/@me")
-            .bearer_auth(discord_token)
+    /// Login a user by their Discord OAuth code. Returns a JWT token for our backend.
+    pub async fn login_to_discord(
+        &mut self,
+        client_id: &str,
+        client_secret: &str,
+        discord_code: &str,
+        redirect_uri: &str,
+    ) -> Result<String, anyhow::Error> {
+        debug!("Client sec {}", client_secret);
+        let client = reqwest::Client::new();
+        let req = client
+            .post("https://discord.com/api/oauth2/token")
+            .form(&json!({
+                "grant_type": "authorization_code",
+                "code": discord_code,
+                "redirect_uri": redirect_uri,
+            }))
+            .basic_auth(client_id, Some(client_secret))
             .send()
             .await?;
 
-        let me = req.json::<User>().await?;
+        let json: serde_json::Value = req.json().await?;
+        debug!("Discord token response: {:?}", json);
+        let discord_token = DiscordToken {
+            access_token: json
+                .get("access_token")
+                .ok_or(anyhow!("Missing access_token"))?
+                .as_str()
+                .ok_or(anyhow!("Access token not string"))?
+                .to_string(),
+            expires_at: json
+                .get("expires_in")
+                .ok_or(anyhow!("Missing expires_in"))?
+                .as_u64()
+                .ok_or(anyhow!("expires_in not u64"))?
+                + chrono::Utc::now().timestamp() as u64,
+            refresh_token: json
+                .get("refresh_token")
+                .ok_or(anyhow!("Missing refresh_token"))?
+                .as_str()
+                .ok_or(anyhow!("Refresh token not string"))?
+                .to_string(),
+        };
 
-        let req = reqwest::Client::new()
-            .get("https://discord.com/api/v10/users/@me/guilds")
-            .bearer_auth(discord_token)
-            .send()
+        // Send requests concurrently
+        let (me_req, guilds_req) = join!(
+            reqwest::Client::new()
+                .get("https://discord.com/api/v10/users/@me")
+                .bearer_auth(&discord_token.access_token)
+                .send(),
+            reqwest::Client::new()
+                .get("https://discord.com/api/v10/users/@me/guilds")
+                .bearer_auth(&discord_token.access_token)
+                .send(),
+        );
+
+        let me = me_req?.text().await?;
+        let me: User = match serde_json::from_str(&me) {
+            Ok(user) => user,
+            Err(_) => {
+                return Err(anyhow::anyhow!("Failed to parse user response, {}", me));
+            }
+        };
+
+        let guilds = guilds_req?.text().await?;
+        let guilds: Vec<GuildInfo> = match serde_json::from_str(&guilds) {
+            Ok(guilds) => guilds,
+            Err(_) => {
+                return Err(anyhow::anyhow!("Failed to parse user response, {}", guilds));
+            }
+        };
+
+        let guilds = guilds
+            .into_iter()
+            .filter(|guild| guild.permissions.manage_guild() || guild.permissions.administrator())
+            .collect::<Vec<_>>();
+
+        // Store Guilds in Redis for faster lookup later
+        let guilds_json = guilds
+            .iter()
+            .filter_map(|guild| serde_json::to_string(guild).ok())
+            .collect::<Vec<_>>();
+
+        self.redis
+            .lpush(format!("website:users:{}:guilds", me.id), guilds_json)
             .await?;
-
-        let guilds = req.json::<Vec<GuildInfo>>().await?;
 
         let claim = Claim {
             discord_id: me.id,
@@ -104,13 +194,13 @@ fn with_auth(
     warp::any().map(move || auth.clone())
 }
 
-/// Reject request if the user does not have `Manage Guild` permission on all guilds
+/// Reject request if the user does not have `Manage Guild` permission on all user
 pub fn filter_manages_guilds(
     auth: AuthSystem,
 ) -> impl Filter<Extract = ((),), Error = Rejection> + Clone + Sized {
     with_auth(auth)
         .and(warp::query::<GuildListQuery>())
-        .and(warp::header::<String>("Authorization"))
+        .and(warp::cookie("token"))
         .and_then(
             |auth: AuthSystem, guild_list_query: GuildListQuery, token: String| async move {
                 let token = token.trim_start_matches("Bearer ");
@@ -122,21 +212,152 @@ pub fn filter_manages_guilds(
                     .collect::<Result<Vec<_>, _>>();
 
                 if let Err(err) = verifications {
-                    debug!("Error verifying guilds: {:?}", err);
+                    debug!("Error verifying user: {:?}", err);
                     return Err(reject::custom(AuthError::TokenValidationFailed));
                 }
 
                 if verifications.unwrap().iter().all(|x| *x) {
-                    debug!("User has permission to manage all guilds");
+                    debug!("User has permission to manage all user");
                     return Ok(());
                 } else {
                     Err(reject::custom(crate::auth::AuthError::NoPermission(
                         format!(
-                            "User does not have permission to manage some of guilds {:?}",
+                            "User does not have permission to manage some of user {:?}",
                             guilds
                         ),
                     )))
                 }
             },
         )
+}
+
+pub fn filter_channel_belongs_to_managed_guild(
+    server: Server,
+) -> impl Filter<Extract = ((),), Error = Rejection> + Clone + Sized {
+    warp::path!("api" / Bot / "channel" / u64)
+        .and(with_server(server.clone()))
+        .and(warp::cookie("token"))
+        .and_then(
+            |bot: Bot, channel_id: u64, server: Server, token: String| async move {
+                let channel = server.http[&bot]
+                    .get_channel(channel_id.into())
+                    .await
+                    .map_err(|err| {
+                        debug!("Error fetching channel: {:?}", err);
+                        reject::custom(AuthError::FailedToFetchResource)
+                    })?;
+
+                let verification = match channel {
+                    Channel::Guild(guild_channel) => {
+                        let guild_id = guild_channel.guild_id;
+                        match server.auth.verify_guild(&token, &guild_id) {
+                            Ok(true) => Ok(true),
+                            Ok(false) => Err(reject::custom(AuthError::NoPermission(
+                                "User does not have permission to access this channel".to_string(),
+                            ))),
+                            Err(_) => Err(reject::custom(AuthError::TokenValidationFailed)),
+                        }
+                    }
+                    Channel::Private(private_channel) => {
+                        let authed_user = match server.auth.verify_claim(&token) {
+                            Ok(claim) => claim.discord_id,
+                            Err(_) => {
+                                return Err(reject::custom(AuthError::TokenValidationFailed));
+                            }
+                        };
+                        if private_channel.recipient.id == authed_user {
+                            Ok(true)
+                        } else {
+                            Err(reject::custom(AuthError::NoPermission(
+                                "User does not have permission to access this channel".to_string(),
+                            )))
+                        }
+                    }
+                    _ => {
+                        error!("Encountered unknown channel type");
+                        Err(reject::custom(AuthError::InternalError))
+                    }
+                };
+
+                match verification {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(reject::custom(AuthError::NoPermission(
+                        "User does not have permission to access this channel".to_string(),
+                    ))),
+                    Err(err) => {
+                        debug!("Error verifying channel: {:?}", err);
+                        Err(err)
+                    }
+                }
+            },
+        )
+}
+
+/// Retrieve logged-in user's claim
+pub fn get_user_claim(
+    server: Server,
+) -> impl Filter<Extract = (Claim,), Error = Rejection> + Clone + Sized {
+    with_server(server)
+        .and(warp::cookie::optional("token"))
+        .and_then(|server: Server, token: Option<String>| async move {
+            if token.is_none() {
+                return Err(reject::custom(AuthError::NoPermission(
+                    "Token not provided".to_string(),
+                )));
+            }
+
+            let claim = server.auth.verify_claim(&token.unwrap());
+            claim.map_err(|err| {
+                error!("Token validation failed due to error: {:?}", err);
+                reject::custom(AuthError::TokenValidationFailed)
+            })
+        })
+}
+
+#[derive(serde::Deserialize)]
+struct LoginBody {
+    code: String,
+    redirect_uri: String,
+}
+
+pub fn routes(
+    server: Server,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    let login = warp::path!("api" / Bot / "login")
+        .and(warp::post())
+        .and(with_server(server.clone()))
+        .and(warp::body::json())
+        .and_then(|bot: Bot, mut server: Server, body: LoginBody| async move {
+            let token = match server
+                .auth
+                .login_to_discord(
+                    &server.bot_credentials[&bot].id,
+                    &server.bot_credentials[&bot].secret,
+                    &body.code,
+                    &body.redirect_uri,
+                )
+                .await
+            {
+                Ok(token) => token,
+                Err(err) => {
+                    error!("Error retrieving Discord ID: {:?}", err);
+                    return Err(reject::custom(GenericError::new(err)));
+                }
+            };
+            Ok(warp::reply::with_header(
+                warp::reply::reply(),
+                "Set-Cookie",
+                format!(
+                    "token={}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=2592000;",
+                    token
+                ),
+            ))
+        });
+
+    let check = warp::path!("api" / "login" / "check")
+        .and(warp::get())
+        .and(get_user_claim(server.clone()))
+        .map(|_| warp::reply::with_status("Authenticated", StatusCode::OK));
+
+    login.or(check)
 }

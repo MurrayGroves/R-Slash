@@ -79,3 +79,5 @@ r-slash.code-workspace
 website/.env.development
 
 website/.env.production
+
+website-api/debug.sh

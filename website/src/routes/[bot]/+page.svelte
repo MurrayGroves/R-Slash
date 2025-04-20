@@ -1,14 +1,14 @@
-<script>
+<script lang="ts">
 
 	import { fly } from 'svelte/transition';
 	import { Button } from 'flowbite-svelte';
 	import { onMount } from 'svelte';
-	import { getConfig, getUser } from '$lib/shared';
-	import { botShorthand } from '$lib/types';
+	import { Backend, checkLogin, getConfig } from '$lib/shared';
+	import { botShorthand, prettyPrintBot } from '$lib/types';
 
 	let { data } = $props();
 
-	const config = getConfig(data);
+	const config = getConfig(data.bot);
 
 	let currentSubreddit = $state(0);
 
@@ -16,11 +16,10 @@
 		currentSubreddit = (currentSubreddit + 1) % config.subreddits.length;
 	}, 1500);
 
-	let user = $state(null);
+	let loggedIn = $state(false);
 
 	onMount(async () => {
-		user = await getUser(config);
-		console.log(user);
+		loggedIn = await checkLogin();
 	});
 </script>
 
@@ -30,17 +29,17 @@
 			<enhanced:img src={config.botProfile} class="size-[4rem] rounded-full aspect-square m-3 mx-3 md:mx-5 flex-1"
 										alt="Bot Logo" />
 			<h1 class="my-auto text-2xl md:text-4xl flex-1">
-				{data.bot}
+				{prettyPrintBot(data.bot)}
 			</h1>
-			{#if user === null}
-				<Button class="self-end flex-10 md:mr-[3em] my-auto bg-[#5865F2] p-2.5 rounded-md min-w-32 font-bold" on:click={() => {
-				config.userManager.signinRedirect();
+			{#if !loggedIn}
+				<Button class="self-end flex-10 md:mr-[3em] my-auto bg-[#5865F2] p-2.5 rounded-md min-w-32 font-bold" on:click={async () => {
+				await Backend.create(data.bot);
 			}}>
 					Login with Discord
 				</Button>
 			{:else}
 				<Button class="self-end flex-10 md:mr-[3em] my-auto bg-[#5865F2] p-2.5 rounded-md min-w-32 font-bold" on:click={() => {
-					window.location.href = `${botShorthand(config.bot)}/settings`
+					window.location.href = `${botShorthand(data.bot)}/settings`
 				}}>
 					Settings
 				</Button>

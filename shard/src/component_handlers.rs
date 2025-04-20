@@ -3,8 +3,8 @@ use std::{collections::HashMap, time::Duration};
 use anyhow::{Result, anyhow, bail};
 use auto_poster::AutoPosterClient;
 use post_api::{get_subreddit, get_subreddit_search};
-use post_subscriber::{Bot, SubscriberClient};
-use rslash_common::{ConfigStruct, InteractionResponse, InteractionResponseMessage};
+use post_subscriber::SubscriberClient;
+use rslash_common::{Bot, ConfigStruct, InteractionResponse, InteractionResponseMessage};
 use serenity::all::{ComponentInteraction, ComponentInteractionDataKind, Context};
 use tarpc::context;
 use tokio::time::timeout;
@@ -94,7 +94,10 @@ pub async fn autopost_cancel<'a>(
         .get::<AutoPosterClient>()
         .ok_or(anyhow!("Auto-poster client not found"))?;
 
-    let autopost = match client.delete_autopost(context::current(), id, interaction.channel_id.get()).await? {
+    let autopost = match client
+        .delete_autopost(context::current(), id, interaction.channel_id.get())
+        .await?
+    {
         Ok(x) => x,
         Err(e) => {
             bail!(e);

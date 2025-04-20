@@ -5,15 +5,32 @@ edition = "2024"
 
 [dependencies]
 warp = "*"
-tokio = { version = "*", features = ["rt", "rt-multi-thread", "macros"] }
+
+serenity = "*"
+reqwest = { version = "*", features = ["json"] }
+
+jwt = "*"
+hmac = "*"
+sha2 = "*"
+
+tarpc = { version = "*", features = [
+    "serde-transport",
+    "tcp",
+    "serde-transport-bincode",
+] }
+stubborn-io = "*"
+redis = { git = "https://github.com/MurrayGroves/redis-rs", branch = "typed-macros", features = ["aio", "tokio-comp"] }
+
+strum = "*"
+anyhow = "1.0.97"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 env_logger = "0.11.6"
 log = "0.4.26"
 chrono = "0.4.40"
-serenity = "*"
-anyhow = "1.0.97"
-jwt = "*"
-hmac = "*"
-sha2 = "*"
-reqwest = { version = "*", features = ["json"] }
+tokio = { version = "*", features = ["rt", "rt-multi-thread", "macros"] }
+
+
+post_subscriber = { path = "../post-subscriber" }
+auto_poster = { path = "../auto-poster" }
+rslash_common = { path = "../rslash_common" }

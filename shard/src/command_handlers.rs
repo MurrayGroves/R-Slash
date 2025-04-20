@@ -1,6 +1,6 @@
 use auto_poster::AutoPosterClient;
 use log::{error, trace};
-use post_subscriber::{Bot, SubscriberClient};
+use post_subscriber::SubscriberClient;
 use serde_json::json;
 use serenity::all::{
     CommandDataOptionValue, CreateButton, CreateInputText, CreateModal, CreateSelectMenu,
@@ -29,7 +29,7 @@ use anyhow::{Result, anyhow, bail};
 use memberships::*;
 
 use post_api::*;
-use rslash_common::InteractionResponse;
+use rslash_common::{Bot, InteractionResponse};
 use rslash_common::{ConfigStruct, InteractionResponseMessage};
 
 use crate::discord::ResponseTracker;

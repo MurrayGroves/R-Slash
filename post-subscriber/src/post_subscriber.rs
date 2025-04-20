@@ -1,7 +1,8 @@
-use std::{collections::HashSet, hash::Hash, hash::Hasher};
-
 use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+use std::{collections::HashSet, hash::Hash, hash::Hasher};
+use rslash_common::Bot;
 
 #[tarpc::service]
 pub trait Subscriber {
@@ -48,20 +49,5 @@ impl Hash for Subscription {
         self.subreddit.hash(state);
         self.channel.hash(state);
         self.bot.hash(state);
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Hash)]
-pub enum Bot {
-    BB,
-    RS,
-}
-
-impl Into<Bson> for Bot {
-    fn into(self) -> Bson {
-        match self {
-            Bot::BB => Bson::String("BB".to_string()),
-            Bot::RS => Bson::String("RS".to_string()),
-        }
     }
 }

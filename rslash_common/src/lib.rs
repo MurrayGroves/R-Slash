@@ -1,3 +1,5 @@
+use mongodb::bson::Bson;
+use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -18,11 +20,13 @@ pub enum AutoPostCommand {
     Stop(ChannelId),
 }
 
+use serde::{Deserialize, Serialize};
 use serenity::all::{
     ChannelId, CreateActionRow, CreateEmbed, CreateInteractionResponse,
     CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage,
     CreateModal, UserId,
 };
+use strum::{Display, EnumIter};
 use tokio::time::Instant;
 
 /// Stores config values required for operation of the shard
@@ -298,4 +302,31 @@ macro_rules! initialise_observability {
 			) // Sentry Layer
 			.init();
     };
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Hash, EnumIter, Eq, Display)]
+pub enum Bot {
+    BB,
+    RS,
+}
+
+impl Into<Bson> for Bot {
+    fn into(self) -> Bson {
+        match self {
+            Bot::BB => Bson::String("BB".to_string()),
+            Bot::RS => Bson::String("RS".to_string()),
+        }
+    }
+}
+
+impl FromStr for Bot {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "bb" => Ok(Bot::BB),
+            "rs" => Ok(Bot::RS),
+            _ => Err(format!("Invalid bot name: {}", s)),
+        }
+    }
 }

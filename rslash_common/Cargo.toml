@@ -21,3 +21,6 @@ tonic = "*"
 opentelemetry = "0.28.0"
 opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
 opentelemetry-appender-tracing = "*"
+serde = { version = "1.0.218", features = ["derive"] }
+
+strum = { version = "*", features = ["derive"] }
