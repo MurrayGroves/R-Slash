@@ -1,11 +1,8 @@
-use crate::auth::{Claim, filter_channel_belongs_to_managed_guild, get_user_claim};
-use crate::request_handlers::channels::subscriptions::get_subscriptions_for_channel;
+use crate::auth::{Claim, get_user_claim};
 use crate::utility::{GenericError, Server};
 use crate::with_server;
-use anyhow::anyhow;
 use log::error;
 use redis::AsyncTypedCommands;
-use rslash_common::Bot;
 use serenity::all::{GuildInfo, UserId};
 use warp::{Filter, reject};
 

@@ -8,35 +8,46 @@
 	import { prettyPrintBot } from '$lib/types.js';
 
 	let { data } = $props();
-	let config = getConfig(data);
+	let config = getConfig(data.bot);
 
-	let backend = $state(null);
-	let guilds: Guild[] = $state([]);
+	let backend: Backend | null = $state(null);
+	let guilds: UIGuild[] = $state([]);
 	let channels: { [Key: string]: Channel[] } = $state({});
 
 	let selection: [TypeOfSelection, Guild | Channel | null] = $state([TypeOfSelection.None, null]);
 
+	interface UIGuild extends Guild {
+		hover?: boolean;
+		expanded?: boolean;
+	}
+
 	onMount(async () => {
-		console.log('props: ', data.bot);
 		backend = await Backend.create(data.bot);
 		guilds = await backend.getGuilds();
 		guilds = guilds.filter((guild) => (guild.permissions & 0x0000000000000020) === 0x0000000000000020);
 		console.log(guilds);
 		channels = await backend.getGuildsChannels(guilds);
 		console.log(channels);
-		guilds = guilds.filter(guild => guild.id in channels);
+
 		for (const [key, value] of Object.entries(channels)) {
-			let newOrder = [];
-			const categories = value.filter(channel => channel.type === 4);
-			categories.sort((a, b) => a.position !== b.position ? a.position - b.position : a.id - b.id);
-			for (let category of categories) {
-				let categoryChannels = value.filter(channel => channel.parent_id === category.id && channel.type === 0);
+			let roots: Channel[] = value.filter(channel => channel.type === 4 || channel.parent_id === null);
+
+			let newOrder: Channel[] = [];
+			roots.sort((a, b) => a.position !== b.position ? a.position - b.position : Number.parseInt(a.id) - Number.parseInt(b.id));
+			for (let root of roots) {
+				if (root.type !== 4) {
+					newOrder.push(root);
+					continue;
+				}
+
+				let categoryChannels = value.filter(channel => channel.parent_id === root.id && channel.type === 0);
 				if (categoryChannels.length > 0) {
-					newOrder.push(category);
-					categoryChannels.sort((a, b) => a.position !== b.position ? a.position - b.position : a.id - b.id);
+					newOrder.push(root);
+					categoryChannels.sort((a, b) => a.position !== b.position ? a.position - b.position : Number.parseInt(a.id) - Number.parseInt(b.id));
 					newOrder = newOrder.concat(categoryChannels);
 				}
 			}
+
 			channels[key] = newOrder;
 		}
 		console.log(channels);
@@ -99,10 +110,10 @@
 		</div>
 		<div class="flex-[4] p-5">
 			{#if selection[0] !== TypeOfSelection.None}
-				<span class="text-2xl font-bold">Settings for {selection[1].name}</span>
+				<span class="text-2xl font-bold">Settings for {selection[1]?.name}</span>
 				<hr class="mt-1">
 			{/if}
-			{#if selection[0] === TypeOfSelection.Channel}
+			{#if selection[0] === TypeOfSelection.Channel && selection[1] && 'type' in selection[1] && backend}
 				<ChannelSettings backend={backend} channel={selection[1]} />
 			{/if}
 		</div>

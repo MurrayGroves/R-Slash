@@ -8,7 +8,9 @@ use redis::AsyncTypedCommands;
 use redis::aio::MultiplexedConnection;
 use rslash_common::Bot;
 use serde_json::json;
-use serenity::all::{Channel, Guild, GuildId, GuildInfo, HttpError, PartialGuild, User, UserId};
+use serenity::all::{
+    Channel, ChannelId, Guild, GuildId, GuildInfo, HttpError, PartialGuild, User, UserId,
+};
 use serenity::futures;
 use serenity::http::Http;
 use sha2::Sha256;
@@ -191,11 +193,7 @@ impl AuthSystem {
         // Store Guilds in Redis for faster lookup later
         let guilds_json = guilds
             .iter()
-            .filter(|guild| {
-                bot_guilds
-                    .iter()
-                    .any(|bot_guild| bot_guild.id == guild.id)
-            })
+            .filter(|guild| bot_guilds.iter().any(|bot_guild| bot_guild.id == guild.id))
             .filter_map(|guild| serde_json::to_string(guild).ok())
             .collect::<Vec<_>>();
 
@@ -228,7 +226,6 @@ pub fn filter_manages_guilds(
         .and(warp::cookie("token"))
         .and_then(
             |auth: AuthSystem, guild_list_query: GuildListQuery, token: String| async move {
-                let token = token.trim_start_matches("Bearer ");
                 let guilds: Vec<GuildId> = guild_list_query.into();
 
                 let verifications = guilds
@@ -242,12 +239,12 @@ pub fn filter_manages_guilds(
                 }
 
                 if verifications.unwrap().iter().all(|x| *x) {
-                    debug!("User has permission to manage all user");
+                    debug!("User has permission to manage all guilds");
                     return Ok(());
                 } else {
                     Err(reject::custom(crate::auth::AuthError::NoPermission(
                         format!(
-                            "User does not have permission to manage some of user {:?}",
+                            "User does not have permission to manage some guilds {:?}",
                             guilds
                         ),
                     )))
@@ -256,66 +253,66 @@ pub fn filter_manages_guilds(
         )
 }
 
-pub fn filter_channel_belongs_to_managed_guild(
-    server: Server,
-) -> impl Filter<Extract = ((),), Error = Rejection> + Clone + Sized {
-    warp::path!("api" / Bot / "channel" / u64)
-        .and(with_server(server.clone()))
-        .and(warp::cookie("token"))
-        .and_then(
-            |bot: Bot, channel_id: u64, server: Server, token: String| async move {
-                let channel = server.http[&bot]
-                    .get_channel(channel_id.into())
-                    .await
-                    .map_err(|err| {
-                        debug!("Error fetching channel: {:?}", err);
-                        reject::custom(AuthError::FailedToFetchResource)
-                    })?;
+pub async fn filter_channel_belongs_to_managed_guild(
+    server: &Server,
+    channel_id: u64,
+    bot: Bot,
+    token: String,
+) -> Result<(), Rejection> {
+    debug!(
+        "Checking if user has permission to access channel {}",
+        channel_id
+    );
+    let channel = server.http[&bot]
+        .get_channel(channel_id.into())
+        .await
+        .map_err(|err| {
+            debug!("Error fetching channel: {:?}", err);
+            reject::custom(AuthError::FailedToFetchResource)
+        })?;
 
-                let verification = match channel {
-                    Channel::Guild(guild_channel) => {
-                        let guild_id = guild_channel.guild_id;
-                        match server.auth.verify_guild(&token, &guild_id) {
-                            Ok(true) => Ok(true),
-                            Ok(false) => Err(reject::custom(AuthError::NoPermission(
-                                "User does not have permission to access this channel".to_string(),
-                            ))),
-                            Err(_) => Err(reject::custom(AuthError::TokenValidationFailed)),
-                        }
-                    }
-                    Channel::Private(private_channel) => {
-                        let authed_user = match server.auth.verify_claim(&token) {
-                            Ok(claim) => claim.discord_id,
-                            Err(_) => {
-                                return Err(reject::custom(AuthError::TokenValidationFailed));
-                            }
-                        };
-                        if private_channel.recipient.id == authed_user {
-                            Ok(true)
-                        } else {
-                            Err(reject::custom(AuthError::NoPermission(
-                                "User does not have permission to access this channel".to_string(),
-                            )))
-                        }
-                    }
-                    _ => {
-                        error!("Encountered unknown channel type");
-                        Err(reject::custom(AuthError::InternalError))
-                    }
-                };
-
-                match verification {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err(reject::custom(AuthError::NoPermission(
-                        "User does not have permission to access this channel".to_string(),
-                    ))),
-                    Err(err) => {
-                        debug!("Error verifying channel: {:?}", err);
-                        Err(err)
-                    }
+    let verification = match channel {
+        Channel::Guild(guild_channel) => {
+            let guild_id = guild_channel.guild_id;
+            match server.auth.verify_guild(&token, &guild_id) {
+                Ok(true) => Ok(true),
+                Ok(false) => Err(reject::custom(AuthError::NoPermission(
+                    "User does not have permission to access this channel".to_string(),
+                ))),
+                Err(_) => Err(reject::custom(AuthError::TokenValidationFailed)),
+            }
+        }
+        Channel::Private(private_channel) => {
+            let authed_user = match server.auth.verify_claim(&token) {
+                Ok(claim) => claim.discord_id,
+                Err(_) => {
+                    return Err(reject::custom(AuthError::TokenValidationFailed));
                 }
-            },
-        )
+            };
+            if private_channel.recipient.id == authed_user {
+                Ok(true)
+            } else {
+                Err(reject::custom(AuthError::NoPermission(
+                    "User does not have permission to access this channel".to_string(),
+                )))
+            }
+        }
+        _ => {
+            error!("Encountered unknown channel type");
+            Err(reject::custom(AuthError::InternalError))
+        }
+    };
+
+    match verification {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(reject::custom(AuthError::NoPermission(
+            "User does not have permission to access this channel".to_string(),
+        ))),
+        Err(err) => {
+            debug!("Error verifying channel: {:?}", err);
+            Err(err)
+        }
+    }
 }
 
 /// Retrieve logged-in user's claim
