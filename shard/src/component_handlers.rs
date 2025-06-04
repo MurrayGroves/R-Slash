@@ -2,15 +2,19 @@ use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Result, anyhow, bail};
 use auto_poster::AutoPosterClient;
-use post_api::{get_subreddit, get_subreddit_search};
+use post_api::{get_subreddit, get_subreddit_search, optional_post_to_response};
 use post_subscriber::{Bot, SubscriberClient};
-use rslash_common::{ConfigStruct, InteractionResponse, InteractionResponseMessage};
-use serenity::all::{ComponentInteraction, ComponentInteractionDataKind, Context};
+use rslash_common::{InteractionResponse, InteractionResponseMessage};
+use serenity::all::{
+    ComponentInteraction, ComponentInteractionDataKind, Context, CreateInteractionResponse,
+    CreateInteractionResponseMessage,
+};
 use tarpc::context;
+use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tracing::{debug, instrument};
 
-use crate::{NAMESPACE, capture_event, discord::ResponseTracker};
+use crate::{NAMESPACE, ShardState, capture_event, discord::ResponseTracker};
 
 #[instrument(skip(ctx, interaction, tracker))]
 pub async fn unsubscribe<'a>(
@@ -28,10 +32,11 @@ pub async fn unsubscribe<'a>(
         }
     };
 
-    let data_lock = ctx.data.read().await;
-    let client = data_lock
-        .get::<SubscriberClient>()
-        .ok_or(anyhow!("Subscriber client not found"))?;
+    let client = ctx
+        .data::<ShardState>()
+        .post_subscriber
+        .clone();
+
     let bot = match (&*NAMESPACE).as_str() {
         "r-slash" => Bot::RS,
         "booty-bot" => Bot::BB,
@@ -54,7 +59,7 @@ pub async fn unsubscribe<'a>(
     }
 
     capture_event(
-        ctx.data.clone(),
+        ctx.data(),
         "unsubscribe_subreddit",
         Some(HashMap::from([("subreddit", subreddit.clone())])),
         interaction.guild_id,
@@ -64,11 +69,11 @@ pub async fn unsubscribe<'a>(
     .await;
 
     tracker
-        .send_response(InteractionResponse::Message(InteractionResponseMessage {
-            content: Some(format!("Unsubscribed from r/{}", subreddit)),
-            ephemeral: true,
-            ..Default::default()
-        }))
+        .send_response(CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::default()
+                .content(format!("Unsubscribed from r/{}", subreddit))
+                .ephemeral(true),
+        ))
         .await
 }
 
@@ -89,12 +94,12 @@ pub async fn autopost_cancel<'a>(
     }
     .parse()?;
 
-    let data_lock = ctx.data.read().await;
-    let client = data_lock
-        .get::<AutoPosterClient>()
-        .ok_or(anyhow!("Auto-poster client not found"))?;
+    let client = ctx.data::<ShardState>().auto_poster.clone();
 
-    let autopost = match client.delete_autopost(context::current(), id, interaction.channel_id.get()).await? {
+    let autopost = match client
+        .delete_autopost(context::current(), id, interaction.channel_id.get())
+        .await?
+    {
         Ok(x) => x,
         Err(e) => {
             bail!(e);
@@ -116,7 +121,7 @@ pub async fn autopost_cancel<'a>(
     );
 
     capture_event(
-        ctx.data.clone(),
+        ctx.data(),
         "cancel_autopost",
         None,
         interaction.guild_id,
@@ -126,11 +131,11 @@ pub async fn autopost_cancel<'a>(
     .await;
 
     tracker
-        .send_response(InteractionResponse::Message(InteractionResponseMessage {
-            content: Some(format!("Stopped Autopost: {}", fancy_text)),
-            ephemeral: true,
-            ..Default::default()
-        }))
+        .send_response(CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::default()
+                .content(format!("Stopped Autopost: {}", fancy_text))
+                .ephemeral(true),
+        ))
         .await
 }
 
@@ -149,7 +154,7 @@ pub async fn post_again<'a>(
     };
 
     capture_event(
-        ctx.data.clone(),
+        ctx.data(),
         "subreddit_cmd",
         Some(HashMap::from([
             ("subreddit", subreddit.clone().to_lowercase()),
@@ -162,34 +167,26 @@ pub async fn post_again<'a>(
     )
     .await;
 
-    let data_read = ctx.data.read().await;
-    let conf = data_read.get::<ConfigStruct>().unwrap();
-    let mut con = conf.redis.clone();
+    let mut con = ctx.data::<ShardState>().redis.clone();
 
     let component_response = match search_enabled {
         true => {
             let search = custom_data["search"].to_string().replace('"', "");
-            match timeout(
+            timeout(
                 Duration::from_secs(30),
-                get_subreddit_search(subreddit, search, &mut con, interaction.channel_id),
+                get_subreddit_search(&subreddit, &search, &mut con, interaction.channel_id),
             )
             .await
-            {
-                Ok(x) => x,
-                Err(x) => Err(anyhow!("Timeout getting search results: {:?}", x)),
-            }
+            .unwrap_or_else(|x| Err(anyhow!("Timeout getting search results: {:?}", x)))
+            .map(|post| optional_post_to_response(post, true))
         }
-        false => {
-            match timeout(
-                Duration::from_secs(30),
-                get_subreddit(subreddit, &mut con, interaction.channel_id),
-            )
-            .await
-            {
-                Ok(x) => x,
-                Err(x) => Err(anyhow!("Timeout getting subreddit: {:?}", x)),
-            }
-        }
+        false => timeout(
+            Duration::from_secs(30),
+            get_subreddit(&subreddit, &mut con, interaction.channel_id),
+        )
+        .await
+        .unwrap_or_else(|x| Err(anyhow!("Timeout getting subreddit: {:?}", x)))
+        .map(|post| post.into()),
     };
 
     tracker.send_response(component_response?).await

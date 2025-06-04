@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -5,12 +6,16 @@ use anyhow::{anyhow, bail, ensure, Context, Error};
 use async_recursion::async_recursion;
 use log::warn;
 use redis::aio::MultiplexedConnection;
-use redis::{from_redis_value, AsyncCommands};
+use redis::{from_redis_value, AsyncTypedCommands};
 use reqwest::header;
 use reqwest::header::HeaderMap;
 use serde_json::json;
 use serenity::all::{
     ButtonStyle, ChannelId, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor,
+    GenericChannelId,
+};
+use serenity::builder::{
+    CreateComponent, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
 };
 use tokio::time::sleep;
 use tracing::{debug, error, error_span, instrument};
@@ -69,14 +74,14 @@ pub async fn get_length_of_search_results(
     search_index: String,
     search: &str,
     con: &mut redis::aio::MultiplexedConnection,
-) -> Result<u16, anyhow::Error> {
+) -> Result<isize, anyhow::Error> {
     let new_search = format!("w'*{}*'", redis_sanitise(&search));
 
     debug!(
         "Getting length of search results for {} in {}",
         new_search, search_index
     );
-    let results: Vec<u16> = redis::cmd("FT.SEARCH")
+    let results: Vec<isize> = redis::cmd("FT.SEARCH")
         .arg(search_index)
         .arg(&new_search)
         .arg("LIMIT")
@@ -95,7 +100,7 @@ pub async fn get_length_of_search_results(
 pub async fn get_post_at_search_index(
     search_index: String,
     search: &str,
-    index: u16,
+    index: isize,
     con: &mut redis::aio::MultiplexedConnection,
 ) -> Result<String, anyhow::Error> {
     let new_search = format!("w'*{}*'", redis_sanitise(&search));
@@ -158,15 +163,149 @@ pub async fn get_post_at_list_index(
     Ok(results.remove(0))
 }
 
+/// Represents a fetched Reddit post including some context about how it was fetched
+#[derive(Debug)]
+pub struct Post {
+    pub subreddit: String,
+    pub author: String,
+    pub title: String,
+    /// The URL of the post on Reddit
+    pub url: String,
+    /// The converted embed URL
+    pub embed_url: String,
+    /// The timestamp when the post was made on Reddit
+    pub timestamp: serenity::model::timestamp::Timestamp,
+    /// The search term used to fetch this post, if any
+    pub search: Option<String>,
+}
+
+impl Post {
+    fn get_components<'a, 'b>(&'a self) -> Vec<CreateComponent<'b>> {
+        vec![CreateComponent::ActionRow(CreateActionRow::Buttons(
+            Cow::from(vec![
+                CreateButton::new(
+                    json!({
+                        "subreddit": self.subreddit,
+                        "search": self.search.clone().unwrap_or("".to_string()),
+                        "command": "again"
+                    })
+                    .to_string(),
+                )
+                .label("🔁")
+                .style(ButtonStyle::Primary),
+                CreateButton::new(
+                    json!({
+                        "command": "where-autopost"
+                    })
+                    .to_string(),
+                )
+                .label("Where's the auto-post button?")
+                .style(ButtonStyle::Secondary),
+            ]),
+        ))]
+    }
+}
+
+impl<'a> Into<CreateInteractionResponse<'a>> for Post {
+    /// Includes buttons
+    fn into(self) -> CreateInteractionResponse<'a> {
+        if self.embed_url.starts_with("https://cdn.rsla.sh") && self.embed_url.ends_with(".mp4") {
+            let msg = CreateInteractionResponseMessage::default()
+                .content(format!("[.]({})", self.embed_url))
+                .components(self.get_components());
+
+            CreateInteractionResponse::Message(msg)
+        } else {
+            let msg = CreateInteractionResponseMessage::default()
+                .embed(
+                    CreateEmbed::default()
+                        .title(self.title.clone())
+                        .description(format!("r/{}", self.subreddit))
+                        .author(
+                            CreateEmbedAuthor::new(format!("u/{}", self.author))
+                                .url(format!("https://reddit.com/u/{}", self.author)),
+                        )
+                        .url(self.url.clone())
+                        .color(0x00ff00)
+                        .image(self.embed_url.clone())
+                        .timestamp(self.timestamp)
+                        .to_owned(),
+                )
+                .components(self.get_components());
+
+            CreateInteractionResponse::Message(msg)
+        }
+    }
+}
+
+impl<'a> Into<CreateMessage<'a>> for Post {
+    fn into(self) -> CreateMessage<'a> {
+        if self.embed_url.starts_with("https://cdn.rsla.sh") && self.embed_url.ends_with(".mp4") {
+            CreateMessage::new()
+                .content(format!("[.]({})", self.embed_url))
+                .components(self.get_components())
+        } else {
+            CreateMessage::new()
+                .embed(
+                    CreateEmbed::default()
+                        .title(self.title.clone())
+                        .description(format!("r/{}", self.subreddit))
+                        .author(
+                            CreateEmbedAuthor::new(format!("u/{}", self.author))
+                                .url(format!("https://reddit.com/u/{}", self.author)),
+                        )
+                        .url(self.url.clone())
+                        .color(0x00ff00)
+                        .image(self.embed_url.clone())
+                        .timestamp(self.timestamp)
+                        .to_owned(),
+                )
+                .components(self.get_components())
+        }
+    }
+}
+
+pub fn optional_post_to_response(
+    post: Option<Post>,
+    buttons: bool,
+) -> CreateInteractionResponse<'static> {
+    match post {
+        Some(post) => post.into(),
+        None =>                         serenity::builder::CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().embed(
+            CreateEmbed::default()
+                .title("No Posts Found")
+                .description("No supported posts found in this subreddit. Try searching for something else.")
+                .color(0xff0000)
+                .to_owned(),)
+        ),
+    }
+}
+
+pub fn optional_post_to_message(post: Option<Post>, buttons: bool) -> CreateMessage<'static> {
+    match post {
+        Some(post) => post.into(),
+        None => CreateMessage::new().embed(
+            CreateEmbed::default()
+                .title("No Posts Found")
+                .description(
+                    "No supported posts found in this subreddit. Try searching for something else.",
+                )
+                .color(0xff0000)
+                .to_owned(),
+        ),
+    }
+}
+
 #[instrument(skip(con))]
 pub async fn get_post_by_id<'a>(
     post_id: &str,
     search: Option<&str>,
     con: &mut redis::aio::MultiplexedConnection,
-) -> Result<InteractionResponse, anyhow::Error> {
+    add_buttons: bool,
+) -> Result<Post, anyhow::Error> {
     debug!("Getting post by ID: {}", post_id);
 
-    let post: HashMap<String, redis::Value> = con.hgetall(&post_id).await?;
+    let post: HashMap<String, String> = con.hgetall(&post_id).await?;
 
     ensure!(
         !post.is_empty(),
@@ -177,13 +316,17 @@ pub async fn get_post_by_id<'a>(
 
     let subreddit = post_id.split(":").collect::<Vec<&str>>()[1].to_string();
 
-    let author = from_redis_value::<String>(post.get("author").context("No author in post")?)?;
-    let title = from_redis_value::<String>(post.get("title").context("No title in post")?)?;
-    let url = from_redis_value::<String>(post.get("url").context("No url in post")?)?;
-    let mut embed_url =
-        from_redis_value::<String>(post.get("embed_url").context("No embed_url in post")?)?;
-    let timestamp =
-        from_redis_value::<i64>(post.get("timestamp").context("No timestamp in post")?)?;
+    let author = post.get("author").context("No author in post")?.clone();
+    let title = post.get("title").context("No title in post")?.clone();
+    let url = post.get("url").context("No url in post")?.clone();
+    let mut embed_url: String = post
+        .get("embed_url")
+        .context("No embed_url in post")?
+        .clone();
+    let timestamp = post
+        .get("timestamp")
+        .context("No timestamp in post")?
+        .parse()?;
 
     if !embed_url.starts_with("http") {
         embed_url = format!("https://cdn.rsla.sh/gifs/{}", embed_url);
@@ -201,101 +344,37 @@ pub async fn get_post_by_id<'a>(
         let author: String = url::form_urlencoded::byte_serialize(author.as_bytes()).collect();
         let subreddit: String =
             url::form_urlencoded::byte_serialize(subreddit.as_bytes()).collect();
-        let embed_url = format!(
+        embed_url = format!(
             "https://cdn.rsla.sh/render/{}?title={}%20-%20by%20u/{}%20in%20r/{}&redirect={}",
             filename, title, author, subreddit, url
         );
-
-        return Ok(InteractionResponse::Message(InteractionResponseMessage {
-            content: Some(format!("[.]({})", embed_url)),
-            embed: None,
-            components: Some(vec![CreateActionRow::Buttons(vec![
-                CreateButton::new(
-                    json!({
-                        "subreddit": subreddit,
-                        "search": search,
-                        "command": "again"
-                    })
-                    .to_string(),
-                )
-                .label("🔁")
-                .style(ButtonStyle::Primary),
-                CreateButton::new(
-                    json!({
-                        "command": "where-autopost"
-                    })
-                    .to_string(),
-                )
-                .label("Where's the auto-post button?")
-                .style(ButtonStyle::Secondary),
-            ])]),
-
-            fallback: ResponseFallbackMethod::Edit,
-            ..Default::default()
-        }));
     }
 
-    let to_return = InteractionResponse::Message(InteractionResponseMessage {
-        embed: Some(
-            CreateEmbed::default()
-                .title(title)
-                .description(format!("r/{}", subreddit))
-                .author(
-                    CreateEmbedAuthor::new(format!("u/{}", author))
-                        .url(format!("https://reddit.com/u/{}", author)),
-                )
-                .url(url)
-                .color(0x00ff00)
-                .image(embed_url)
-                .timestamp(serenity::model::timestamp::Timestamp::from_unix_timestamp(
-                    timestamp,
-                )?)
-                .to_owned(),
-        ),
-
-        components: Some(vec![CreateActionRow::Buttons(vec![
-            CreateButton::new(
-                json!({
-                    "subreddit": subreddit,
-                    "search": search,
-                    "command": "again"
-                })
-                .to_string(),
-            )
-            .label("🔁")
-            .style(ButtonStyle::Primary),
-            CreateButton::new(
-                json!({
-                    "command": "where-autopost"
-                })
-                .to_string(),
-            )
-            .label("Where's the auto-post button?")
-            .style(ButtonStyle::Secondary),
-        ])]),
-
-        fallback: ResponseFallbackMethod::Edit,
-        ..Default::default()
-    });
-
-    return Ok(to_return);
+    Ok(Post {
+        subreddit,
+        author,
+        title,
+        url,
+        embed_url,
+        timestamp: serenity::model::timestamp::Timestamp::from_unix_timestamp(timestamp)?,
+        search: search.map(|s| s.to_string()),
+    })
 }
 
 #[instrument(skip(con))]
 #[async_recursion]
 pub async fn get_subreddit<'a>(
-    subreddit: String,
+    subreddit: &str,
     con: &mut redis::aio::MultiplexedConnection,
-    channel: ChannelId,
-) -> Result<InteractionResponse, anyhow::Error> {
+    channel: GenericChannelId,
+) -> Result<Post, anyhow::Error> {
     let subreddit = subreddit.to_lowercase();
 
-    let fetched_posts: HashMap<String, u64> = con
-        .hgetall(format!(
-            "subreddit:{}:channels:{}:posts",
-            &subreddit, channel
-        ))
-        .await?;
+    let fetched_posts: HashMap<String, u64> = redis::AsyncCommands::hgetall(
+        con,
+        format!("subreddit:{}:channels:{}:posts", &subreddit, channel),
+    )
+    .await?;
     let posts: Vec<String> = con
         .lrange(format!("subreddit:{}:posts", &subreddit), 0, -1)
         .await?;
@@ -331,20 +410,17 @@ pub async fn get_subreddit<'a>(
 
     let post_id = match post_id {
         Some(id) => id,
-        None => bail!(PostApiError::NoPostsFound {
-            subreddit: subreddit
-        }),
+        None => bail!(PostApiError::NoPostsFound { subreddit }),
     };
 
-    let _: () = con
-        .hset(
-            format!("subreddit:{}:channels:{}:posts", &subreddit, channel),
-            &post_id,
-            get_epoch_ms(),
-        )
-        .await?;
+    con.hset(
+        format!("subreddit:{}:channels:{}:posts", &subreddit, channel),
+        &post_id,
+        get_epoch_ms(),
+    )
+    .await?;
 
-    let mut post = get_post_by_id(&post_id, None, con).await;
+    let mut post = get_post_by_id(&post_id, None, con, true).await;
 
     // If the post is not found, some bug has occurred, remove the post from the subreddit list and call this function again to get a new one
     if let Err(e) = post {
@@ -352,29 +428,29 @@ pub async fn get_subreddit<'a>(
         {
             let _ = span.enter();
             error!("Error getting post by ID: {:?}", e);
-            let _: () = con
-                .lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
+            con.lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
                 .await?;
         }
-        post = get_subreddit(subreddit, con, channel).await;
+        post = get_subreddit(&subreddit, con, channel).await;
     }
 
-    return post;
+    post
 }
 
+/// Gets a post from a subreddit by searching for a term. Returns `None` if no post is found matching search.
 #[instrument(skip(con))]
 pub async fn get_subreddit_search<'a>(
-    subreddit: String,
-    search: String,
+    subreddit: &str,
+    search: &str,
     con: &mut redis::aio::MultiplexedConnection,
-    channel: ChannelId,
-) -> Result<InteractionResponse, anyhow::Error> {
+    channel: GenericChannelId,
+) -> Result<Option<Post>, anyhow::Error> {
     debug!(
         "Getting post for search: {} in subreddit: {}",
         search, subreddit
     );
 
-    let mut index: u16 = con
+    let mut index = con
         .incr(
             format!(
                 "subreddit:{}:search:{}:channels:{}:index",
@@ -383,29 +459,20 @@ pub async fn get_subreddit_search<'a>(
             1i16,
         )
         .await?;
-    let _: () = con
-        .expire(
-            format!(
-                "subreddit:{}:search:{}:channels:{}:index",
-                &subreddit, &search, channel
-            ),
-            60 * 60,
-        )
-        .await?;
+
+    con.expire(
+        format!(
+            "subreddit:{}:search:{}:channels:{}:index",
+            &subreddit, &search, channel
+        ),
+        60 * 60,
+    )
+    .await?;
     index -= 1;
-    let length: u16 =
-        get_length_of_search_results(format!("idx:{}", &subreddit), &search, con).await?;
+    let length = get_length_of_search_results(format!("idx:{}", &subreddit), &search, con).await?;
 
     if length == 0 {
-        return Ok(InteractionResponse::Message(InteractionResponseMessage {
-            embed: Some(
-                CreateEmbed::default()
-                    .title("No search results found")
-                    .color(0xff0000)
-                    .to_owned(),
-            ),
-            ..Default::default()
-        }));
+        return Ok(None);
     }
 
     index = length - (index + 1);
@@ -425,7 +492,7 @@ pub async fn get_subreddit_search<'a>(
 
     let mut post_id =
         get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con).await?;
-    let mut post = get_post_by_id(&post_id, Some(&search), con).await;
+    let mut post = get_post_by_id(&post_id, Some(&search), con, true).await;
     while let Err(_) = post {
         index += 1;
         if index >= length {
@@ -442,10 +509,10 @@ pub async fn get_subreddit_search<'a>(
         }
         post_id =
             get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con).await?;
-        post = get_post_by_id(&post_id, Some(&search), con).await;
+        post = get_post_by_id(&post_id, Some(&search), con, true).await;
     }
 
-    return post;
+    Ok(Some(post?))
 }
 
 #[instrument(skip(con))]
@@ -507,15 +574,14 @@ pub async fn queue_subreddit(
 ) -> Result<(), Error> {
     let already_queued = list_contains(&subreddit, "custom_subreddits_queue", con).await?;
 
-    let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
+    let last_cached = con.get_int(&format!("{}", subreddit)).await?.unwrap_or(0) as u64;
 
     if last_cached == 0 {
         debug!("Subreddit not cached");
 
         if !already_queued {
             debug!("Queueing subreddit for download");
-            con.rpush::<_, _, ()>("custom_subreddits_queue", &subreddit)
-                .await?;
+            con.rpush("custom_subreddits_queue", &subreddit).await?;
 
             let selector = if bot == 278550142356029441 {
                 "nsfw"
@@ -523,7 +589,7 @@ pub async fn queue_subreddit(
                 "sfw"
             };
 
-            con.hset::<_, _, _, ()>(
+            con.hset(
                 &format!("custom_sub:{}:{}", selector, subreddit),
                 "name",
                 &subreddit,
@@ -533,7 +599,7 @@ pub async fn queue_subreddit(
         loop {
             sleep(Duration::from_millis(50)).await;
 
-            let last_cached: i64 = con.get(&format!("{}", subreddit)).await.unwrap_or(0);
+            let last_cached = con.get_int(&format!("{}", subreddit)).await?.unwrap_or(0);
 
             if last_cached != 0 {
                 break;
@@ -555,12 +621,11 @@ pub async fn queue_subreddit(
                 break;
             }
         }
-    } else if last_cached + 3600000 < get_epoch_ms() as i64 {
+    } else if last_cached + 3600000 < get_epoch_ms() {
         debug!("Subreddit last cached more than an hour ago, updating...");
         // Tell downloader to update the subreddit, but use outdated posts for now.
         if !already_queued {
-            con.rpush::<_, _, ()>("custom_subreddits_queue", &subreddit)
-                .await?;
+            con.rpush("custom_subreddits_queue", &subreddit).await?;
         }
     }
 

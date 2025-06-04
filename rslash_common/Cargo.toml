@@ -9,15 +9,15 @@ edition = "2021"
 anyhow = "*"
 mongodb = "*"
 posthog = { path = "../posthog" }
-serenity = "*"
-redis = { version = "*", features = ["aio", "tokio-comp"] }
+serenity = { git = "https://github.com/jamesbt365/serenity.git", branch = "components-v2" }
+redis = { git = "https://github.com/redis-rs/redis-rs", features = ["aio", "tokio-comp"] }
 tokio = "*"
 
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
-tracing-opentelemetry = "*"
-opentelemetry-otlp = { version = "*", features = ["tonic", "grpc-tonic"] }
+tracing-opentelemetry = { version = "0.27" }
+opentelemetry-otlp = { version = "0.26", features = ["tonic", "grpc-tonic"] }
 tonic = "*"
-opentelemetry = "0.28.0"
-opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
-opentelemetry-appender-tracing = "*"
+opentelemetry = "0.26"
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+opentelemetry-appender-tracing = "0.26"

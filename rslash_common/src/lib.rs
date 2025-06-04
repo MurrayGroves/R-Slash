@@ -23,34 +23,21 @@ use serenity::all::{
     CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage,
     CreateModal, UserId,
 };
+use serenity::builder::CreateComponent;
 use tokio::time::Instant;
 
-/// Stores config values required for operation of the shard
 #[derive(Debug, Clone)]
-pub struct ConfigStruct {
-    pub shard_id: u32,
-    pub nsfw_subreddits: Vec<String>,
-    pub redis: redis::aio::MultiplexedConnection,
-    pub mongodb: mongodb::Client,
-    pub posthog: posthog::Client,
-}
-
-impl serenity::prelude::TypeMapKey for ConfigStruct {
-    type Value = ConfigStruct;
-}
-
-#[derive(Debug, Clone)]
-pub struct InteractionResponseMessage {
-    pub file: Option<serenity::builder::CreateAttachment>,
-    pub embed: Option<serenity::all::CreateEmbed>,
+pub struct InteractionResponseMessage<'a> {
+    pub file: Option<serenity::builder::CreateAttachment<'a>>,
+    pub embed: Option<serenity::all::CreateEmbed<'a>>,
     pub content: Option<String>,
     pub ephemeral: bool,
-    pub components: Option<Vec<CreateActionRow>>,
+    pub components: Option<Vec<CreateComponent<'a>>>,
     pub fallback: ResponseFallbackMethod,
 }
 
-impl Into<CreateInteractionResponseMessage> for InteractionResponseMessage {
-    fn into(self) -> CreateInteractionResponseMessage {
+impl<'a> Into<CreateInteractionResponseMessage<'a>> for InteractionResponseMessage<'a> {
+    fn into(self) -> CreateInteractionResponseMessage<'a> {
         let mut resp = CreateInteractionResponseMessage::new();
         if let Some(embed) = self.embed {
             resp = resp.embed(embed);
@@ -68,8 +55,8 @@ impl Into<CreateInteractionResponseMessage> for InteractionResponseMessage {
     }
 }
 
-impl Into<CreateInteractionResponseFollowup> for InteractionResponseMessage {
-    fn into(self) -> CreateInteractionResponseFollowup {
+impl<'a> Into<CreateInteractionResponseFollowup<'a>> for InteractionResponseMessage<'a> {
+    fn into(self) -> CreateInteractionResponseFollowup<'a> {
         let mut resp = CreateInteractionResponseFollowup::new();
         if let Some(embed) = self.embed {
             resp = resp.embed(embed);
@@ -87,23 +74,23 @@ impl Into<CreateInteractionResponseFollowup> for InteractionResponseMessage {
     }
 }
 
-impl Into<CreateInteractionResponse> for InteractionResponseMessage {
-    fn into(self) -> CreateInteractionResponse {
+impl<'a> Into<CreateInteractionResponse<'a>> for InteractionResponseMessage<'a> {
+    fn into(self) -> CreateInteractionResponse<'a> {
         CreateInteractionResponse::Message(self.into())
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum InteractionResponse {
-    Message(InteractionResponseMessage),
-    Modal(CreateModal),
+pub enum InteractionResponse<'a> {
+    Message(InteractionResponseMessage<'a>),
+    Modal(CreateModal<'a>),
     None,
 }
 
-impl TryInto<CreateMessage> for InteractionResponse {
+impl<'a> TryInto<CreateMessage<'a>> for InteractionResponse<'a> {
     type Error = anyhow::Error;
 
-    fn try_into(self) -> Result<CreateMessage, Self::Error> {
+    fn try_into(self) -> Result<CreateMessage<'a>, Self::Error> {
         match self {
             InteractionResponse::Message(message) => {
                 let mut resp = CreateMessage::new();
@@ -126,7 +113,7 @@ impl TryInto<CreateMessage> for InteractionResponse {
     }
 }
 
-impl Default for InteractionResponse {
+impl Default for InteractionResponse<'_> {
     fn default() -> Self {
         InteractionResponse::Message(InteractionResponseMessage {
             file: None,
@@ -139,7 +126,7 @@ impl Default for InteractionResponse {
     }
 }
 
-impl Default for InteractionResponseMessage {
+impl Default for InteractionResponseMessage<'_> {
     fn default() -> Self {
         InteractionResponseMessage {
             file: None,
@@ -207,50 +194,53 @@ macro_rules! span_filter {
     };
 }
 
-pub fn error_response(error_title: &str, error_desc: &str) -> InteractionResponse {
-    InteractionResponse::Message(InteractionResponseMessage {
-        embed: Some(
+pub fn error_response<'a>(
+    error_title: String,
+    error_desc: String,
+) -> CreateInteractionResponse<'a> {
+    CreateInteractionResponse::Message(
+        CreateInteractionResponseMessage::new().embed(
             CreateEmbed::default()
                 .title(error_title)
                 .description(error_desc)
                 .color(0xff0000)
                 .to_owned(),
         ),
-        ..Default::default()
-    })
+    )
+}
+
+pub fn error_message<'a>(error_title: String, error_desc: String) -> CreateMessage<'a> {
+    CreateMessage::new().embed(
+        CreateEmbed::default()
+            .title(error_title)
+            .description(error_desc)
+            .color(0xff0000)
+            .to_owned(),
+    )
 }
 
 #[macro_export]
 macro_rules! initialise_observability {
 	($service_name: literal) => {initialise_observability!($service_name,)};
     ($service_name:literal, $(($key:literal, $value:ident),)*) => {
-        let trace_exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint("http://100.67.30.19:4317")
-            .build().expect("Failed to create trace exporter");
+        let trace_exporter = opentelemetry_otlp::SpanExporterBuilder::Tonic(opentelemetry_otlp::TonicExporterBuilder::default().with_endpoint("http://100.67.30.19:4317"))
+            .build_span_exporter().expect("Failed to create trace exporter");
 
-        let tracing_provider = trace::SdkTracerProvider::builder()
-            .with_batch_exporter(trace_exporter)
-            .with_resource(
-                opentelemetry_sdk::Resource::builder()
-                    .with_service_name($service_name)
-					$(.with_attribute(KeyValue::new($key, $value.to_string())))*
-                    .build(),
-            )
+        let tracing_provider = trace::TracerProvider::builder()
+            .with_batch_exporter(trace_exporter, opentelemetry_sdk::runtime::Tokio)
+			.with_config(opentelemetry_sdk::trace::Config::default().with_resource(
+                opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new("service.name", $service_name)$(,opentelemetry::KeyValue::new($key, $value.to_string()))*] )
+            ))
+
             .build();
 
-		let log_exporter = opentelemetry_otlp::LogExporter::builder()
-			.with_tonic()
-			.with_endpoint("http://100.67.30.19:4317")
-			.build().expect("Failed to create log exporter");
+		let log_exporter = opentelemetry_otlp::LogExporterBuilder::Tonic(opentelemetry_otlp::TonicExporterBuilder::default().with_endpoint("http://100.67.30.19:4317"))
+			.build_log_exporter().expect("Failed to create log exporter");
 
-		let logging_provider = logs::SdkLoggerProvider::builder()
-			.with_batch_exporter(log_exporter)
+		let logging_provider = logs::LoggerProvider::builder()
+			.with_batch_exporter(log_exporter, opentelemetry_sdk::runtime::Tokio)
 			.with_resource(
-				opentelemetry_sdk::Resource::builder()
-					.with_service_name($service_name)
-					$(.with_attribute(KeyValue::new($key, $value.to_string())))*
-					.build(),
+                opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new("service.name", $service_name)$(,opentelemetry::KeyValue::new($key, $value.to_string()))*] )
 			)
 			.build();
 

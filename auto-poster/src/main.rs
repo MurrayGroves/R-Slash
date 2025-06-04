@@ -3,12 +3,13 @@
 use futures::{Future, StreamExt, TryStreamExt};
 use mongodb::bson::{doc, Document};
 use mongodb::options::ClientOptions;
-use redis::AsyncCommands;
+use redis::{AsyncCommands, AsyncTypedCommands};
 use rslash_common::span_filter;
 use serenity::all::{ChannelId, GatewayIntents, Http};
 use serenity::{all::EventHandler, async_trait};
 use tokio::time::Duration;
 
+use anyhow::anyhow;
 use std::cell::SyncUnsafeCell;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::env;
@@ -24,6 +25,7 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
+use serenity::secrets::Token;
 use tracing_subscriber::{
     prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
 };
@@ -380,27 +382,28 @@ async fn main() {
     let mut discord_https = HashMap::new();
     let mut total_shards = HashMap::new();
     for bot in bots.keys() {
-        let token =
-            env::var(format!("DISCORD_TOKEN_{}", bot.to_string().to_uppercase())).expect(&format!(
+        let token = Token::from_env(format!("DISCORD_TOKEN_{}", bot.to_string().to_uppercase()))
+            .expect(&format!(
                 "Expected DISCORD_TOKEN_{} in the environment",
                 bot.to_string().to_uppercase()
             ));
 
         let intents = GatewayIntents::empty();
-        let client = serenity::Client::builder(&token, intents)
+        let client = serenity::Client::builder(token, intents)
             .event_handler(Handler)
             .await
             .expect("Err creating client");
 
         discord_https.insert(bot.clone(), client.http.clone());
         discord_clients.insert(bot.clone(), client);
-        let total_shards_this: redis::RedisResult<u32> =
-            redis.get(format!("total_shards_{}", bots[bot])).await;
+        let total_shards_this: u16 = redis
+            .get_int(format!("total_shards_{}", bots[bot]))
+            .await
+            .expect("Failed to get total_shards")
+            .expect("total_shards not present in redis")
+            as u16;
 
-        total_shards.insert(
-            bot.clone(),
-            total_shards_this.expect("Failed to get or convert total_shards"),
-        );
+        total_shards.insert(bot.clone(), total_shards_this);
     }
 
     let autoposts = Arc::new(RwLock::new(AutoPosts { by_channel, queue }));

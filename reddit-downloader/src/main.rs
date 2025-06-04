@@ -16,7 +16,6 @@ use tarpc::tokio_serde::formats::Bincode;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 
-use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -34,7 +33,6 @@ use mongodb::options::{ClientOptions, FindOptions};
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::logs::LogError;
 use opentelemetry_sdk::{logs, trace};
 use reqwest::header;
 use reqwest::header::{HeaderMap, USER_AGENT};
@@ -53,7 +51,7 @@ lazy_static! {
         downloaders::client::Limiter::new(None, "reddit".to_string());
 }
 
-/// Represents a value stored in a [ConfigStruct](ConfigStruct)
+/// Represents a value stored in a [ConfigStruct]
 pub enum ConfigValue {
     U64(u64),
     Bool(bool),
@@ -1205,38 +1203,6 @@ async fn download_loop<'a>(
 
         sleep(Duration::from_millis(10)).await;
     }
-}
-
-fn init_tracer_provider() -> Result<trace::SdkTracerProvider, opentelemetry::trace::TraceError> {
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint("http://100.67.30.19:4317")
-        .build()?;
-
-    Ok(trace::SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
-        .with_resource(
-            opentelemetry_sdk::Resource::builder()
-                .with_service_name("reddit-downloader")
-                .build(),
-        )
-        .build())
-}
-
-fn init_logging_provider() -> Result<logs::SdkLoggerProvider, LogError> {
-    let exporter = opentelemetry_otlp::LogExporter::builder()
-        .with_tonic()
-        .with_endpoint("http://100.67.30.19:4317")
-        .build()?;
-
-    Ok(logs::SdkLoggerProvider::builder()
-        .with_batch_exporter(exporter)
-        .with_resource(
-            opentelemetry_sdk::Resource::builder()
-                .with_service_name("reddit-downloader")
-                .build(),
-        )
-        .build())
 }
 
 #[tokio::main]

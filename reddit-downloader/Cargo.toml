@@ -20,7 +20,7 @@ reqwest = { version = "*", features = [
     "cookies",
     "stream",
 ] }
-redis = { version = "*", features = [
+redis = { git = "https://github.com/redis-rs/redis-rs.git", features = [
     "aio",
     "tokio-comp",
     "connection-manager",
@@ -67,11 +67,11 @@ rslash_common = { path = "../rslash_common" }
 
 tracing = "*"
 tracing-subscriber = { version = "*" }
-tracing-opentelemetry = "*"
-opentelemetry-otlp = { version = "*", features = ["tonic", "grpc-tonic"] }
-opentelemetry = "0.28.0"
-opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
-opentelemetry-appender-tracing = "*"
+tracing-opentelemetry = "0.27"
+opentelemetry-otlp = { version = "0.26", features = ["tonic", "grpc-tonic"] }
+opentelemetry = "0.26"
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+opentelemetry-appender-tracing = "0.26"
 
 
 [patch.crates-io]

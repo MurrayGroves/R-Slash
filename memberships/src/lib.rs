@@ -4,7 +4,6 @@ use log::*;
 use mongodb::bson::{doc, Document};
 use mongodb::options::FindOptions;
 
-use rslash_common::ConfigStruct;
 use serenity::all::UserId;
 use serenity::futures::TryStreamExt;
 
@@ -51,25 +50,24 @@ struct MembershipDuration {
 // Fetch a user's membership tiers from MongoDB. Returns current status, name of tier, when the user first had the membership, and when the membership expires.
 pub async fn get_user_tiers<'a>(
     user: impl Into<String>,
-    data: impl Into<Client<'a>>,
+    data: impl Into<mongodb::Client>,
 ) -> MembershipTiers {
-    let client: Client = data.into();
-    let mongodb_client = client.client;
+    let client = data.into();
 
     let user = user.into();
 
-    let db = mongodb_client.database("memberships");
+    let db = client.database("memberships");
     let coll = db.collection::<Document>("users");
 
     let filter = doc! {"discord_id": user};
     let mut cursor = coll.find(filter.clone()).await.unwrap();
 
     let doc = cursor.try_next().await.unwrap().unwrap_or_else(|| {
-		// If user information doesn't exist, return a document that indicates no active memberships.
-		doc! {
-                "active": []
-            }
-	});
+        // If user information doesn't exist, return a document that indicates no active memberships.
+        doc! {
+            "active": []
+        }
+    });
 
     debug!("User document: {:?}", doc);
 
@@ -123,23 +121,11 @@ pub async fn get_user_tiers<'a>(
         None => false,
     };
 
-    return MembershipTiers {
+    MembershipTiers {
         bronze: MembershipTier {
             _name: "bronze".to_string(),
             active: bronze_active,
             manual,
         },
-    };
-}
-
-pub async fn get_user_tiers_from_ctx(
-    ctx: &serenity::all::Context,
-    user: impl Into<UserId>,
-) -> MembershipTiers {
-    let user = user.into();
-    let data_read = ctx.data.read().await;
-    let config = data_read.get::<ConfigStruct>().unwrap();
-    let mongodb_client = &mut config.mongodb.clone();
-    let membership = get_user_tiers(user.to_string(), mongodb_client).await;
-    membership
+    }
 }

@@ -3,11 +3,12 @@ use std::sync::Arc;
 use rslash_common::{InteractionResponse, InteractionResponseMessage};
 
 use serenity::all::{
-    CreateInteractionResponse, CreateInteractionResponseFollowup, CreateModal, Http, Interaction,
+    CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage,
+    CreateModal, Http, Interaction,
 };
 
 use anyhow::{Result, anyhow};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 pub struct ResponseTracker<'a> {
     pub interaction: &'a Interaction,
@@ -24,9 +25,10 @@ impl<'a> ResponseTracker<'a> {
         }
     }
 
-    async fn send_followup(&mut self, response: InteractionResponseMessage) -> Result<()> {
-        let message: CreateInteractionResponseFollowup = response.into();
-
+    async fn send_followup(
+        &mut self,
+        message: CreateInteractionResponseFollowup<'_>,
+    ) -> Result<()> {
         match &self.interaction {
             Interaction::Command(command) => {
                 command
@@ -54,26 +56,25 @@ impl<'a> ResponseTracker<'a> {
         Ok(())
     }
 
-    async fn send_message(&mut self, response: InteractionResponseMessage) -> Result<()> {
+    async fn send_message(&mut self, message: CreateInteractionResponseMessage<'_>) -> Result<()> {
         self.sent_response = true;
-        let message: CreateInteractionResponse = response.into();
 
         match &self.interaction {
             Interaction::Command(command) => {
                 command
-                    .create_response(&self.http, message)
+                    .create_response(&self.http, CreateInteractionResponse::Message(message))
                     .await
                     .map(|_| ())?;
             }
             Interaction::Component(component) => {
                 component
-                    .create_response(&self.http, message)
+                    .create_response(&self.http, CreateInteractionResponse::Message(message))
                     .await
                     .map(|_| ())?;
             }
             Interaction::Modal(modal) => {
                 modal
-                    .create_response(&self.http, message)
+                    .create_response(&self.http, CreateInteractionResponse::Message(message))
                     .await
                     .map(|_| ())?;
             }
@@ -85,7 +86,7 @@ impl<'a> ResponseTracker<'a> {
         Ok(())
     }
 
-    async fn send_modal(&mut self, response: CreateModal) -> Result<()> {
+    async fn send_modal(&mut self, response: CreateModal<'_>) -> Result<()> {
         self.sent_response = true;
 
         match &self.interaction {
@@ -170,18 +171,18 @@ impl<'a> ResponseTracker<'a> {
     }
 
     #[instrument(skip(self))]
-    pub async fn send_response(&mut self, response: InteractionResponse) -> Result<()> {
+    pub async fn send_response(&mut self, response: CreateInteractionResponse<'_>) -> Result<()> {
         debug!("Sending response: {:?}", response);
         match response {
-            InteractionResponse::Message(message) => {
+            CreateInteractionResponse::Message(message) => {
                 if self.sent_response {
-                    self.send_followup(message).await?;
+                    return Err(anyhow!("Tried to send a message after a response"));
                 } else {
                     self.send_message(message).await?;
                 }
             }
 
-            InteractionResponse::Modal(modal) => {
+            CreateInteractionResponse::Modal(modal) => {
                 if self.sent_response {
                     return Err(anyhow!("Tried to send a modal after a response"));
                 } else {
@@ -189,10 +190,13 @@ impl<'a> ResponseTracker<'a> {
                 }
             }
 
-            InteractionResponse::None => {
+            CreateInteractionResponse::Acknowledge => {
                 if !self.sent_response {
                     self.send_acknowledge().await?;
                 }
+            }
+            _ => {
+                warn!("Unsupported interaction response type: {:?}", response);
             }
         }
 

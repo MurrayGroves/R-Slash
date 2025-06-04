@@ -2,8 +2,9 @@ use futures::{Future, StreamExt};
 use mongodb::bson::doc;
 use mongodb::options::ClientOptions;
 use redis::AsyncCommands;
-use serenity::all::{ChannelId, CreateMessage, GatewayIntents, GuildId, Http};
-use serenity::json::json;
+use redis::AsyncTypedCommands;
+use serde_json::json;
+use serenity::all::{ChannelId, CreateMessage, GatewayIntents, GuildId, Http, Token};
 use serenity::{all::EventHandler, async_trait};
 
 use log::{debug, error, info, warn};
@@ -27,6 +28,7 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
+use serenity::builder::CreateInteractionResponse;
 use tarpc::context::Context;
 use tracing_subscriber::{
     EnvFilter, Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
@@ -37,24 +39,24 @@ struct Subscriptions {
     by_channel: HashMap<u64, HashSet<Arc<Subscription>>>,
 }
 
-struct PostAlert {
-    message: CreateMessage,
+struct PostAlert<'a> {
+    message: CreateMessage<'a>,
     subscriptions: Vec<Arc<Subscription>>,
     timestamp: Instant,
 }
 
 #[derive(Clone)]
-struct SubscriberServer {
+struct SubscriberServer<'a> {
     db: Arc<Mutex<mongodb::Client>>,
     subscriptions: Arc<RwLock<Subscriptions>>,
     discord_bb: Arc<Http>,
     discord_rs: Arc<Http>,
     redis: redis::aio::MultiplexedConnection,
     posthog: posthog::Client,
-    queued_alerts: Arc<Mutex<VecDeque<PostAlert>>>,
+    queued_alerts: Arc<Mutex<VecDeque<PostAlert<'a>>>>,
 }
 
-impl SubscriberServer {
+impl SubscriberServer<'_> {
     #[tracing::instrument(skip(self))]
     async fn watch_alerts(self) {
         let mut outer_interval = interval(tokio::time::Duration::from_millis(100));
@@ -81,7 +83,11 @@ impl SubscriberServer {
                     Bot::RS => &self.discord_rs,
                 };
 
-                match channel.send_message(http, next_alert.message.clone()).await {
+                match channel
+                    .widen()
+                    .send_message(http, next_alert.message.clone())
+                    .await
+                {
                     Ok(_) => debug!(
                         "Sent {} to channel {}, was added {} seconds ago",
                         alert.subreddit,
@@ -91,7 +97,7 @@ impl SubscriberServer {
                     Err(e) => {
                         if let serenity::Error::Http(e) = e {
                             if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
-                                if e.error.code == 10003 {
+                                if e.error.code.0 == 10003 {
                                     debug!("Channel doesn't exist anymore, deleting subscription");
                                     let mut subscriptions = self.subscriptions.write().await;
                                     match subscriptions.by_channel.get_mut(&alert.channel) {
@@ -124,7 +130,7 @@ impl SubscriberServer {
     }
 }
 
-impl Subscriber for SubscriberServer {
+impl Subscriber for SubscriberServer<'_> {
     #[tracing::instrument(skip(self))]
     async fn register_subscription(
         self,
@@ -289,6 +295,7 @@ impl Subscriber for SubscriberServer {
             &format!("subreddit:{}:post:{}", subreddit, &post_id),
             None,
             &mut redis,
+            false,
         )
         .await
         {
@@ -299,18 +306,6 @@ impl Subscriber for SubscriberServer {
             }
         };
         debug!("Got post {:?}", post);
-
-        let message: Result<CreateMessage, anyhow::Error> = post.try_into();
-        let mut message = match message {
-            Ok(x) => x,
-            Err(e) => {
-                warn!("Failed to convert post to message: {:?}", e);
-                return Err(e.to_string());
-            }
-        };
-
-        // Remove the components because we don't want autopost and refresh options in this context
-        message = message.components(vec![]);
 
         let _ = self
             .posthog
@@ -326,7 +321,7 @@ impl Subscriber for SubscriberServer {
         debug!("Filtered subscriptions {:?}", filtered);
 
         let alert = PostAlert {
-            message: message.clone(),
+            message: post.into(),
             subscriptions: filtered.into_iter().map(|x| (*x).clone()).collect(),
             timestamp: Instant::now(),
         };
@@ -412,17 +407,19 @@ async fn main() {
         },
     ));
 
-    let token = env::var("DISCORD_TOKEN_BB").expect("Expected DISCORD_TOKEN_BB in the environment");
+    let token =
+        Token::from_env("DISCORD_TOKEN_BB").expect("Expected DISCORD_TOKEN_BB in the environment");
     let intents = GatewayIntents::empty();
-    let mut client_bb = serenity::Client::builder(&token, intents)
+    let mut client_bb = serenity::Client::builder(token, intents)
         .event_handler(Handler)
         .await
         .expect("Err creating client");
     let http_bb = client_bb.http.clone();
 
-    let token = env::var("DISCORD_TOKEN_RS").expect("Expected DISCORD_TOKEN_RS in the environment");
+    let token =
+        Token::from_env("DISCORD_TOKEN_RS").expect("Expected DISCORD_TOKEN_RS in the environment");
     let intents = GatewayIntents::empty();
-    let mut client_rs = serenity::Client::builder(&token, intents)
+    let mut client_rs = serenity::Client::builder(token, intents)
         .event_handler(Handler)
         .await
         .expect("Err creating client");
@@ -495,11 +492,19 @@ async fn main() {
         .await
         .expect("Can't connect to redis");
 
-    let total_shards_bb: redis::RedisResult<u32> = redis.get("total_shards_booty-bot").await;
-    let total_shards_bb: u32 = total_shards_bb.expect("Failed to get or convert total_shards");
+    let total_shards_bb: u16 = redis
+        .get_int("total_shards_booty-bot")
+        .await
+        .expect("Failed reading from Redis")
+        .map(|x| x as u16)
+        .expect("total_shards_booty-bot not set in Redis");
 
-    let total_shards_rs: redis::RedisResult<u32> = redis.get("total_shards_r-slash").await;
-    let total_shards_rs: u32 = total_shards_rs.expect("Failed to get or convert total_shards");
+    let total_shards_rs: u16 = redis
+        .get_int("total_shards_r-slash")
+        .await
+        .expect("Failed reading from Redis")
+        .map(|x| x as u16)
+        .expect("total_shards_r-slash not set in Redis");
 
     let server = SubscriberServer {
         db: mongodb_client,

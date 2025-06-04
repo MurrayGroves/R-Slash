@@ -2,9 +2,13 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 
 use auto_poster::PostMemory;
 use mongodb::bson::doc;
-use post_api::{queue_subreddit, PostApiError, SubredditStatus};
+use post_api::{
+    optional_post_to_message, optional_post_to_response, queue_subreddit, PostApiError,
+    SubredditStatus,
+};
 use rslash_common::{InteractionResponse, InteractionResponseMessage};
 use serenity::all::{CreateEmbed, CreateMessage};
+use serenity::builder::{CreateInteractionResponse, CreateInteractionResponseMessage};
 use tokio::{select, time::Instant};
 use tracing::{debug, error, warn};
 
@@ -43,7 +47,7 @@ async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) 
     drop(autoposts);
 }
 
-async fn post_error_to_message(e: anyhow::Error, subreddit: &str) -> InteractionResponse {
+async fn post_error_to_response(e: anyhow::Error, subreddit: &str) -> CreateInteractionResponse {
     let validity = post_api::check_subreddit_valid(subreddit)
         .await
         .unwrap_or_else(|e| {
@@ -57,24 +61,23 @@ async fn post_error_to_message(e: anyhow::Error, subreddit: &str) -> Interaction
                 match x {
 					PostApiError::NoPostsFound { subreddit } => {
 						rslash_common::error_response(
-							"No posts found",
-							&format!("Deleted autopost for r/{} because no supported posts were found. For example, they might all be text posts.", subreddit)
+							"No posts found".to_string(),
+							format!("Deleted autopost for r/{} because no supported posts were found. For example, they might all be text posts.", subreddit)
 						)
-
 					}
 					_ => {
 						error!("Error getting subreddit for auto-post: {:?}", e);
 						rslash_common::error_response(
-							"Unexpected Error",
-							&format!("Deleted autopost for r/{} due to an unexpected error.", subreddit)
+							"Unexpected Error".to_string(),
+							format!("Deleted autopost for r/{} due to an unexpected error.", subreddit)
 						)
 					}
 				}
             } else {
                 error!("Error getting subreddit for auto-post: {:?}", e);
                 rslash_common::error_response(
-                    "Unexpected Error",
-                    &format!(
+                    "Unexpected Error".to_string(),
+                    format!(
                         "Deleted autopost for r/{} due to an unexpected error.",
                         subreddit
                     ),
@@ -84,9 +87,56 @@ async fn post_error_to_message(e: anyhow::Error, subreddit: &str) -> Interaction
         SubredditStatus::Invalid(reason) => {
             debug!("Subreddit response not 200: {}", reason);
             rslash_common::error_response(
-				"Subreddit Inaccessible",
-				&format!("Deleted autopost for r/{} because it's either private, does not exist, or has been banned.", subreddit)
+				"Subreddit Inaccessible".to_string(),
+				format!("Deleted autopost for r/{} because it's either private, does not exist, or has been banned.", subreddit)
 			)
+        }
+    }
+}
+
+async fn post_error_to_message(e: anyhow::Error, subreddit: &str) -> CreateMessage<'static> {
+    let validity = post_api::check_subreddit_valid(subreddit)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Error checking subreddit validity: {}", e);
+            SubredditStatus::Valid
+        });
+
+    match validity {
+        SubredditStatus::Valid => {
+            if let Some(x) = e.downcast_ref::<PostApiError>() {
+                match x {
+                    PostApiError::NoPostsFound { subreddit } => {
+                        rslash_common::error_message(
+                            "No posts found".to_string(),
+                            format!("Deleted autopost for r/{} because no supported posts were found. For example, they might all be text posts.", subreddit)
+                        )
+                    }
+                    _ => {
+                        error!("Error getting subreddit for auto-post: {:?}", e);
+                        rslash_common::error_message(
+                            "Unexpected Error".to_string(),
+                            format!("Deleted autopost for r/{} due to an unexpected error.", subreddit)
+                        )
+                    }
+                }
+            } else {
+                error!("Error getting subreddit for auto-post: {:?}", e);
+                rslash_common::error_message(
+                    "Unexpected Error".to_string(),
+                    format!(
+                        "Deleted autopost for r/{} due to an unexpected error.",
+                        subreddit
+                    ),
+                )
+            }
+        }
+        SubredditStatus::Invalid(reason) => {
+            debug!("Subreddit response not 200: {}", reason);
+            rslash_common::error_message(
+                "Subreddit Inaccessible".to_string(),
+                format!("Deleted autopost for r/{} because it's either private, does not exist, or has been banned.", subreddit)
+            )
         }
     }
 }
@@ -146,22 +196,25 @@ pub async fn timer_loop(
                         }
 
                         // Get subreddit post
-                        let message = if let Some(search) = autopost_clone.search.clone() {
-                            post_api::get_subreddit_search(
-                                autopost_clone.subreddit.clone(),
-                                search,
-                                &mut server.redis,
-                                autopost_clone.channel,
-                            )
-                            .await
-                        } else {
-                            post_api::get_subreddit(
-                                autopost_clone.subreddit.clone(),
-                                &mut server.redis,
-                                autopost_clone.channel,
-                            )
-                            .await
-                        };
+                        let message: Result<CreateMessage, anyhow::Error> =
+                            if let Some(search) = autopost_clone.search.clone() {
+                                post_api::get_subreddit_search(
+                                    &autopost_clone.subreddit,
+                                    &search,
+                                    &mut server.redis,
+                                    autopost_clone.channel.widen(),
+                                )
+                                .await
+                                .map(|post| optional_post_to_message(post, false))
+                            } else {
+                                post_api::get_subreddit(
+                                    &autopost_clone.subreddit,
+                                    &mut server.redis,
+                                    autopost_clone.channel.widen(),
+                                )
+                                .await
+                                .map(|post| post.into())
+                            };
 
                         // If an error occurred getting the post, delete the autopost, and prepare an error message
                         let mut failed = false;
@@ -172,39 +225,13 @@ pub async fn timer_loop(
                                 delete_auto_post(&server, autopost_clone.clone()).await;
                                 failed = true;
 
-                                post_error_to_message(e, &autopost_clone.subreddit).await
+                                post_error_to_message(e, &autopost_clone.subreddit.clone()).await
                             }
                         };
 
-                        // If the post API didn't return an error, but returned an invalid response, prepare a new error message
-                        let message = if let InteractionResponse::Message(message) = message {
-                            message
-                        } else {
-                            warn!("Invalid response from post_api");
-                            InteractionResponseMessage {
-									embed: Some(
-										CreateEmbed::default()
-											.title("Unexpected Error")
-											.description("Error getting subreddit for auto-post, please report in the support server. (Invalid response from post_api)")
-											.color(0xff0000)
-											.to_owned(),
-									),
-									..Default::default()
-								}
-                        };
-
-                        // Send message
-                        let mut resp = CreateMessage::new();
-                        if let Some(embed) = message.embed.clone() {
-                            resp = resp.embed(embed);
-                        };
-
-                        if let Some(content) = message.content.clone() {
-                            resp = resp.content(content);
-                        };
-
-                        debug!("Sending message: {:?}", resp);
-                        let message_send_result = channel.send_message(http, resp).await;
+                        debug!("Sending message: {:?}", message);
+                        let message_send_result =
+                            channel.widen().send_message(&*http, message).await;
                         debug!("Sent message");
 
                         // Handle any errors sending the message
@@ -213,7 +240,7 @@ pub async fn timer_loop(
                             if let serenity::Error::Http(e) = &why {
                                 if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
                                     // Unknown channel (we got removed from server)
-                                    if e.error.code == 10003 {
+                                    if e.error.code.0 == 10003 {
                                         delete_auto_post(&server, autopost.clone()).await;
                                         failed = true;
                                     }

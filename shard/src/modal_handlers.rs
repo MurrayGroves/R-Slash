@@ -3,12 +3,14 @@ use std::collections::HashMap;
 use anyhow::{Result, anyhow, bail};
 use auto_poster::AutoPosterClient;
 use log::{debug, warn};
-use memberships::get_user_tiers_from_ctx;
+use memberships::get_user_tiers;
 use rslash_common::{InteractionResponse, InteractionResponseMessage};
 use serenity::all::{ActionRowComponent, Context, CreateEmbed, ModalInteraction};
+use serenity::builder::{CreateInteractionResponse, CreateInteractionResponseMessage};
+use tokio::sync::RwLock;
 use tracing::instrument;
 
-use crate::{capture_event, discord::ResponseTracker};
+use crate::{ShardState, capture_event, discord::ResponseTracker};
 
 #[instrument(skip(ctx, modal, custom_id, tracker))]
 pub async fn autopost_create<'a>(
@@ -18,7 +20,7 @@ pub async fn autopost_create<'a>(
     mut tracker: ResponseTracker<'a>,
 ) -> Result<()> {
     capture_event(
-        ctx.data.clone(),
+        ctx.data(),
         "autopost_start",
         None,
         modal.guild_id,
@@ -45,12 +47,12 @@ pub async fn autopost_create<'a>(
                 ActionRowComponent::InputText(input) => {
                     if input.custom_id == "delay" {
                         interval = match input.value.clone() {
-                            Some(x) => x,
+                            Some(x) => x.to_string(),
                             _ => "5s".to_string(),
                         };
                     } else if input.custom_id == "limit" {
                         limit = match input.value.clone() {
-                            Some(x) => Some(x),
+                            Some(x) => Some(x.to_string()),
                             _ => Some("10".to_string()),
                         };
                     }
@@ -60,10 +62,13 @@ pub async fn autopost_create<'a>(
         }
     }
 
-    let is_premium = get_user_tiers_from_ctx(ctx, modal.user.id.get())
-        .await
-        .bronze
-        .active;
+    let is_premium = get_user_tiers(
+        modal.user.id.to_string(),
+        ctx.data::<ShardState>().mongodb.clone(),
+    )
+    .await
+    .bronze
+    .active;
 
     let limit = match limit {
         Some(x) => match x.parse::<u32>() {
@@ -80,16 +85,16 @@ pub async fn autopost_create<'a>(
                     };
 
                     return tracker
-                        .send_response(InteractionResponse::Message(InteractionResponseMessage {
-                            embed: Some(
-                                CreateEmbed::new()
-                                    .title("Invalid Limit")
-                                    .description(error_message)
-                                    .color(0xff0000),
-                            ),
-                            ephemeral: true,
-                            ..Default::default()
-                        }))
+                        .send_response(CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .embed(
+                                    CreateEmbed::new()
+                                        .title("Invalid Limit")
+                                        .description(error_message)
+                                        .color(0xff0000),
+                                )
+                                .ephemeral(true),
+                        ))
                         .await;
                 }
             }
@@ -99,18 +104,17 @@ pub async fn autopost_create<'a>(
 
     macro_rules! invalid_interval_resp {
         ($interval:expr) =>
-        { return tracker.send_response(InteractionResponse::Message(InteractionResponseMessage {
-            embed: Some(
+        {
+            return tracker.send_response(CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().embed(
                 CreateEmbed::new()
                     .title("Invalid Interval")
                     .description(
                         format!("Invalid Interval: {}, it must be a number followed by either 's', 'm', 'h', or 'd' - indicating seconds, minutes, hours, or days.", $interval),
                     )
                     .color(0xff0000),
-            ),
-            ephemeral: true,
-            ..Default::default()
-        })).await;}
+                ).ephemeral(true)
+            )).await;
+        }
     }
 
     let multiplier = if interval.ends_with("s") {
@@ -148,11 +152,7 @@ pub async fn autopost_create<'a>(
         }
     };
 
-    let lock = ctx.data.read().await;
-
-    let autoposter = lock
-        .get::<AutoPosterClient>()
-        .ok_or(anyhow!("Autoposter client not found"))?;
+    let autoposter = ctx.data::<ShardState>().auto_poster.clone();
 
     match autoposter
         .register_autopost(
@@ -174,15 +174,15 @@ pub async fn autopost_create<'a>(
     };
 
     tracker
-        .send_response(InteractionResponse::Message(InteractionResponseMessage {
-            embed: Some(
-                CreateEmbed::new()
-                    .title("Autopost Loop Started")
-                    .description("Autopost loop started!")
-                    .color(0x00ff00),
-            ),
-            ephemeral: true,
-            ..Default::default()
-        }))
+        .send_response(CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .embed(
+                    CreateEmbed::new()
+                        .title("Autopost Loop Started")
+                        .description("Autopost loop started!")
+                        .color(0x00ff00),
+                )
+                .ephemeral(true),
+        ))
         .await
 }

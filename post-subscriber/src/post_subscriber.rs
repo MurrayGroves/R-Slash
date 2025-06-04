@@ -21,10 +21,6 @@ pub trait Subscriber {
     async fn remove_subreddit(subreddit: String) -> Result<(), String>;
 }
 
-impl serenity::prelude::TypeMapKey for SubscriberClient {
-    type Value = SubscriberClient;
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub subreddit: String,

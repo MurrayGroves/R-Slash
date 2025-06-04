@@ -176,7 +176,8 @@ impl Limiter {
                         .parse()?;
                 }
                 if let Some(reset) = headers.get("x-ratelimit-reset") {
-                    state.reset = chrono::Utc::now().timestamp() + reset.to_str()?.parse::<i64>()?;
+                    state.reset =
+                        chrono::Utc::now().timestamp() + reset.to_str()?.parse::<i64>()?;
                 }
             }
         }
@@ -602,7 +603,7 @@ impl Client {
                     .arg("error")
                     .output()?;
 
-                let process_to_gif = if (output.stdout.len() > 10) {
+                let process_to_gif = if output.stdout.len() > 10 {
                     debug!("File contains audio streams, checking average volume");
                     let output = Command::new("ffmpeg")
                         .arg("-i")

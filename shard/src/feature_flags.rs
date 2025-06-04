@@ -1,10 +1,13 @@
-use serde_json::Value;
-use std::collections::HashMap;
-use tokio::sync::RwLock;
-use std::sync::Arc;
-use serenity::all::{Command, CommandOption, CommandOptionChoice, CommandOptionType, CommandType, CreateCommand, CreateCommandOption, GuildId};
-use tokio::time::Instant;
 use anyhow::Result;
+use serde_json::Value;
+use serenity::all::{
+    Command, CommandOption, CommandOptionChoice, CommandOptionType, CommandType, CreateCommand,
+    CreateCommandOption, GuildId,
+};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio::time::Instant;
 
 const CACHE_DURATION: u64 = 60 * 60 * 12; // 12 hours
 
@@ -42,7 +45,7 @@ impl PartialEq<CommandOption> for &CommandOptionTemplate {
             return false;
         }
 
-        if self.choices != other.choices {
+        if *self.choices != *other.choices {
             return false;
         }
 
@@ -64,16 +67,21 @@ impl PartialEq<CommandOption> for CommandOptionTemplate {
     }
 }
 
-impl Into<CreateCommandOption> for &CommandOptionTemplate {
-    fn into(self) -> CreateCommandOption {
-        let mut command_option = CreateCommandOption::new(self.kind, self.name.clone(), self.description.clone());
-        command_option = command_option
-            .required(self.required);
+impl<'a> Into<CreateCommandOption<'a>> for &CommandOptionTemplate {
+    fn into(self) -> CreateCommandOption<'a> {
+        let mut command_option =
+            CreateCommandOption::new(self.kind, self.name.clone(), self.description.clone());
+        command_option = command_option.required(self.required);
 
         for choice in &self.choices {
             match choice.value.clone() {
-                Value::String(value) => command_option = command_option.add_string_choice(choice.name.clone(), value),
-                Value::Number(value) => command_option = command_option.add_number_choice(choice.name.clone(), value.as_f64().unwrap()),
+                Value::String(value) => {
+                    command_option = command_option.add_string_choice(choice.name.clone(), value)
+                }
+                Value::Number(value) => {
+                    command_option = command_option
+                        .add_number_choice(choice.name.clone(), value.as_f64().unwrap())
+                }
                 _ => {}
             }
         }
@@ -103,7 +111,7 @@ impl PartialEq<Command> for &CommandTemplate {
             return false;
         }
 
-        if self.options != other.options {
+        if *self.options != *other.options {
             return false;
         }
 
@@ -115,23 +123,31 @@ impl PartialEq<Command> for &CommandTemplate {
     }
 }
 
-
-impl Into<CreateCommand> for &CommandTemplate {
-    fn into(self) -> CreateCommand {
+impl<'a> Into<CreateCommand<'a>> for &CommandTemplate {
+    fn into(self) -> CreateCommand<'a> {
         let mut command = CreateCommand::new(self.name.clone());
         command = command
             .description(self.description.clone())
             .kind(self.kind);
 
         for option in &self.options {
-            let mut command_option = CreateCommandOption::new(option.kind, option.name.clone(), option.description.clone());
-            command_option = command_option
-                .required(option.required);
+            let mut command_option = CreateCommandOption::new(
+                option.kind,
+                option.name.clone(),
+                option.description.clone(),
+            );
+            command_option = command_option.required(option.required);
 
             for choice in &option.choices {
                 match choice.value.clone() {
-                    Value::String(value) => command_option = command_option.add_string_choice(choice.name.clone(), value),
-                    Value::Number(value) => command_option = command_option.add_number_choice(choice.name.clone(), value.as_f64().unwrap()),
+                    Value::String(value) => {
+                        command_option =
+                            command_option.add_string_choice(choice.name.clone(), value)
+                    }
+                    Value::Number(value) => {
+                        command_option = command_option
+                            .add_number_choice(choice.name.clone(), value.as_f64().unwrap())
+                    }
                     _ => {}
                 }
             }
@@ -168,7 +184,6 @@ impl Manager {
         }
     }
 
-
     /// Update a guild's commands if cache is outdated and commands have changed
     pub async fn update_guild(&self, guild_id: &GuildId) -> Result<()> {
         // If cache not outdated, return
@@ -182,7 +197,10 @@ impl Manager {
         drop(flags_cache);
 
         // Fetch feature flags from PostHog
-        let flags = self.client.get_feature_flags(&format!("guild_{}", guild_id), Some(guild_id.get())).await?;
+        let flags = self
+            .client
+            .get_feature_flags(&format!("guild_{}", guild_id), Some(guild_id.get()))
+            .await?;
         let mut expected_commands = Vec::new();
         for (flag, value) in flags {
             if let Some(flag_templates) = self.templates.get(&flag) {
@@ -199,14 +217,22 @@ impl Manager {
             return Ok(());
         }
 
-        let expected_commands: Vec<CreateCommand> = expected_commands.into_iter().map(|command| command.into()).collect();
+        let expected_commands: Vec<CreateCommand<'_>> = expected_commands
+            .into_iter()
+            .map(|command| command.into())
+            .collect();
 
         // Update commands
-        guild_id.set_commands(&self.discord_http, expected_commands).await?;
+        guild_id
+            .set_commands(&self.discord_http, &*expected_commands)
+            .await?;
 
         // Update cache
         let mut flags_cache = self.flags_cache.write().await;
-        flags_cache.insert(*guild_id, Instant::now() + std::time::Duration::from_secs(CACHE_DURATION));
+        flags_cache.insert(
+            *guild_id,
+            Instant::now() + std::time::Duration::from_secs(CACHE_DURATION),
+        );
 
         Ok(())
     }

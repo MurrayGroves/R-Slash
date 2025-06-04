@@ -9,6 +9,7 @@ edition = "2024"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures = { version = "0.3" }
+dashmap = { version = "6.1.0" }
 log = "0.4"
 env_logger = "*"
 futures-util = { version = "0.3", default-features = false, features = [
@@ -23,17 +24,15 @@ tokio = { version = "*", features = [
     "full",
 ] }
 reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"] }
-serenity = { version = "0.12", default-features = false, features = [
+serenity = { git = "https://github.com/jamesbt365/serenity.git", branch = "components-v2", default-features = false, features = [
     "cache",
-    "client",
     "gateway",
     "rustls_backend",
     "model",
-    "unstable_discord_api",
     "builder",
     "http",
 ] }
-redis = { version = "*", features = [
+redis = { git = "https://github.com/redis-rs/redis-rs", features = [
     "aio",
     "tokio-comp",
     "connection-manager",
@@ -51,12 +50,12 @@ sentry = { version = "0.34", features = [
 ] }
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
-tracing-opentelemetry = "*"
-opentelemetry-otlp = { version = "*", features = ["tonic", "grpc-tonic"] }
+tracing-opentelemetry = "0.27"
+opentelemetry-otlp = { version = "0.26", features = ["tonic", "grpc-tonic"] }
 tonic = "*"
-opentelemetry = "0.28.0"
-opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
-opentelemetry-appender-tracing = "*"
+opentelemetry = "0.26"
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+opentelemetry-appender-tracing = "0.26"
 
 
 compile-time = "*"
