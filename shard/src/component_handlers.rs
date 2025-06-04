@@ -1,16 +1,13 @@
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Result, anyhow, bail};
-use auto_poster::AutoPosterClient;
 use post_api::{get_subreddit, get_subreddit_search, optional_post_to_response};
-use post_subscriber::{Bot, SubscriberClient};
-use rslash_common::{InteractionResponse, InteractionResponseMessage};
+use post_subscriber::{Bot};
 use serenity::all::{
     ComponentInteraction, ComponentInteractionDataKind, Context, CreateInteractionResponse,
     CreateInteractionResponseMessage,
 };
 use tarpc::context;
-use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tracing::{debug, instrument};
 
@@ -178,7 +175,7 @@ pub async fn post_again<'a>(
             )
             .await
             .unwrap_or_else(|x| Err(anyhow!("Timeout getting search results: {:?}", x)))
-            .map(|post| optional_post_to_response(post, true))
+            .map(|post| optional_post_to_response(post))
         }
         false => timeout(
             Duration::from_secs(30),

@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use rslash_common::{InteractionResponse, InteractionResponseMessage};
-
 use serenity::all::{
     CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage,
     CreateModal, Http, Interaction,
@@ -206,7 +204,7 @@ impl<'a> ResponseTracker<'a> {
     }
 
     #[instrument(skip(self))]
-    pub async fn send_post(&mut self, post: Post, include_buttons: bool) -> Result<()> {
+    pub async fn send_post(&mut self, post: Post) -> Result<()> {
         if self.sent_response {
             self.send_followup(post.into()).await
         } else {

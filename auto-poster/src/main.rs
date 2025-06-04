@@ -3,26 +3,24 @@
 use futures::{Future, StreamExt, TryStreamExt};
 use mongodb::bson::{doc, Document};
 use mongodb::options::ClientOptions;
-use redis::{AsyncCommands, AsyncTypedCommands};
+use redis::AsyncTypedCommands;
 use rslash_common::span_filter;
 use serenity::all::{ChannelId, GatewayIntents, Http};
 use serenity::{all::EventHandler, async_trait};
 use tokio::time::Duration;
 
-use anyhow::anyhow;
 use std::cell::SyncUnsafeCell;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::env;
 use std::fmt::Debug;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
 use futures::future::{self};
 
-use opentelemetry::trace::TracerProvider;
-use opentelemetry::{global, KeyValue};
+use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
 use serenity::secrets::Token;
@@ -70,7 +68,7 @@ impl Eq for UnsafeMemory {}
 
 impl Ord for UnsafeMemory {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        return unsafe { (&*(self.0.get())).cmp(&*(other.0.get())) };
+        unsafe { (&*(self.0.get())).cmp(&*(other.0.get())) }
     }
 }
 
@@ -168,7 +166,7 @@ impl AutoPostServer {
             client.database("state").collection("autoposts");
 
         let filter = doc! {
-            "id": id as i64,
+            "id": id,
         };
 
         match coll.delete_one(filter).await {
@@ -272,7 +270,7 @@ impl AutoPoster for AutoPostServer {
     #[instrument(skip(self))]
     async fn list_autoposts(
         self,
-        _: ::tarpc::context::Context,
+        _: tarpc::context::Context,
         channel: u64,
         bot: u64,
     ) -> Result<Vec<PostMemory>, String> {

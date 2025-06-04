@@ -4,7 +4,7 @@ use log::*;
 use redis::{from_redis_value, Commands, Value};
 use std::cmp;
 use std::convert::TryInto;
-use std::{env, fs, io::Write, process::Command, thread};
+use std::{env, fs, io::Write, thread};
 use tokio::time::{sleep, Duration};
 
 async fn get_namespace() -> String {

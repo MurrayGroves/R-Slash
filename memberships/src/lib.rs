@@ -2,9 +2,7 @@ use std::collections::HashMap;
 
 use log::*;
 use mongodb::bson::{doc, Document};
-use mongodb::options::FindOptions;
 
-use serenity::all::UserId;
 use serenity::futures::TryStreamExt;
 
 use serde_derive::{Deserialize, Serialize};
@@ -15,16 +13,6 @@ mod tests {
     fn it_works() {
         let result = 2 + 2;
         assert_eq!(result, 4);
-    }
-}
-
-pub struct Client<'a> {
-    client: &'a mut mongodb::Client,
-}
-
-impl<'a> From<&'a mut mongodb::Client> for Client<'a> {
-    fn from(client: &'a mut mongodb::Client) -> Client<'a> {
-        Client { client }
     }
 }
 

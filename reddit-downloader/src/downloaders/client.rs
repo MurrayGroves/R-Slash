@@ -10,7 +10,7 @@ use redis::AsyncCommands;
 use reqwest::StatusCode;
 use sentry::integrations::anyhow::capture_anyhow;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::io::Write;
 use std::process::Command;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::info;
 use tracing::warn;
-use tracing::{debug, error, trace};
+use tracing::{debug, error};
 
 pub struct Token {
     url: String,
@@ -40,7 +40,7 @@ impl Token {
             debug!("Token request status: {}", req.status());
             debug!("Token request headers: {:?}", req.headers());
             info!("Waiting 10 minutes for token rate limit");
-            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            tokio::time::sleep(Duration::from_secs(600)).await;
             req = reqwest::Client::new().get(url).send().await?;
         }
 
@@ -74,7 +74,7 @@ impl Token {
             .as_i64()
             .ok_or(Error::msg("Failed to parse expiry"))?;
 
-        return Ok((token.to_string(), expiry));
+        Ok((token.to_string(), expiry))
     }
 
     pub async fn new(url: String) -> Result<Self> {
@@ -103,7 +103,7 @@ struct LimitState {
 // Struct for tracking rate limits
 #[derive(Clone)]
 pub struct Limiter {
-    state: Arc<tokio::sync::Mutex<LimitState>>,
+    state: Arc<Mutex<LimitState>>,
     per_minute: Option<u64>, // User can specify rate limit per minute, otherwise use the headers
     name: String,
 }
@@ -111,7 +111,7 @@ pub struct Limiter {
 impl Limiter {
     pub fn new(per_minute: Option<u64>, name: String) -> Self {
         Self {
-            state: Arc::new(tokio::sync::Mutex::new(LimitState {
+            state: Arc::new(Mutex::new(LimitState {
                 remaining: 1,
                 reset: 0,
             })),
@@ -206,7 +206,7 @@ impl Limiter {
             let wait = state.reset - chrono::Utc::now().timestamp();
             drop(state);
             info!("Waiting {} seconds for rate limit on {}", wait, self.name);
-            tokio::time::sleep(std::time::Duration::from_secs(wait as u64)).await;
+            tokio::time::sleep(Duration::from_secs(wait as u64)).await;
         }
     }
 }
@@ -217,7 +217,6 @@ pub struct Client {
     imgur: Option<imgur::Client>,
     generic: generic::Client,
     dash: Option<dash::Client>,
-    posthog: Option<posthog::Client>,
     redgifs: Option<redgifs::Client>,
     path: String,
     process_lock: Arc<Mutex<()>>,
@@ -236,7 +235,6 @@ impl Client {
     pub async fn new(
         path: String,
         imgur_client_id: Option<String>,
-        posthog_client: Option<posthog::Client>,
         redis: redis::aio::MultiplexedConnection,
         subscriber_client: SubscriberClient,
     ) -> Result<Self> {
@@ -253,7 +251,6 @@ impl Client {
                 path.clone(),
                 Limiter::new(Some(60), "generic".to_string()),
             ),
-            posthog: posthog_client,
             dash: Some(dash::Client::new(
                 path.clone(),
                 Limiter::new(Some(60), "dash".to_string()),
@@ -299,7 +296,7 @@ impl Client {
         debug!("Processing media for subreddit: {}", subreddit);
 
         let mut started_at = self.subreddit_started_at.lock().await;
-        *started_at = Some((subreddit.clone(), tokio::time::Instant::now()));
+        *started_at = Some((subreddit.clone(), Instant::now()));
         drop(started_at);
 
         for i in 0..posts.len() {
@@ -637,7 +634,7 @@ impl Client {
                         .ok_or(Error::msg("Failed to extract volume"))?;
 
                     let silent = volume.contains("inf")
-                        || volume.trim().parse::<f32>().map_err(|err| {
+                        || volume.trim().parse::<f32>().map_err(|_| {
                             Error::msg(format!(
                                 "Failed to parse mean volume from string: {}",
                                 volume

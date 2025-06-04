@@ -1,5 +1,3 @@
-use std::hash::{Hash, Hasher};
-
 use anyhow::Error;
 use dash_mpd::fetch::DashDownloader;
 use tracing::instrument;

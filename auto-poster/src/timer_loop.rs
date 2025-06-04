@@ -2,13 +2,8 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 
 use auto_poster::PostMemory;
 use mongodb::bson::doc;
-use post_api::{
-    optional_post_to_message, optional_post_to_response, queue_subreddit, PostApiError,
-    SubredditStatus,
-};
-use rslash_common::{InteractionResponse, InteractionResponseMessage};
-use serenity::all::{CreateEmbed, CreateMessage};
-use serenity::builder::{CreateInteractionResponse, CreateInteractionResponseMessage};
+use post_api::{optional_post_to_message, queue_subreddit, PostApiError, SubredditStatus};
+use serenity::all::CreateMessage;
 use tokio::{select, time::Instant};
 use tracing::{debug, error, warn};
 
@@ -45,53 +40,6 @@ async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) 
         }
     };
     drop(autoposts);
-}
-
-async fn post_error_to_response(e: anyhow::Error, subreddit: &str) -> CreateInteractionResponse {
-    let validity = post_api::check_subreddit_valid(subreddit)
-        .await
-        .unwrap_or_else(|e| {
-            warn!("Error checking subreddit validity: {}", e);
-            SubredditStatus::Valid
-        });
-
-    match validity {
-        SubredditStatus::Valid => {
-            if let Some(x) = e.downcast_ref::<PostApiError>() {
-                match x {
-					PostApiError::NoPostsFound { subreddit } => {
-						rslash_common::error_response(
-							"No posts found".to_string(),
-							format!("Deleted autopost for r/{} because no supported posts were found. For example, they might all be text posts.", subreddit)
-						)
-					}
-					_ => {
-						error!("Error getting subreddit for auto-post: {:?}", e);
-						rslash_common::error_response(
-							"Unexpected Error".to_string(),
-							format!("Deleted autopost for r/{} due to an unexpected error.", subreddit)
-						)
-					}
-				}
-            } else {
-                error!("Error getting subreddit for auto-post: {:?}", e);
-                rslash_common::error_response(
-                    "Unexpected Error".to_string(),
-                    format!(
-                        "Deleted autopost for r/{} due to an unexpected error.",
-                        subreddit
-                    ),
-                )
-            }
-        }
-        SubredditStatus::Invalid(reason) => {
-            debug!("Subreddit response not 200: {}", reason);
-            rslash_common::error_response(
-				"Subreddit Inaccessible".to_string(),
-				format!("Deleted autopost for r/{} because it's either private, does not exist, or has been banned.", subreddit)
-			)
-        }
-    }
 }
 
 async fn post_error_to_message(e: anyhow::Error, subreddit: &str) -> CreateMessage<'static> {

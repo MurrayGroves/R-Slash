@@ -2,18 +2,17 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, ensure, Context, Error};
+use anyhow::{bail, ensure, Context, Error};
 use async_recursion::async_recursion;
 use indoc::indoc;
-use log::warn;
 use redis::aio::MultiplexedConnection;
 use redis::{from_redis_value, AsyncTypedCommands};
 use reqwest::header;
 use reqwest::header::HeaderMap;
 use serde_json::json;
 use serenity::all::{
-    ButtonStyle, ChannelId, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor,
-    CreateInteractionResponseFollowup, CreateMediaGallery, GenericChannelId, MessageFlags,
+    ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateInteractionResponseFollowup,
+    CreateMediaGallery, GenericChannelId, MessageFlags,
 };
 use serenity::builder::{
     CreateComponent, CreateContainer, CreateInteractionResponse, CreateInteractionResponseMessage,
@@ -21,8 +20,6 @@ use serenity::builder::{
 };
 use tokio::time::sleep;
 use tracing::{debug, error, error_span, instrument};
-
-use rslash_common::{InteractionResponse, InteractionResponseMessage, ResponseFallbackMethod};
 
 /// Returns current milliseconds since the Epoch
 fn get_epoch_ms() -> u64 {
@@ -75,8 +72,8 @@ impl std::fmt::Display for PostApiError {
 pub async fn get_length_of_search_results(
     search_index: String,
     search: &str,
-    con: &mut redis::aio::MultiplexedConnection,
-) -> Result<isize, anyhow::Error> {
+    con: &mut MultiplexedConnection,
+) -> Result<isize, Error> {
     let new_search = format!("w'*{}*'", redis_sanitise(&search));
 
     debug!(
@@ -103,8 +100,8 @@ pub async fn get_post_at_search_index(
     search_index: String,
     search: &str,
     index: isize,
-    con: &mut redis::aio::MultiplexedConnection,
-) -> Result<String, anyhow::Error> {
+    con: &mut MultiplexedConnection,
+) -> Result<String, Error> {
     let new_search = format!("w'*{}*'", redis_sanitise(&search));
 
     debug!(
@@ -134,9 +131,9 @@ pub async fn get_post_at_search_index(
 pub async fn get_post_at_list_index(
     list: String,
     index: u16,
-    con: &mut redis::aio::MultiplexedConnection,
+    con: &mut MultiplexedConnection,
     parent_tx: Option<&sentry::TransactionOrSpan>,
-) -> Result<String, anyhow::Error> {
+) -> Result<String, Error> {
     debug!("Getting post at index {} in list {}", index, list);
 
     let span: sentry::TransactionOrSpan = match &parent_tx {
@@ -268,13 +265,10 @@ impl<'a> Into<CreateMessage<'a>> for Post {
     }
 }
 
-pub fn optional_post_to_response(
-    post: Option<Post>,
-    buttons: bool,
-) -> CreateInteractionResponse<'static> {
+pub fn optional_post_to_response(post: Option<Post>) -> CreateInteractionResponse<'static> {
     match post {
         Some(post) => post.into(),
-        None =>                         serenity::builder::CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().embed(
+        None => CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().embed(
             CreateEmbed::default()
                 .title("No Posts Found")
                 .description("No supported posts found in this subreddit. Try searching for something else.")
@@ -309,8 +303,8 @@ pub fn optional_post_to_message(post: Option<Post>, buttons: bool) -> CreateMess
 pub async fn get_post_by_id<'a>(
     post_id: &str,
     search: Option<&str>,
-    con: &mut redis::aio::MultiplexedConnection,
-) -> Result<Post, anyhow::Error> {
+    con: &mut MultiplexedConnection,
+) -> Result<Post, Error> {
     debug!("Getting post by ID: {}", post_id);
 
     let post: HashMap<String, String> = con.hgetall(&post_id).await?;
@@ -361,9 +355,9 @@ pub async fn get_post_by_id<'a>(
 #[async_recursion]
 pub async fn get_subreddit<'a>(
     subreddit: &str,
-    con: &mut redis::aio::MultiplexedConnection,
+    con: &mut MultiplexedConnection,
     channel: GenericChannelId,
-) -> Result<Post, anyhow::Error> {
+) -> Result<Post, Error> {
     let subreddit = subreddit.to_lowercase();
 
     let fetched_posts: HashMap<String, u64> = redis::AsyncCommands::hgetall(
@@ -438,9 +432,9 @@ pub async fn get_subreddit<'a>(
 pub async fn get_subreddit_search<'a>(
     subreddit: &str,
     search: &str,
-    con: &mut redis::aio::MultiplexedConnection,
+    con: &mut MultiplexedConnection,
     channel: GenericChannelId,
-) -> Result<Option<Post>, anyhow::Error> {
+) -> Result<Option<Post>, Error> {
     debug!(
         "Getting post for search: {} in subreddit: {}",
         search, subreddit
@@ -515,8 +509,8 @@ pub async fn get_subreddit_search<'a>(
 pub async fn list_contains(
     element: &str,
     list: &str,
-    con: &mut redis::aio::MultiplexedConnection,
-) -> Result<bool, anyhow::Error> {
+    con: &mut MultiplexedConnection,
+) -> Result<bool, Error> {
     let position: Option<u16> = con
         .lpos(list, element, redis::LposOptions::default())
         .await?;

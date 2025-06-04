@@ -1,13 +1,10 @@
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow, bail};
-use auto_poster::AutoPosterClient;
+use anyhow::{Result, bail};
 use log::{debug, warn};
 use memberships::get_user_tiers;
-use rslash_common::{InteractionResponse, InteractionResponseMessage};
 use serenity::all::{ActionRowComponent, Context, CreateEmbed, ModalInteraction};
 use serenity::builder::{CreateInteractionResponse, CreateInteractionResponseMessage};
-use tokio::sync::RwLock;
 use tracing::instrument;
 
 use crate::{ShardState, capture_event, discord::ResponseTracker};

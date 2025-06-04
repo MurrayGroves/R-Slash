@@ -1,8 +1,7 @@
-use std::{collections::HashMap, io::Write, process::Command};
+use std::{ io::Write};
 
 use crate::REDDIT_LIMITER;
 use anyhow::{Context, Error};
-use futures_util::StreamExt;
 use tracing::instrument;
 
 #[derive(Clone)]
@@ -27,7 +26,6 @@ impl Client {
     /// Download a single mp4 from a url, and return the path to the mp4, or URL if no conversion is needed
     #[instrument(skip(self))]
     pub async fn request(&self, url: &str, filename: &str) -> Result<String, Error> {
-        let id = url.split("/").last().ok_or(Error::msg("No ID in url"))?;
         let write_path = format!("{}/{}", self.path, filename);
 
         if url.contains("reddit.com") {
@@ -51,7 +49,7 @@ impl Client {
         }
 
         if !output.status.success() {
-            std::io::stderr().write_all(&output.stderr).unwrap();
+            std::io::stderr().write_all(&output.stderr)?;
             Err(Error::msg(format!(
                 "wget failed: {}\n{}",
                 output.status.to_string(),
@@ -61,9 +59,5 @@ impl Client {
         }
 
         Ok(filename.to_string())
-    }
-
-    pub async fn request_batch(&self, urls: Vec<&str>) -> Result<HashMap<String, String>, Error> {
-        todo!();
     }
 }

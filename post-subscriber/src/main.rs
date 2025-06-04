@@ -1,7 +1,6 @@
 use futures::{Future, StreamExt};
 use mongodb::bson::doc;
 use mongodb::options::ClientOptions;
-use redis::AsyncCommands;
 use redis::AsyncTypedCommands;
 use serde_json::json;
 use serenity::all::{ChannelId, CreateMessage, GatewayIntents, GuildId, Http, Token};
@@ -19,16 +18,13 @@ use futures::future;
 use post_subscriber::{Bot, Subscriber, Subscription};
 use rslash_common::{initialise_observability, span_filter};
 use tarpc::{
-    context,
     server::{self, Channel},
     tokio_serde::formats::Bincode,
 };
 
-use opentelemetry::trace::TracerProvider;
-use opentelemetry::{KeyValue, global};
+use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
-use serenity::builder::CreateInteractionResponse;
 use tarpc::context::Context;
 use tracing_subscriber::{
     EnvFilter, Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
@@ -134,7 +130,7 @@ impl Subscriber for SubscriberServer<'_> {
     #[tracing::instrument(skip(self))]
     async fn register_subscription(
         self,
-        _: context::Context,
+        _: Context,
         subreddit: String,
         channel: u64,
         bot: Bot,
@@ -187,7 +183,7 @@ impl Subscriber for SubscriberServer<'_> {
     #[tracing::instrument(skip(self))]
     async fn delete_subscription(
         self,
-        _: context::Context,
+        _: Context,
         subreddit: String,
         channel: u64,
         bot: Bot,
@@ -241,7 +237,7 @@ impl Subscriber for SubscriberServer<'_> {
     #[tracing::instrument(skip(self))]
     async fn list_subscriptions(
         self,
-        _: context::Context,
+        _: Context,
         channel: u64,
         bot: Bot,
     ) -> Result<Vec<Subscription>, String> {
@@ -265,12 +261,7 @@ impl Subscriber for SubscriberServer<'_> {
 
     // Notify subscribers of a new post
     #[tracing::instrument(skip(self))]
-    async fn notify(
-        self,
-        _: context::Context,
-        subreddit: String,
-        post_id: String,
-    ) -> Result<(), String> {
+    async fn notify(self, _: Context, subreddit: String, post_id: String) -> Result<(), String> {
         info!(
             "Notifying subscribers of post {} in subreddit {}",
             post_id, subreddit
@@ -304,7 +295,7 @@ impl Subscriber for SubscriberServer<'_> {
                 return Err(e.to_string());
             }
         };
-        
+
         debug!("Got post {:?}", post);
 
         let _ = self
@@ -333,7 +324,7 @@ impl Subscriber for SubscriberServer<'_> {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn watched_subreddits(self, _: context::Context) -> Result<HashSet<String>, String> {
+    async fn watched_subreddits(self, _: Context) -> Result<HashSet<String>, String> {
         info!("Listing watched subreddits");
         let subscriptions = self.subscriptions.read().await;
 

@@ -1,13 +1,12 @@
-use auto_poster::AutoPosterClient;
 use log::{error, trace};
-use post_subscriber::{Bot, SubscriberClient};
+use post_subscriber::Bot;
 use serde_json::json;
 use serenity::all::{
     CommandDataOptionValue, CreateButton, CreateComponent, CreateInputText,
     CreateInteractionResponse, CreateInteractionResponseMessage, CreateModal, CreateSelectMenu,
     CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
 };
-use serenity::model::{Colour, guild};
+use serenity::model::Colour;
 use std::borrow::Cow;
 use tarpc::context;
 use tracing::debug;
@@ -28,11 +27,8 @@ use serenity::model::application::CommandInteraction;
 
 use anyhow::{Result, anyhow, bail};
 use memberships::*;
-use serenity::all::Change::ChannelId;
 
 use post_api::*;
-use rslash_common::InteractionResponse;
-use rslash_common::InteractionResponseMessage;
 
 use crate::discord::ResponseTracker;
 use crate::{NAMESPACE, ShardState, capture_event};
@@ -151,7 +147,7 @@ pub async fn get_subreddit_cmd<'a>(
         let search = options[1].value.as_str().unwrap().to_string();
 
         match get_subreddit_search(&subreddit, &search, &mut con, command.channel_id).await? {
-            Some(post) => tracker.send_post(post, true).await,
+            Some(post) => tracker.send_post(post).await,
             None => {
                 tracker
                     .send_response(CreateInteractionResponse::Message(
@@ -174,7 +170,7 @@ pub async fn get_subreddit_cmd<'a>(
             .await
             .map(|post| post.into())
         {
-            Ok(post) => tracker.send_post(post, true).await,
+            Ok(post) => tracker.send_post(post).await,
             Err(e) => {
                 tracker
                     .send_response(if let Some(x) = e.downcast_ref::<PostApiError>() {
@@ -419,8 +415,6 @@ pub async fn subscribe<'a>(
 
     let subreddit = options[0].value.clone();
     let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
-
-    let client = ctx.data::<ShardState>().post_subscriber.clone();
 
     let client = ctx.data::<ShardState>().post_subscriber.clone();
 
@@ -754,7 +748,7 @@ pub async fn autopost<'a>(
                     .to_lowercase();
                 let search = match options.get(1) {
                     Some(x) => x.value.clone(),
-                    None => CommandDataOptionValue::Number(0 as f64),
+                    None => CommandDataOptionValue::Number(0f64),
                 };
                 autopost_start(command, ctx, subreddit, search.as_str(), tracker).await
             } else {
@@ -795,7 +789,7 @@ pub async fn autopost<'a>(
                 }
                 let search = match options.get(1) {
                     Some(x) => x.value.clone(),
-                    None => CommandDataOptionValue::Number(0 as f64),
+                    None => CommandDataOptionValue::Number(0f64),
                 };
                 autopost_start(command, ctx, subreddit, search.as_str(), tracker).await
             } else {

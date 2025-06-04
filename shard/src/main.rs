@@ -2,33 +2,30 @@
 
 use futures::FutureExt;
 use log::trace;
-use serde_json::{Value, json};
+use serde_json::json;
 use serenity::all::{
-    AutocompleteChoice, ChannelId, CreateActionRow, CreateAutocompleteResponse, CreateButton,
-    CreateCommand, Emoji, FullEvent, GuildId, ReactionType,
+    AutocompleteChoice, ChannelId, CreateAutocompleteResponse, CreateButton, CreateCommand,
+    FullEvent, GuildId, ReactionType,
 };
-use serenity::gateway::{ShardRunnerInfo, ShardRunnerMessage, ShardStageUpdateEvent};
+use serenity::gateway::{ShardRunnerInfo, ShardRunnerMessage};
 use serenity::model::Colour;
 use stubborn_io::tokio::{StubbornIo, UnderlyingIo};
 use stubborn_io::{ReconnectOptions, StubbornTcpStream};
 use tarpc::serde_transport::Transport;
 use tarpc::tokio_serde::formats::Bincode;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tracing::{Metadata, instrument};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::instrument;
 use tracing::{debug, error, info, warn};
 
 use tracing_subscriber::{
     EnvFilter, Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
 };
 
-use rslash_common::{
-    InteractionResponse, InteractionResponseMessage, ResponseFallbackMethod,
-    initialise_observability, span_filter,
-};
+use rslash_common::{initialise_observability, span_filter};
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::pin::Pin;
 use std::task::Poll;
 use std::{fs, iter};
@@ -36,7 +33,7 @@ use std::{fs, iter};
 use serenity::builder::{CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage};
 use serenity::model::gateway::GatewayIntents;
 use serenity::model::id::ShardId;
-use serenity::{async_trait, model::gateway::Ready, prelude::*};
+use serenity::{async_trait, prelude::*};
 
 use futures_util::TryStreamExt;
 use std::fs::File;
@@ -50,20 +47,16 @@ use redis::{self, FromRedisValue};
 
 use mongodb::bson::{Document, doc};
 use mongodb::options::ClientOptions;
-use mongodb::options::FindOptions;
 
 use serenity::model::application::{CommandInteraction, Interaction};
-use serenity::model::guild::{Guild, UnavailableGuild};
 
 use anyhow::anyhow;
 use dashmap::DashMap;
 use futures::channel::mpsc::UnboundedSender;
-use opentelemetry::trace::TracerProvider;
-use opentelemetry::{KeyValue, global};
+use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
 use sentry_anyhow::capture_anyhow;
-use tonic::metadata::MetadataMap;
 
 mod command_handlers;
 mod component_handlers;
@@ -811,22 +804,20 @@ where
     C: Clone + Send + Unpin + 'static,
 {
     fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
+    ) -> Poll<std::io::Result<()>> {
         match Pin::new(&mut self.underlying).poll_read(cx, buf) {
             Poll::Ready(x) => match x {
-                Ok(x) => {
-                    return Poll::Ready(Ok(x));
-                }
+                Ok(x) => Poll::Ready(Ok(x)),
                 Err(e) => {
                     warn!("Error with underlying: {}", e);
                     match Box::pin(tokio::time::sleep(Duration::from_millis(500))).poll_unpin(cx) {
                         Poll::Ready(_) => {}
                         Poll::Pending => return Poll::Pending,
                     };
-                    return self.poll_read(cx, buf);
+                    self.poll_read(cx, buf)
                 }
             },
             Poll::Pending => Poll::Pending,
@@ -843,19 +834,17 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
-    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+    ) -> Poll<Result<usize, std::io::Error>> {
         match Pin::new(&mut self.underlying).poll_write(cx, buf) {
             Poll::Ready(x) => match x {
-                Ok(x) => {
-                    return Poll::Ready(Ok(x));
-                }
+                Ok(x) => Poll::Ready(Ok(x)),
                 Err(e) => {
                     warn!("Error with underlying: {}", e);
                     match Box::pin(tokio::time::sleep(Duration::from_millis(500))).poll_unpin(cx) {
                         Poll::Ready(_) => {}
                         Poll::Pending => return Poll::Pending,
                     };
-                    return self.poll_write(cx, buf);
+                    self.poll_write(cx, buf)
                 }
             },
             Poll::Pending => Poll::Pending,
@@ -865,14 +854,14 @@ where
     fn poll_flush(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), std::io::Error>> {
+    ) -> Poll<Result<(), std::io::Error>> {
         Pin::new(&mut self.underlying).poll_flush(cx)
     }
 
     fn poll_shutdown(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), std::io::Error>> {
+    ) -> Poll<Result<(), std::io::Error>> {
         Pin::new(&mut self.underlying).poll_shutdown(cx)
     }
 }
@@ -883,7 +872,7 @@ where
     C: Clone + Send + Unpin + 'static,
 {
     fn new(underlying: StubbornIo<T, C>) -> Self {
-        return Self { underlying };
+        Self { underlying }
     }
 }
 
@@ -1040,7 +1029,7 @@ fn main() {
 				auto_poster,
 			};
 
-			let mut client = serenity::Client::builder(Token::from_env("DISCORD_TOKEN").expect("Failed to load token from env"), GatewayIntents::GUILDS)
+			let mut client = Client::builder(Token::from_env("DISCORD_TOKEN").expect("Failed to load token from env"), GatewayIntents::GUILDS)
 				.event_handler(Handler)
 				.data(Arc::new(state))
 				.await

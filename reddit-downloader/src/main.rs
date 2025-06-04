@@ -1,37 +1,31 @@
 #[macro_use]
 extern crate lazy_static;
 
-use futures::StreamExt;
 use futures::lock::Mutex;
-use indexmap::IndexSet;
-use ordermap::OrderMap;
 use post_subscriber::SubscriberClient;
-use sentry::{Hub, SentryFutureExt, integrations::anyhow::capture_anyhow};
+use sentry::integrations::anyhow::capture_anyhow;
 use std::collections::HashMap;
 use std::iter::{self, FromIterator};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use stubborn_io::{ReconnectOptions, StubbornTcpStream};
 use tarpc::tokio_serde::formats::Bincode;
-use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, Layer, filter};
+use tracing_subscriber::{EnvFilter, Layer};
 use truncrate::*;
 
 use anyhow::{Context, Error, anyhow};
 
-use redis::{AsyncCommands, FromRedisValue, RedisError, RedisResult, Value};
+use redis::{AsyncCommands, FromRedisValue, RedisResult, Value};
 
-use atomic_counter::RelaxedCounter;
 use futures_util::TryStreamExt;
 use mongodb::bson::{Document, doc};
-use mongodb::options::{ClientOptions, FindOptions};
+use mongodb::options::ClientOptions;
 use opentelemetry::global;
-use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
 use reqwest::header;
@@ -41,7 +35,6 @@ use std::env;
 
 use rslash_common::{initialise_observability, span_filter};
 use tarpc::{client, context, serde_transport::Transport};
-use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 mod downloaders;
 
@@ -57,7 +50,7 @@ pub enum ConfigValue {
     Bool(bool),
     String(String),
     DownloaderClient(downloaders::client::Client),
-    SubscriberClient(post_subscriber::SubscriberClient),
+    SubscriberClient(SubscriberClient),
 }
 
 /// Stores config values required for operation of the downloader
@@ -77,32 +70,10 @@ struct SubredditState {
     pages_left: u64,
     /// Whether the subreddit should never stop being fetched.
     always_fetch: bool,
-    /// How many posts have been processed in the current fetch.
-    posts_processed: atomic_counter::RelaxedCounter,
-    /// How many posts we expect to process in the current fetch.
-    posts_to_process: usize,
-}
-
-/// Represents a Reddit post
-#[derive(Debug, Clone)]
-pub struct PostRep {
-    /// The score (upvotes-downvotes) of the post
-    score: i64,
-    /// A URl to the post
-    url: String,
-    title: String,
-    /// Embed URL of the post media
-    embed_url: Option<String>,
-    /// Name of the author of the post
-    author: String,
-    /// The post's unique ID
-    id: String,
-    /// The timestamp of the post's creation
-    timestamp: u64,
 }
 
 /// Returns current milliseconds since the Epoch
-fn get_epoch_ms() -> Result<u64, anyhow::Error> {
+fn get_epoch_ms() -> Result<u64, Error> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
 }
 
@@ -124,7 +95,7 @@ async fn request_access_token(
     reddit_secret: String,
     web_client: &reqwest::Client,
     device_id: Option<String>,
-) -> Result<(String, u64), anyhow::Error> {
+) -> Result<(String, u64), Error> {
     let post_data = match device_id {
         Some(x) => format!(
             "grant_type=https://oauth.reddit.com/grants/installed_client&\\device_id={}",
@@ -183,7 +154,7 @@ async fn request_access_token(
         expires_in, expires_at
     );
 
-    return Ok((token, expires_at));
+    Ok((token, expires_at))
 }
 
 /// Returns a String of the Reddit access token to use
@@ -204,7 +175,7 @@ async fn get_access_token(
     reddit_secret: String,
     web_client: &reqwest::Client,
     device_id: Option<String>,
-) -> Result<String, anyhow::Error> {
+) -> Result<String, Error> {
     // Return a reddit access token
     let token_name = match device_id.clone() {
         // The key to grab from the DB
@@ -405,7 +376,7 @@ async fn get_subreddit(
     pages: Option<u8>,
     downloaders_client: downloaders::client::Client,
     subscriber: SubscriberClient,
-) -> Result<(SubredditExists, Option<String>), anyhow::Error> {
+) -> Result<(SubredditExists, Option<String>), Error> {
     debug!("Fetching subreddit: {}, after: {:?}", subreddit, after);
 
     if !downloaders_client.is_finished(&subreddit).await {
@@ -569,9 +540,8 @@ async fn get_subreddit(
             break;
         }
 
-        let mut posts: Vec<
-            Result<(usize, serde_json::Map<String, serde_json::Value>), anyhow::Error>,
-        > = Vec::new();
+        let mut posts: Vec<Result<(usize, serde_json::Map<String, serde_json::Value>), Error>> =
+            Vec::new();
 
         let mut count = 0;
         for post in results {
@@ -695,7 +665,7 @@ async fn get_subreddit(
                 trace!("Post already exists in DB");
                 // Update post's score with new score
                 match con
-                    .hset::<&str, &str, i64, redis::Value>(
+                    .hset::<&str, &str, i64, Value>(
                         &key,
                         "score",
                         post["score"].as_i64().unwrap_or(0),
@@ -779,7 +749,7 @@ async fn get_subreddit(
                 // Push post to Redis
                 let value = Vec::from(&post_object);
                 match con
-                    .hset_multiple::<&str, String, String, redis::Value>(&key, &value)
+                    .hset_multiple::<&str, String, String, Value>(&key, &value)
                     .await
                 {
                     Ok(_) => {}
@@ -877,7 +847,7 @@ async fn get_subreddit(
 async fn index_exists(con: &mut redis::aio::MultiplexedConnection, index: String) -> bool {
     match redis::cmd("FT.INFO")
         .arg(index)
-        .query_async::<redis::Value>(con)
+        .query_async::<Value>(con)
         .await
     {
         Ok(_) => true,
@@ -891,7 +861,7 @@ async fn create_index(
     con: &mut redis::aio::MultiplexedConnection,
     index: String,
     prefix: String,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), Error> {
     Ok(redis::cmd("FT.CREATE")
         .arg(index)
         .arg("PREFIX")
@@ -920,9 +890,7 @@ async fn create_index(
 /// # Arguments
 /// ## data
 /// A thread-safe wrapper of the [Config](ConfigStruct)
-async fn download_loop<'a>(
-    data: Arc<Mutex<HashMap<String, ConfigValue>>>,
-) -> Result<(), anyhow::Error> {
+async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result<(), Error> {
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/")?;
     let mut con = db_client
         .get_multiplexed_async_connection()
@@ -979,7 +947,6 @@ async fn download_loop<'a>(
     let downloaders_client = downloaders::client::Client::new(
         "/data/media".to_string(),
         Some(imgur_client_id),
-        None,
         con.clone(),
         subscriber.clone(),
     )
@@ -1019,8 +986,6 @@ async fn download_loop<'a>(
                     last_fetched: None,
                     pages_left: 10,
                     always_fetch: true,
-                    posts_to_process: 0,
-                    posts_processed: RelaxedCounter::new(0),
                 },
             );
         }
@@ -1045,8 +1010,6 @@ async fn download_loop<'a>(
                         last_fetched,
                         pages_left: 10,
                         always_fetch: false,
-                        posts_to_process: 0,
-                        posts_processed: RelaxedCounter::new(0),
                     },
                 );
             }
@@ -1065,8 +1028,6 @@ async fn download_loop<'a>(
                                 last_fetched,
                                 pages_left: 10,
                                 always_fetch: false,
-                                posts_to_process: 0,
-                                posts_processed: RelaxedCounter::new(0),
                             },
                         );
                     }

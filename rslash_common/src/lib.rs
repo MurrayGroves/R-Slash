@@ -19,9 +19,8 @@ pub enum AutoPostCommand {
 }
 
 use serenity::all::{
-    ChannelId, CreateActionRow, CreateEmbed, CreateInteractionResponse,
-    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage,
-    CreateModal, UserId,
+    ChannelId, CreateEmbed, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, CreateMessage, CreateModal, UserId,
 };
 use serenity::builder::CreateComponent;
 use tokio::time::Instant;
@@ -29,7 +28,7 @@ use tokio::time::Instant;
 #[derive(Debug, Clone)]
 pub struct InteractionResponseMessage<'a> {
     pub file: Option<serenity::builder::CreateAttachment<'a>>,
-    pub embed: Option<serenity::all::CreateEmbed<'a>>,
+    pub embed: Option<CreateEmbed<'a>>,
     pub content: Option<String>,
     pub ephemeral: bool,
     pub components: Option<Vec<CreateComponent<'a>>>,

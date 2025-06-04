@@ -1,13 +1,11 @@
 use std::{
-	hash::{Hash, Hasher},
-	io::Write,
 	sync::Arc,
 };
 
-use anyhow::{Context, Error, Result};
+use anyhow::{Error, Result};
 use futures::StreamExt;
 use tokio::{io::AsyncWriteExt, sync::RwLock};
-use tracing::{debug, instrument, span};
+use tracing::{debug, instrument};
 
 #[derive(Clone)]
 pub struct Client {
@@ -62,7 +60,7 @@ impl Client {
 			.get("gif")
 			.ok_or_else(|| match json.get("error") {
 				Some(e) => {
-					if let Some(code) = e.get("code") {
+					return if let Some(code) = e.get("code") {
 						if let Some(description) = e.get("description") {
 							debug!("Description: {:?}", description);
 							if description == "gif not ready" || description == "gif not found" {
@@ -72,12 +70,12 @@ impl Client {
 						}
 
 						if code == "Gone" {
-							return Error::msg("Deleted");
+							Error::msg("Deleted")
 						} else {
-							return Error::msg(format!("Error: {}", e));
+							Error::msg(format!("Error: {}", e))
 						}
 					} else {
-						return Error::msg(format!("Error: {}", e));
+						Error::msg(format!("Error: {}", e))
 					}
 				}
 				None => Error::msg("No gif in response"),
@@ -109,6 +107,6 @@ impl Client {
 		debug!("Downloaded...");
 		debug!("Returning {}", path.replace(&format!("{}/", self.path), ""));
 
-		return Ok(path.replace(&format!("{}/", self.path), ""));
+		Ok(path.replace(&format!("{}/", self.path), ""))
 	}
 }
