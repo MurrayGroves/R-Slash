@@ -14,8 +14,6 @@ async fn get_namespace() -> String {
 }
 
 async fn add_shards(num: u64, max_concurrency: u64) {
-	let mut con = get_redis_connection().await;
-
 	let namespace = get_namespace().await;
 
 	let mut desired_shards = num;

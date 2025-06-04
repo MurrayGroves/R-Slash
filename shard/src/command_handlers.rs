@@ -149,13 +149,12 @@ pub async fn get_subreddit_cmd<'a>(
     debug!("Got redis client");
     if options.len() > 1 {
         let search = options[1].value.as_str().unwrap().to_string();
-        tracker
-            .send_response(
-                match get_subreddit_search(&subreddit, &search, &mut con, command.channel_id)
-                    .await?
-                {
-                    Some(post) => post.into(),
-                    None => CreateInteractionResponse::Message(
+
+        match get_subreddit_search(&subreddit, &search, &mut con, command.channel_id).await? {
+            Some(post) => tracker.send_post(post, true).await,
+            None => {
+                tracker
+                    .send_response(CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new().embed(
                             CreateEmbed::default()
                                 .title("No Posts Found")
@@ -166,64 +165,63 @@ pub async fn get_subreddit_cmd<'a>(
                                 .color(0xff0000)
                                 .to_owned(),
                         ),
-                    ),
-                },
-            )
-            .await
-    } else {
-        tracker
-            .send_response(
-                get_subreddit(&subreddit, &mut con, command.channel_id)
+                    ))
                     .await
-                    .map(|post| post.into())
-                    .unwrap_or_else(|e| {
-                        if let Some(x) = e.downcast_ref::<PostApiError>() {
-                            match x {
-                                PostApiError::NoPostsFound { subreddit } => {
-                                    CreateInteractionResponse::Message(
-                                        CreateInteractionResponseMessage::new().embed(
-                                            CreateEmbed::default()
-                                                .title("No Posts Found")
-                                                .description(format!(
-                                                    "No supported posts found in r/{}",
-                                                    subreddit
-                                                ))
-                                                .color(0xff0000)
-                                                .to_owned(),
-                                        ),
-                                    )
-                                }
-                                _ => {
-                                    error!("Error getting subreddit: {:?}", e);
-                                    CreateInteractionResponse::Message(
-                                        CreateInteractionResponseMessage::new().embed(
-                                            CreateEmbed::default()
-                                                .title("Error")
-                                                .description(
-                                                    "An error occurred while fetching posts.",
-                                                )
-                                                .color(0xff0000)
-                                                .to_owned(),
-                                        ),
-                                    )
-                                }
-                            }
-                        } else {
-                            error!("Error getting subreddit: {:?}", e);
-
-                            CreateInteractionResponse::Message(
-                                CreateInteractionResponseMessage::new().embed(
-                                    CreateEmbed::default()
-                                        .title("Error")
-                                        .description("An error occurred while fetching posts.")
-                                        .color(0xff0000)
-                                        .to_owned(),
-                                ),
-                            )
-                        }
-                    }),
-            )
+            }
+        }
+    } else {
+        match get_subreddit(&subreddit, &mut con, command.channel_id)
             .await
+            .map(|post| post.into())
+        {
+            Ok(post) => tracker.send_post(post, true).await,
+            Err(e) => {
+                tracker
+                    .send_response(if let Some(x) = e.downcast_ref::<PostApiError>() {
+                        match x {
+                            PostApiError::NoPostsFound { subreddit } => {
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new().embed(
+                                        CreateEmbed::default()
+                                            .title("No Posts Found")
+                                            .description(format!(
+                                                "No supported posts found in r/{}",
+                                                subreddit
+                                            ))
+                                            .color(0xff0000)
+                                            .to_owned(),
+                                    ),
+                                )
+                            }
+                            _ => {
+                                error!("Error getting subreddit: {:?}", e);
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new().embed(
+                                        CreateEmbed::default()
+                                            .title("Error")
+                                            .description("An error occurred while fetching posts.")
+                                            .color(0xff0000)
+                                            .to_owned(),
+                                    ),
+                                )
+                            }
+                        }
+                    } else {
+                        error!("Error getting subreddit: {:?}", e);
+
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new().embed(
+                                CreateEmbed::default()
+                                    .title("Error")
+                                    .description("An error occurred while fetching posts.")
+                                    .color(0xff0000)
+                                    .to_owned(),
+                            ),
+                        )
+                    })
+                    .await
+            }
+        }
     }
 }
 

@@ -295,7 +295,6 @@ impl Subscriber for SubscriberServer<'_> {
             &format!("subreddit:{}:post:{}", subreddit, &post_id),
             None,
             &mut redis,
-            false,
         )
         .await
         {
@@ -305,6 +304,7 @@ impl Subscriber for SubscriberServer<'_> {
                 return Err(e.to_string());
             }
         };
+        
         debug!("Got post {:?}", post);
 
         let _ = self
@@ -321,7 +321,7 @@ impl Subscriber for SubscriberServer<'_> {
         debug!("Filtered subscriptions {:?}", filtered);
 
         let alert = PostAlert {
-            message: post.into(),
+            message: post.buttonless_message(),
             subscriptions: filtered.into_iter().map(|x| (*x).clone()).collect(),
             timestamp: Instant::now(),
         };

@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context, Error};
 use async_recursion::async_recursion;
+use indoc::indoc;
 use log::warn;
 use redis::aio::MultiplexedConnection;
 use redis::{from_redis_value, AsyncTypedCommands};
@@ -12,10 +13,11 @@ use reqwest::header::HeaderMap;
 use serde_json::json;
 use serenity::all::{
     ButtonStyle, ChannelId, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor,
-    GenericChannelId,
+    CreateInteractionResponseFollowup, CreateMediaGallery, GenericChannelId, MessageFlags,
 };
 use serenity::builder::{
-    CreateComponent, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    CreateComponent, CreateContainer, CreateInteractionResponse, CreateInteractionResponseMessage,
+    CreateMediaGalleryItem, CreateMessage, CreateTextDisplay, CreateUnfurledMediaItem,
 };
 use tokio::time::sleep;
 use tracing::{debug, error, error_span, instrument};
@@ -177,91 +179,92 @@ pub struct Post {
     pub timestamp: serenity::model::timestamp::Timestamp,
     /// The search term used to fetch this post, if any
     pub search: Option<String>,
+    /// The score of the post
+    pub score: isize,
+}
+
+fn pretty_number(num: isize) -> String {
+    if num >= 1_000 {
+        format!("{:.1}k", num as f64 / 1_000.0)
+    } else {
+        num.to_string()
+    }
 }
 
 impl Post {
-    fn get_components<'a, 'b>(&'a self) -> Vec<CreateComponent<'b>> {
-        vec![CreateComponent::ActionRow(CreateActionRow::Buttons(
-            Cow::from(vec![
-                CreateButton::new(
+    fn get_components<'a>(self, include_buttons: bool) -> Vec<CreateComponent<'a>> {
+        let mut components = vec![CreateComponent::Container(CreateContainer::new(vec![
+            CreateComponent::TextDisplay(CreateTextDisplay::new(format!(
+                indoc! {"
+                    ## [{}]({})
+                    by [u/{}](https://reddit.com/u/{}) in [r/{}](https://reddit.com/r/{})
+                "},
+                self.title, self.url, self.author, self.author, self.subreddit, self.subreddit
+            ))),
+            CreateComponent::MediaGallery(CreateMediaGallery::new(vec![
+                CreateMediaGalleryItem::new(CreateUnfurledMediaItem::new(self.embed_url.clone())),
+            ])),
+            CreateComponent::TextDisplay(CreateTextDisplay::new(format!(
+                indoc! {"
+                    *Posted <t:{}:R>, currently has {} score*
+                "},
+                self.timestamp.unix_timestamp(),
+                pretty_number(self.score)
+            ))),
+        ]))];
+
+        if include_buttons {
+            components.push(CreateComponent::ActionRow(CreateActionRow::Buttons(
+                Cow::from(vec![CreateButton::new(
                     json!({
                         "subreddit": self.subreddit,
-                        "search": self.search.clone().unwrap_or("".to_string()),
+                        "search": self.search,
                         "command": "again"
                     })
                     .to_string(),
                 )
                 .label("🔁")
-                .style(ButtonStyle::Primary),
-                CreateButton::new(
-                    json!({
-                        "command": "where-autopost"
-                    })
-                    .to_string(),
-                )
-                .label("Where's the auto-post button?")
-                .style(ButtonStyle::Secondary),
-            ]),
-        ))]
+                .style(ButtonStyle::Primary)]),
+            )))
+        }
+
+        components
+    }
+
+    pub fn buttonless_message<'a>(self) -> CreateMessage<'a> {
+        CreateMessage::new().components(self.get_components(false))
     }
 }
 
 impl<'a> Into<CreateInteractionResponse<'a>> for Post {
     /// Includes buttons
     fn into(self) -> CreateInteractionResponse<'a> {
-        if self.embed_url.starts_with("https://cdn.rsla.sh") && self.embed_url.ends_with(".mp4") {
-            let msg = CreateInteractionResponseMessage::default()
-                .content(format!("[.]({})", self.embed_url))
-                .components(self.get_components());
+        CreateInteractionResponse::Message(self.into())
+    }
+}
 
-            CreateInteractionResponse::Message(msg)
-        } else {
-            let msg = CreateInteractionResponseMessage::default()
-                .embed(
-                    CreateEmbed::default()
-                        .title(self.title.clone())
-                        .description(format!("r/{}", self.subreddit))
-                        .author(
-                            CreateEmbedAuthor::new(format!("u/{}", self.author))
-                                .url(format!("https://reddit.com/u/{}", self.author)),
-                        )
-                        .url(self.url.clone())
-                        .color(0x00ff00)
-                        .image(self.embed_url.clone())
-                        .timestamp(self.timestamp)
-                        .to_owned(),
-                )
-                .components(self.get_components());
+impl<'a> Into<CreateInteractionResponseMessage<'a>> for Post {
+    fn into(self) -> CreateInteractionResponseMessage<'a> {
+        CreateInteractionResponseMessage::default()
+            .flags(MessageFlags::IS_COMPONENTS_V2)
+            .components(self.get_components(true))
+    }
+}
 
-            CreateInteractionResponse::Message(msg)
-        }
+impl<'a> Into<CreateInteractionResponseFollowup<'a>> for Post {
+    /// Includes buttons
+    fn into(self) -> CreateInteractionResponseFollowup<'a> {
+        CreateInteractionResponseFollowup::default()
+            .flags(MessageFlags::IS_COMPONENTS_V2)
+            .components(self.get_components(true))
     }
 }
 
 impl<'a> Into<CreateMessage<'a>> for Post {
     fn into(self) -> CreateMessage<'a> {
-        if self.embed_url.starts_with("https://cdn.rsla.sh") && self.embed_url.ends_with(".mp4") {
-            CreateMessage::new()
-                .content(format!("[.]({})", self.embed_url))
-                .components(self.get_components())
-        } else {
-            CreateMessage::new()
-                .embed(
-                    CreateEmbed::default()
-                        .title(self.title.clone())
-                        .description(format!("r/{}", self.subreddit))
-                        .author(
-                            CreateEmbedAuthor::new(format!("u/{}", self.author))
-                                .url(format!("https://reddit.com/u/{}", self.author)),
-                        )
-                        .url(self.url.clone())
-                        .color(0x00ff00)
-                        .image(self.embed_url.clone())
-                        .timestamp(self.timestamp)
-                        .to_owned(),
-                )
-                .components(self.get_components())
-        }
+        CreateMessage::new()
+            .flags(MessageFlags::IS_COMPONENTS_V2)
+            .components(self.get_components(true))
     }
 }
 
@@ -283,7 +286,13 @@ pub fn optional_post_to_response(
 
 pub fn optional_post_to_message(post: Option<Post>, buttons: bool) -> CreateMessage<'static> {
     match post {
-        Some(post) => post.into(),
+        Some(post) => {
+            if buttons {
+                post.into()
+            } else {
+                post.buttonless_message()
+            }
+        }
         None => CreateMessage::new().embed(
             CreateEmbed::default()
                 .title("No Posts Found")
@@ -301,7 +310,6 @@ pub async fn get_post_by_id<'a>(
     post_id: &str,
     search: Option<&str>,
     con: &mut redis::aio::MultiplexedConnection,
-    add_buttons: bool,
 ) -> Result<Post, anyhow::Error> {
     debug!("Getting post by ID: {}", post_id);
 
@@ -315,7 +323,6 @@ pub async fn get_post_by_id<'a>(
     );
 
     let subreddit = post_id.split(":").collect::<Vec<&str>>()[1].to_string();
-
     let author = post.get("author").context("No author in post")?.clone();
     let title = post.get("title").context("No title in post")?.clone();
     let url = post.get("url").context("No url in post")?.clone();
@@ -327,27 +334,15 @@ pub async fn get_post_by_id<'a>(
         .get("timestamp")
         .context("No timestamp in post")?
         .parse()?;
+    let score = post
+        .get("score")
+        .context("No score in post")?
+        .parse()
+        .context("Failed to parse score")?;
 
+    // If filename instead of URL, convert to CDN URL
     if !embed_url.starts_with("http") {
         embed_url = format!("https://cdn.rsla.sh/gifs/{}", embed_url);
-    }
-
-    if (embed_url.starts_with("https://r-slash.b-cdn.net")
-        || embed_url.starts_with("https://cdn.rsla.sh"))
-        && embed_url.ends_with(".mp4")
-    {
-        let filename = embed_url
-            .split("/")
-            .last()
-            .ok_or(anyhow!("No filename found in URL: {}", url))?;
-        let title: String = url::form_urlencoded::byte_serialize(title.as_bytes()).collect();
-        let author: String = url::form_urlencoded::byte_serialize(author.as_bytes()).collect();
-        let subreddit: String =
-            url::form_urlencoded::byte_serialize(subreddit.as_bytes()).collect();
-        embed_url = format!(
-            "https://cdn.rsla.sh/render/{}?title={}%20-%20by%20u/{}%20in%20r/{}&redirect={}",
-            filename, title, author, subreddit, url
-        );
     }
 
     Ok(Post {
@@ -358,6 +353,7 @@ pub async fn get_post_by_id<'a>(
         embed_url,
         timestamp: serenity::model::timestamp::Timestamp::from_unix_timestamp(timestamp)?,
         search: search.map(|s| s.to_string()),
+        score,
     })
 }
 
@@ -420,7 +416,7 @@ pub async fn get_subreddit<'a>(
     )
     .await?;
 
-    let mut post = get_post_by_id(&post_id, None, con, true).await;
+    let mut post = get_post_by_id(&post_id, None, con).await;
 
     // If the post is not found, some bug has occurred, remove the post from the subreddit list and call this function again to get a new one
     if let Err(e) = post {
@@ -492,7 +488,7 @@ pub async fn get_subreddit_search<'a>(
 
     let mut post_id =
         get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con).await?;
-    let mut post = get_post_by_id(&post_id, Some(&search), con, true).await;
+    let mut post = get_post_by_id(&post_id, Some(&search), con).await;
     while let Err(_) = post {
         index += 1;
         if index >= length {
@@ -509,7 +505,7 @@ pub async fn get_subreddit_search<'a>(
         }
         post_id =
             get_post_at_search_index(format!("idx:{}", &subreddit), &search, index, con).await?;
-        post = get_post_by_id(&post_id, Some(&search), con, true).await;
+        post = get_post_by_id(&post_id, Some(&search), con).await;
     }
 
     Ok(Some(post?))

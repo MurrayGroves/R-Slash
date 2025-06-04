@@ -8,6 +8,7 @@ use serenity::all::{
 };
 
 use anyhow::{Result, anyhow};
+use post_api::Post;
 use tracing::{debug, instrument, warn};
 
 pub struct ResponseTracker<'a> {
@@ -202,5 +203,14 @@ impl<'a> ResponseTracker<'a> {
 
         debug!("Sent response");
         Ok(())
+    }
+
+    #[instrument(skip(self))]
+    pub async fn send_post(&mut self, post: Post, include_buttons: bool) -> Result<()> {
+        if self.sent_response {
+            self.send_followup(post.into()).await
+        } else {
+            self.send_message(post.into()).await
+        }
     }
 }
