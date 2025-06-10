@@ -33,10 +33,12 @@ use reqwest::header::{HeaderMap, USER_AGENT};
 use serde_json::Value::Null;
 use std::env;
 
+use crate::helpers::{Embeddability, extract_raw_embed_urls_from_post, media_url_embeddability};
 use rslash_common::{initialise_observability, span_filter};
 use tarpc::{client, context, serde_transport::Transport};
 
 mod downloaders;
+mod helpers;
 
 lazy_static! {
     static ref MULTI_LOCK: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
@@ -246,7 +248,7 @@ async fn get_access_token(
 pub struct NewPost {
     redis_key: String,
     id: String,
-    embed_url: String,
+    embed_urls: Vec<String>,
     score: i64,
     title: String,
     url: String,
@@ -265,7 +267,7 @@ impl From<NewPost> for Vec<(String, String)> {
             ("author".to_string(), post.author),
             ("id".to_string(), post.id),
             ("timestamp".to_string(), post.timestamp.to_string()),
-            ("embed_url".to_string(), post.embed_url),
+            ("embed_url".to_string(), post.embed_urls.join(",")),
         ]
     }
 }
@@ -280,7 +282,7 @@ impl From<&NewPost> for Vec<(String, String)> {
             ("author".to_string(), post.author.to_string()),
             ("id".to_string(), post.id.to_string()),
             ("timestamp".to_string(), post.timestamp.to_string()),
-            ("embed_url".to_string(), post.embed_url.to_string()),
+            ("embed_url".to_string(), post.embed_urls.join(",")),
         ]
     }
 }
@@ -689,34 +691,15 @@ async fn get_subreddit(
                 post["title"], post["url"]
             );
 
-            let mut url = post["url"].to_string().replace('"', "");
-            if url.contains("v.redd.it") {
-                url = post["media"]["reddit_video"]["dash_url"]
-                    .to_string()
-                    .replace('"', "")
-            };
+            let urls = extract_raw_embed_urls_from_post(post.clone())?;
 
-            // If URL is already embeddable, no further processing is needed
-            let needs_processing = if (url.ends_with(".gif")
-                || url.ends_with(".png")
-                || url.ends_with(".jpg")
-                || url.ends_with(".jpeg"))
-                && !url.contains("redgifs.com")
-            {
-                debug!("URL is embeddable");
-                false
-            } else if url.ends_with(".mp4")
-                || url.contains("imgur.com")
-                || url.contains("redgifs.com")
-                || url.contains(".mpd")
-            {
-                debug!("URL is not embeddable, but we have the ability to turn it into one");
-                true
-            } else {
-                debug!(
-                    "URL is not embeddable, and we do not have the ability to turn it into one."
-                );
-                continue;
+            let needs_processing = match media_url_embeddability(
+                urls.iter().next().ok_or(anyhow!("Post has no embed URL"))?,
+            ) {
+                Embeddability::Embeddable => false,
+                Embeddability::NeedsProcessing => true,
+                // Stop processing post if it can't be made embeddable
+                Embeddability::NotEmbeddable => continue,
             };
 
             let timestamp = post["created_utc"].as_f64().unwrap() as u64;
@@ -735,7 +718,7 @@ async fn get_subreddit(
                     post["permalink"].to_string().replace('"', "")
                 ),
                 title,
-                embed_url: url,
+                embed_urls: urls,
                 author: post["author"].to_string().replace('"', ""),
                 id: post["id"].to_string().replace('"', ""),
                 timestamp,
@@ -840,49 +823,6 @@ async fn get_subreddit(
     }
 
     Ok((SubredditExists::Exists, after))
-}
-
-// Check if RediSearch index exists
-#[tracing::instrument(skip(con))]
-async fn index_exists(con: &mut redis::aio::MultiplexedConnection, index: String) -> bool {
-    match redis::cmd("FT.INFO")
-        .arg(index)
-        .query_async::<Value>(con)
-        .await
-    {
-        Ok(_) => true,
-        Err(_) => false,
-    }
-}
-
-// Create RediSearch index for subreddit
-#[tracing::instrument(skip(con))]
-async fn create_index(
-    con: &mut redis::aio::MultiplexedConnection,
-    index: String,
-    prefix: String,
-) -> Result<(), Error> {
-    Ok(redis::cmd("FT.CREATE")
-        .arg(index)
-        .arg("PREFIX")
-        .arg("1")
-        .arg(prefix)
-        .arg("SCHEMA")
-        .arg("title")
-        .arg("TEXT")
-        .arg("score")
-        .arg("NUMERIC")
-        .arg("SORTABLE")
-        .arg("author")
-        .arg("TEXT")
-        .arg("SORTABLE")
-        .arg("flair")
-        .arg("TAG")
-        .arg("timestamp")
-        .arg("NUMERIC")
-        .arg("SORTABLE")
-        .query_async(con)
-        .await?)
 }
 
 /// Start the downloading loop
@@ -1092,8 +1032,8 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Re
         if next_subreddit.is_some() {
             let subreddit = next_subreddit.unwrap();
             info!("Fetching subreddit {}", &subreddit);
-            if !index_exists(&mut con, format!("idx:{}", &subreddit)).await {
-                create_index(
+            if !helpers::index_exists(&mut con, format!("idx:{}", &subreddit)).await {
+                helpers::create_index(
                     &mut con,
                     format!("idx:{}", &subreddit),
                     format!("subreddit:{}:post:", &subreddit),

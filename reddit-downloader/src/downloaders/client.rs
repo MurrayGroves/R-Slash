@@ -312,7 +312,16 @@ impl Client {
             };
 
             debug!("Processing media for post: {}", post.id);
-            post.embed_url = match self.resolve_embed_url(&post.embed_url, &post.id).await {
+
+            if post.embed_urls.len() != 1 {
+                bail!(
+                    "Post has multiple embed URLs that need processing, this should not happen, skipping post: {}",
+                    post.id
+                )
+            };
+
+            let mut embed_url = post.embed_urls.get(0).unwrap().clone();
+            embed_url = match self.resolve_embed_url(&embed_url, &post.id).await {
                 Ok(url) => url,
                 Err(e) => {
                     warn!("Failed to process media: {:?}", e);
@@ -320,9 +329,11 @@ impl Client {
                 }
             };
 
-            if !post.embed_url.starts_with("http") {
-                post.embed_url = format!("https://cdn.rsla.sh/gifs/{}", post.embed_url);
+            if !embed_url.starts_with("http") {
+                embed_url = format!("https://cdn.rsla.sh/gifs/{}", embed_url);
             };
+
+            post.embed_urls = vec![embed_url];
 
             post.needs_processing = false;
 

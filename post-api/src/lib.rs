@@ -74,7 +74,13 @@ pub async fn get_length_of_search_results(
     search: &str,
     con: &mut MultiplexedConnection,
 ) -> Result<isize, Error> {
-    let new_search = format!("w'*{}*'", redis_sanitise(&search));
+    let new_search = format!(
+        "%{}%",
+        redis_sanitise(&search)
+            .split(" ")
+            .collect::<Vec<_>>()
+            .join("% %")
+    );
 
     debug!(
         "Getting length of search results for {} in {}",
@@ -102,7 +108,13 @@ pub async fn get_post_at_search_index(
     index: isize,
     con: &mut MultiplexedConnection,
 ) -> Result<String, Error> {
-    let new_search = format!("w'*{}*'", redis_sanitise(&search));
+    let new_search = format!(
+        "%{}%",
+        redis_sanitise(&search)
+            .split(" ")
+            .collect::<Vec<_>>()
+            .join("% %")
+    );
 
     debug!(
         "Getting post at index {} in search results for {}",
@@ -171,7 +183,7 @@ pub struct Post {
     /// The URL of the post on Reddit
     pub url: String,
     /// The converted embed URL
-    pub embed_url: String,
+    pub embed_urls: Vec<String>,
     /// The timestamp when the post was made on Reddit
     pub timestamp: serenity::model::timestamp::Timestamp,
     /// The search term used to fetch this post, if any
@@ -198,9 +210,13 @@ impl Post {
                 "},
                 self.title, self.url, self.author, self.author, self.subreddit, self.subreddit
             ))),
-            CreateComponent::MediaGallery(CreateMediaGallery::new(vec![
-                CreateMediaGalleryItem::new(CreateUnfurledMediaItem::new(self.embed_url.clone())),
-            ])),
+            CreateComponent::MediaGallery(CreateMediaGallery::new(
+                self.embed_urls
+                    .into_iter()
+                    .take(10) // Media gallery can only show 10 items
+                    .map(|url| CreateMediaGalleryItem::new(CreateUnfurledMediaItem::new(url)))
+                    .collect::<Vec<_>>(),
+            )),
             CreateComponent::TextDisplay(CreateTextDisplay::new(format!(
                 indoc! {"
                     *Posted <t:{}:R>, currently has {} score*
@@ -299,6 +315,7 @@ pub fn optional_post_to_message(post: Option<Post>, buttons: bool) -> CreateMess
     }
 }
 
+/// Gets a post by ID of form `subreddit:{subreddit}:post:{reddit post ID}`
 #[instrument(skip(con))]
 pub async fn get_post_by_id<'a>(
     post_id: &str,
@@ -320,10 +337,20 @@ pub async fn get_post_by_id<'a>(
     let author = post.get("author").context("No author in post")?.clone();
     let title = post.get("title").context("No title in post")?.clone();
     let url = post.get("url").context("No url in post")?.clone();
-    let mut embed_url: String = post
+    let embed_urls: Vec<String> = post
         .get("embed_url")
         .context("No embed_url in post")?
-        .clone();
+        .clone()
+        .split(",")
+        .into_iter()
+        .map(|s| {
+            if !s.starts_with("http") {
+                format!("https://cdn.rsla.sh/gifs/{}", s)
+            } else {
+                s.to_string()
+            }
+        })
+        .collect();
     let timestamp = post
         .get("timestamp")
         .context("No timestamp in post")?
@@ -334,17 +361,12 @@ pub async fn get_post_by_id<'a>(
         .parse()
         .context("Failed to parse score")?;
 
-    // If filename instead of URL, convert to CDN URL
-    if !embed_url.starts_with("http") {
-        embed_url = format!("https://cdn.rsla.sh/gifs/{}", embed_url);
-    }
-
     Ok(Post {
         subreddit,
         author,
         title,
         url,
-        embed_url,
+        embed_urls,
         timestamp: serenity::model::timestamp::Timestamp::from_unix_timestamp(timestamp)?,
         search: search.map(|s| s.to_string()),
         score,
