@@ -391,7 +391,7 @@ dependencies = [
  "opentelemetry_sdk",
  "post_api",
  "posthog",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "rslash_common",
  "sentry 0.34.0",
  "serde",
@@ -1185,7 +1185,7 @@ dependencies = [
  "pretty-duration",
  "pretty_env_logger",
  "rand 0.9.1",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "reqwest 0.12.18",
  "rslash_common",
  "sentry 0.34.0",
@@ -3383,7 +3383,7 @@ dependencies = [
  "mongodb 2.8.2",
  "pretty_env_logger",
  "rand 0.9.1",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "reqwest 0.12.18",
  "rslash_common",
  "sentry 0.29.3",
@@ -3413,7 +3413,7 @@ dependencies = [
  "opentelemetry_sdk",
  "post_api",
  "posthog",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "rslash_common",
  "sentry 0.38.1",
  "serde",
@@ -3826,7 +3826,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "post_subscriber",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "reqwest 0.12.18",
  "rslash_common",
  "sentry 0.36.0",
@@ -3868,7 +3868,7 @@ dependencies = [
 [[package]]
 name = "redis"
 version = "0.31.0"
-source = "git+https://github.com/redis-rs/redis-rs.git#6a9eb9c2463b4f2130d19a252c7509cb8352c9ca"
+source = "git+https://github.com/redis-rs/redis-rs#6a9eb9c2463b4f2130d19a252c7509cb8352c9ca"
 dependencies = [
  "arc-swap",
  "backon",
@@ -4101,7 +4101,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "posthog",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "serenity 0.12.4 (git+https://github.com/jamesbt365/serenity.git?branch=components-v2)",
  "tokio",
  "tonic 0.13.1",

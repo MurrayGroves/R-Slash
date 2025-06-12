@@ -159,6 +159,7 @@ pub async fn timer_loop(
                                     &autopost_clone.subreddit,
                                     &mut server.redis,
                                     autopost_clone.channel.widen(),
+                                    Some(0),
                                 )
                                 .await
                                 .map(|post| post.into())

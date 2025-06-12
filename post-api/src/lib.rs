@@ -245,7 +245,9 @@ impl Post {
     }
 
     pub fn buttonless_message<'a>(self) -> CreateMessage<'a> {
-        CreateMessage::new().flags(MessageFlags::IS_COMPONENTS_V2).components(self.get_components(false))
+        CreateMessage::new()
+            .flags(MessageFlags::IS_COMPONENTS_V2)
+            .components(self.get_components(false))
     }
 }
 
@@ -380,6 +382,7 @@ pub async fn get_subreddit<'a>(
     subreddit: &str,
     con: &mut MultiplexedConnection,
     channel: GenericChannelId,
+    recursion_level: Option<u8>,
 ) -> Result<Post, Error> {
     let subreddit = subreddit.to_lowercase();
 
@@ -445,7 +448,19 @@ pub async fn get_subreddit<'a>(
             con.lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
                 .await?;
         }
-        post = get_subreddit(&subreddit, con, channel).await;
+
+        if let Some(recursion_level) = recursion_level {
+            if recursion_level >= 5 {
+                info!(
+                    "Recursion level exceeded, giving up on getting post from subreddit: {}",
+                    subreddit
+                );
+                error!("Recursion level exceeded, giving up on getting post from subreddit");
+                return Err(e);
+            }
+        }
+
+        post = get_subreddit(&subreddit, con, channel, recursion_level.map(|x| x + 1)).await;
     }
 
     post
