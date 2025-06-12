@@ -33,7 +33,9 @@ use reqwest::header::{HeaderMap, USER_AGENT};
 use serde_json::Value::Null;
 use std::env;
 
-use crate::helpers::{Embeddability, extract_raw_embed_urls_from_post, media_url_embeddability};
+use crate::helpers::{
+    Embeddability, extract_raw_embed_urls_from_post, media_url_embeddability, process_post_metadata,
+};
 use rslash_common::{initialise_observability, span_filter};
 use tarpc::{client, context, serde_transport::Transport};
 
@@ -381,6 +383,8 @@ async fn get_subreddit(
 ) -> Result<(SubredditExists, Option<String>), Error> {
     debug!("Fetching subreddit: {}, after: {:?}", subreddit, after);
 
+    let subreddit = subreddit.to_lowercase();
+
     if !downloaders_client.is_finished(&subreddit).await {
         debug!("Previous iteration not finished processing, skipping for now");
         return Ok((SubredditExists::Exists, after));
@@ -559,249 +563,24 @@ async fn get_subreddit(
 
         let parent_span = sentry::configure_scope(|scope| scope.get_span());
         for post in posts {
-            // Create a new transaction as an independent continuation
-            let ctx = sentry::TransactionContext::continue_from_span(
-                "process subreddit post",
-                "process_post",
+            match process_post_metadata(
                 parent_span.clone(),
-            );
-
-            let transaction = sentry::start_transaction(ctx);
-            let (_, post) = match post {
-                Ok(x) => x,
-                Err(x) => {
-                    let txt = format!("Failed to get post: {}", x);
+                post,
+                &mut subreddit_name,
+                con,
+                subscriber.clone(),
+                &mut existing_posts,
+                &mut post_list,
+                &subreddit,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    let txt = format!("Failed to process post metadata: {}", e);
                     warn!("{}", txt);
-                    sentry::capture_message(&txt, sentry::Level::Warning);
-                    continue;
                 }
-            };
-
-            trace!("{:?} - {:?}", post["title"], post["url"]);
-
-            // Redis key for this post
-            let key: String = format!(
-                "subreddit:{}:post:{}",
-                post["subreddit"].to_string().replace("\"", ""),
-                &post["id"].to_string().replace('"', "")
-            );
-
-            if subreddit_name.is_none() {
-                subreddit_name = Some(post["subreddit"].to_string().replace("\"", ""));
             }
-
-            let exists = existing_posts.iter().any(|x| match x {
-                Post::Existing(x) => x == &key,
-                _ => false,
-            });
-
-            // If the post has been removed by a moderator, remove it from the DB and skip it
-            if post.get("removed_by_category").unwrap_or(&Null) != &Null
-                || post["author"].to_string().replace('"', "") == "[deleted]"
-            {
-                debug!("Post is deleted");
-                if exists {
-                    debug!("Removing post from DB");
-                    match con
-                        .lrem::<String, String, usize>(
-                            format!("subreddit:{}:posts", subreddit),
-                            0,
-                            format!(
-                                "subreddit:{}:post:{}",
-                                subreddit,
-                                &post["id"].to_string().replace('"', "")
-                            ),
-                        )
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(x) => {
-                            let txt = format!("Failed to remove post from DB: {}", x);
-                            warn!("{}", txt);
-                            sentry::capture_message(&txt, sentry::Level::Warning);
-                        }
-                    };
-                    match con
-                        .del::<String, usize>(format!(
-                            "subreddit:{}:post:{}",
-                            subreddit,
-                            &post["id"].to_string().replace('"', "")
-                        ))
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(x) => {
-                            let txt = format!("Failed to remove post from DB: {}", x);
-                            warn!("{}", txt);
-                        }
-                    };
-
-                    existing_posts.retain(|x| {
-                        if let Post::Existing(x) = x {
-                            x != &key
-                        } else {
-                            false
-                        }
-                    });
-                }
-                continue;
-            }
-
-            if let Ok(media_deleted) = con
-                .sismember(
-                    "media_deleted_posts".to_string(),
-                    format!("{}:{}", subreddit, post["id"]),
-                )
-                .await
-            {
-                if media_deleted {
-                    debug!("Post is marked as having deleted media");
-                    continue;
-                }
-            } else {
-                let txt = "Failed to check if post has deleted media";
-                warn!("{}", txt);
-            }
-
-            if exists {
-                trace!("Post already exists in DB");
-                // Update post's score with new score
-                match con
-                    .hset::<&str, &str, i64, Value>(
-                        &key,
-                        "score",
-                        post["score"].as_i64().unwrap_or(0),
-                    )
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(x) => {
-                        let txt = format!("Failed to update score in redis: {}", x);
-                        warn!("{}", txt);
-                        sentry::capture_message(&txt, sentry::Level::Warning);
-                    }
-                };
-
-                post_list.push(key.into());
-                continue;
-            }
-
-            debug!(
-                "New post not in DB: {:?} - {:?}",
-                post["title"], post["url"]
-            );
-
-            let urls = extract_raw_embed_urls_from_post(post.clone())?;
-
-            let needs_processing = match media_url_embeddability(
-                urls.iter().next().ok_or(anyhow!("Post has no embed URL"))?,
-            ) {
-                Embeddability::Embeddable => false,
-                Embeddability::NeedsProcessing => true,
-                // Stop processing post if it can't be made embeddable
-                Embeddability::NotEmbeddable => continue,
-            };
-
-            let timestamp = post["created_utc"].as_f64().unwrap() as u64;
-            let mut title = post["title"]
-                .as_str()
-                .context("Title wasn't string?")?
-                .replace("&amp;", "&");
-            // Truncate title length to 256 chars (Discord embed title limit)
-            title = (*title.as_str()).truncate_to_boundary(256).to_string();
-
-            let post_object = NewPost {
-                redis_key: key.clone(),
-                score: post["score"].as_i64().unwrap_or(0),
-                url: format!(
-                    "https://reddit.com{}",
-                    post["permalink"].to_string().replace('"', "")
-                ),
-                title,
-                embed_urls: urls,
-                author: post["author"].to_string().replace('"', ""),
-                id: post["id"].to_string().replace('"', ""),
-                timestamp,
-                needs_processing,
-            };
-
-            // If it doesn't need further processing, we can add it right now
-            if !needs_processing {
-                debug!("Adding to redis {:?}", post_object);
-
-                // Push post to Redis
-                let value = Vec::from(&post_object);
-                match con
-                    .hset_multiple::<&str, String, String, Value>(&key, &value)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(x) => {
-                        let txt = format!("Failed to set post in redis: {}", x);
-                        warn!("{}", txt);
-                        sentry::capture_message(&txt, sentry::Level::Warning);
-                    }
-                };
-
-                // Notify subscriber service that a new post has been detected
-                match subscriber
-                    .notify(
-                        context::current(),
-                        post["subreddit"].to_string().replace("\"", ""),
-                        post["id"].to_string().replace('"', ""),
-                    )
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(x) => {
-                        let txt = format!("Failed to notify subscriber: {}", x);
-                        warn!("{}", txt);
-                        sentry::capture_message(&txt, sentry::Level::Warning);
-                    }
-                };
-
-                post_list.push(post_object.into());
-
-                let mut post_keys: Vec<&String> = post_list
-                    .iter()
-                    .filter(|p| match p {
-                        Post::New(p) => !p.needs_processing,
-                        Post::Existing(_) => true,
-                    })
-                    .map(|p| match p {
-                        Post::New(p) => &p.redis_key,
-                        Post::Existing(key) => &key,
-                    })
-                    .collect();
-
-                // Append post_list with existing posts that aren't in the current fetch
-                let existing_posts: Vec<String> = existing_posts
-                    .iter()
-                    .map(|x| match x {
-                        Post::Existing(x) => x.clone(),
-                        Post::New(x) => x.redis_key.clone(),
-                    })
-                    .filter(|x| !post_keys.contains(&x))
-                    .collect();
-                post_keys = post_keys.into_iter().chain(existing_posts.iter()).collect();
-
-                debug!("Post keys: {:?}", post_keys);
-
-                // Update redis with new post keys
-                redis::pipe()
-                    .atomic()
-                    .del::<String>(format!("subreddit:{}:posts", subreddit))
-                    .rpush::<String, Vec<&String>>(
-                        format!("subreddit:{}:posts", subreddit),
-                        post_keys,
-                    )
-                    .query_async::<()>(con)
-                    .await?;
-            } else {
-                post_list.push(post_object.into());
-            }
-
-            transaction.finish();
         }
     }
 
@@ -979,8 +758,6 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Re
                 sentry::capture_message(&txt, sentry::Level::Error);
             }
         }
-
-        debug!("Subreddits: {:?}", subreddits);
 
         let mut next_subreddit = None;
 

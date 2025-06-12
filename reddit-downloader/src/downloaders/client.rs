@@ -324,6 +324,7 @@ impl Client {
             embed_url = match self.resolve_embed_url(&embed_url, &post.id).await {
                 Ok(url) => url,
                 Err(e) => {
+                    info!("Error occurred processing {:?}", post);
                     warn!("Failed to process media: {:?}", e);
                     continue;
                 }
@@ -355,6 +356,10 @@ impl Client {
                 .collect();
 
             // Push post to Redis
+            debug!(
+                "Setting post in Redis with key now that it's downloaded: {}",
+                redis_key
+            );
             match self
                 .redis
                 .hset_multiple::<&str, String, String, redis::Value>(&redis_key, &post)
@@ -363,7 +368,7 @@ impl Client {
             {
                 Ok(_) => {}
                 Err(x) => {
-                    warn!("{:?}", x);
+                    error!("Error setting post in Redis: {:?}", x);
                     capture_anyhow(&x);
                 }
             };
@@ -705,10 +710,7 @@ impl Client {
         posts: Vec<Post>,
     ) -> Result<()> {
         let subreddit = subreddit.to_lowercase();
-        debug!(
-            "Adding subreddit to process queue: {}, {:?}",
-            subreddit, posts
-        );
+        debug!("Adding subreddit to process queue: {}", subreddit);
 
         let mut requests = self.requests.lock().await;
         debug!(

@@ -70,6 +70,10 @@ impl SubscriberServer<'_> {
             for alert in next_alert.subscriptions {
                 // Ensure we don't send more than 35 messages per second
                 if last_alert.elapsed() < inner_duration {
+                    debug!(
+                        "Waiting to send next alert, last alert was sent {} seconds ago",
+                        last_alert.elapsed().as_secs()
+                    );
                     tokio::time::sleep(inner_duration - last_alert.elapsed()).await;
                 }
                 last_alert = Instant::now();
@@ -91,6 +95,7 @@ impl SubscriberServer<'_> {
                         next_alert.timestamp.elapsed().as_secs()
                     ),
                     Err(e) => {
+                        warn!("Failed to send message to channel {}: {:?}", channel, e);
                         if let serenity::Error::Http(e) = e {
                             if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
                                 if e.error.code.0 == 10003 {
@@ -333,8 +338,6 @@ impl Subscriber for SubscriberServer<'_> {
             .keys()
             .map(|x| x.clone())
             .collect();
-
-        info!("Listing watched subreddits {:?}", subreddits);
 
         Ok(subreddits)
     }

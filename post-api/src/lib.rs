@@ -19,7 +19,7 @@ use serenity::builder::{
     CreateMediaGalleryItem, CreateMessage, CreateTextDisplay, CreateUnfurledMediaItem,
 };
 use tokio::time::sleep;
-use tracing::{debug, error, error_span, instrument};
+use tracing::{debug, error, error_span, info, instrument};
 
 /// Returns current milliseconds since the Epoch
 fn get_epoch_ms() -> u64 {
@@ -245,7 +245,7 @@ impl Post {
     }
 
     pub fn buttonless_message<'a>(self) -> CreateMessage<'a> {
-        CreateMessage::new().components(self.get_components(false))
+        CreateMessage::new().flags(MessageFlags::IS_COMPONENTS_V2).components(self.get_components(false))
     }
 }
 
@@ -322,6 +322,7 @@ pub async fn get_post_by_id<'a>(
     search: Option<&str>,
     con: &mut MultiplexedConnection,
 ) -> Result<Post, Error> {
+    let post_id = post_id.to_lowercase();
     debug!("Getting post by ID: {}", post_id);
 
     let post: HashMap<String, String> = con.hgetall(&post_id).await?;
@@ -439,7 +440,8 @@ pub async fn get_subreddit<'a>(
         let span = error_span!("delete_post_from_list");
         {
             let _ = span.enter();
-            error!("Error getting post by ID: {:?}", e);
+            info!("Error was: {:?}, getting {:?}", e, post_id);
+            error!("Error getting post by ID");
             con.lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
                 .await?;
         }
