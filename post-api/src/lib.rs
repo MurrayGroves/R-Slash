@@ -129,6 +129,7 @@ pub async fn get_post_at_search_index(
         .arg(1)
         .arg("SORTBY")
         .arg("score")
+        .arg("DESC")
         .arg("NOCONTENT") // Only show POST IDs not post content
         .arg("DIALECT")
         .arg(2)
@@ -504,7 +505,6 @@ pub async fn get_subreddit_search<'a>(
         return Ok(None);
     }
 
-    index = length - (index + 1);
 
     if index >= length {
         let _: () = con

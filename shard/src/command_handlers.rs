@@ -166,7 +166,7 @@ pub async fn get_subreddit_cmd<'a>(
             }
         }
     } else {
-        match get_subreddit(&subreddit, &mut con, command.channel_id)
+        match get_subreddit(&subreddit, &mut con, command.channel_id, Some(0))
             .await
             .map(|post| post.into())
         {

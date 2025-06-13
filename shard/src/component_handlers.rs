@@ -179,7 +179,7 @@ pub async fn post_again<'a>(
         }
         false => timeout(
             Duration::from_secs(30),
-            get_subreddit(&subreddit, &mut con, interaction.channel_id),
+            get_subreddit(&subreddit, &mut con, interaction.channel_id, Some(0)),
         )
         .await
         .unwrap_or_else(|x| Err(anyhow!("Timeout getting subreddit: {:?}", x)))
