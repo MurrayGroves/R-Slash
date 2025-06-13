@@ -64,6 +64,7 @@ impl Client {
             || guild_id.is_some()
             || channel_id.is_some()
         {
+            trace!("Getting feature flags");
             let flags = self.get_feature_flags(distinct_id, guild_id).await?;
             for (k, v) in flags {
                 properties[format!("$feature/{}", k)] = v.into();
@@ -77,7 +78,7 @@ impl Client {
             "properties": properties
         });
         let body = serde_json::to_string(&json)?;
-        trace!("{:?}", body);
+        trace!("Sending {:?}", body);
         let res = self
             .client
             .post(format!("{}/capture", self.host))
@@ -138,8 +139,6 @@ impl Client {
             })
             .collect();
 
-        debug!("Flags: {:?}", flags);
-
         Ok(flags)
     }
 
@@ -161,6 +160,8 @@ impl Client {
                 }
             }
 
+            drop(cache);
+            trace!("No cache hit, requesting from posthog");
             // No cache hit, so let's request from Posthog
             let flags = self
                 .request_feature_flags(distinct_id, Some(guild_id))

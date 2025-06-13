@@ -130,8 +130,6 @@ pub async fn capture_event<T, U>(
     let distinct_id = distinct_id.to_string();
 
     tokio::spawn(async move {
-        debug!("Getting posthog client");
-
         let client = &data.posthog;
 
         let mut properties_map = serde_json::Map::new();
