@@ -48,7 +48,6 @@ struct SubscriberServer<'a> {
     discord_bb: Arc<Http>,
     discord_rs: Arc<Http>,
     redis: redis::aio::MultiplexedConnection,
-    posthog: posthog::Client,
     queued_alerts: Arc<Mutex<VecDeque<PostAlert<'a>>>>,
 }
 
@@ -302,18 +301,6 @@ impl Subscriber for SubscriberServer<'_> {
         };
 
         debug!("Got post {:?}", post);
-
-        let _ = self
-            .posthog
-            .capture(
-                "subreddit_new_post",
-                json!({"subreddit": &subreddit}),
-                None::<GuildId>,
-                None::<ChannelId>,
-                "post-subscriber",
-            )
-            .await;
-
         debug!("Filtered subscriptions {:?}", filtered);
 
         let alert = PostAlert {
@@ -419,13 +406,6 @@ async fn main() {
         .expect("Err creating client");
     let http_rs = client_rs.http.clone();
 
-    let posthog_key: String = env::var("POSTHOG_API_KEY")
-        .expect("POSTHOG_API_KEY not set")
-        .parse()
-        .expect("Failed to convert POSTHOG_API_KEY to string");
-    let posthog_client =
-        posthog::Client::new(posthog_key, "https://eu.posthog.com/capture".to_string());
-
     let mongo_url = env::var("MONGO_URL").expect("MONGO_URL not set");
     let mut client_options = ClientOptions::parse(mongo_url).await.unwrap();
     client_options.app_name = Some("Post Subscriber".to_string());
@@ -506,7 +486,6 @@ async fn main() {
         discord_bb: http_bb,
         discord_rs: http_rs,
         redis,
-        posthog: posthog_client,
         queued_alerts: Arc::new(Mutex::new(VecDeque::new())),
     };
 
