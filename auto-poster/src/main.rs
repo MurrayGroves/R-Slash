@@ -7,7 +7,7 @@ use redis::AsyncTypedCommands;
 use rslash_common::span_filter;
 use serenity::all::{ChannelId, GatewayIntents, Http};
 use serenity::{all::EventHandler, async_trait};
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 
 use std::cell::SyncUnsafeCell;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -112,6 +112,7 @@ struct AutoPostServer {
     discords: HashMap<u64, Arc<Http>>,
     redis: redis::aio::MultiplexedConnection,
     sender: tokio::sync::mpsc::Sender<()>,
+    waiting_until: Arc<RwLock<Instant>>,
     default_subs: Vec<String>,
 }
 
@@ -136,6 +137,8 @@ impl AutoPostServer {
         autoposts.queue.push(autopost);
 
         if let Some(first) = autoposts.queue.peek() {
+            debug!("First autopost in queue: {:?}", first);
+            debug!("Next post for post we're adding: {:?}", next);
             if first.next_post >= next {
                 drop(autoposts);
                 debug!("Updating timer from add_autopost");
@@ -444,6 +447,7 @@ async fn main() {
         redis: redis.clone(),
         sender,
         default_subs: subreddits_vec,
+        waiting_until: Arc::new(RwLock::new(Instant::now())),
     };
 
     info!("Connecting to discords");

@@ -211,6 +211,13 @@ pub async fn timer_loop(
                                     autopost.deref().get_mut().next_post =
                                         Instant::now() + autopost.interval;
                                     autoposts.queue.push(autopost.clone());
+                                    let waiting_until = server.waiting_until.read().await;
+                                    if autopost.next_post < *waiting_until {
+                                        debug!("Next post is sooner than waiting until, updating waiting until");
+                                        drop(waiting_until);
+                                        *server.waiting_until.write().await = autopost.next_post;
+                                        server.sender.send(()).await.unwrap();
+                                    }
                                 } else {
                                     delete_auto_post(&server, autopost.clone()).await;
                                 }
@@ -219,6 +226,13 @@ pub async fn timer_loop(
                                 autopost.deref().get_mut().current += 1;
                                 autopost.deref().get_mut().next_post =
                                     Instant::now() + autopost.interval;
+                                let waiting_until = server.waiting_until.read().await;
+                                if autopost.next_post < *waiting_until {
+                                    debug!("Next post is sooner than waiting until, updating waiting until");
+                                    drop(waiting_until);
+                                    *server.waiting_until.write().await = autopost.next_post;
+                                    server.sender.send(()).await.unwrap();
+                                }
                                 autoposts.queue.push(autopost.clone());
                             };
                         };
@@ -227,17 +241,22 @@ pub async fn timer_loop(
                     // Calculate time to sleep to next post
                     let autoposts = server.autoposts.read().await;
                     if let Some(next) = autoposts.queue.peek() {
-                        debug!("Memories: {:?}", autoposts.queue);
                         debug!("Next post: {:?}", next);
                         debug!("Next post in: {:?}", next.next_post - Instant::now());
                         debug!("Now: {:?}", Instant::now());
+                        let mut waiting_until = server.waiting_until.write().await;
+                        *waiting_until = next.next_post;
                         next.next_post - Instant::now()
                     } else {
+                        let mut waiting_until = server.waiting_until.write().await;
+                        *waiting_until = Instant::now() + Duration::from_secs(3600);
                         Duration::from_secs(3600)
                     }
                 } else {
                     // We woke up too early and need to sleep more
                     let to_return = memory.next_post - now;
+                    let mut waiting_until = server.waiting_until.write().await;
+                    *waiting_until = memory.next_post;
                     drop(autoposts);
                     to_return
                 }
