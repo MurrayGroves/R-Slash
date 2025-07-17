@@ -15,7 +15,7 @@ env_logger = "*"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time", "full"] }
 reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"] }
-serenity = { git = "https://github.com/jamesbt365/serenity.git", branch = "components-v2", default-features = false, features = ["cache", "gateway", "rustls_backend", "model", "builder", "http"] }
+serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", default-features = false, features = ["cache", "gateway", "rustls_backend", "model", "builder", "http"] }
 redis = { git = "https://github.com/redis-rs/redis-rs", features = ["aio", "tokio-comp", "connection-manager"] }
 rand = { version = "*", features = ["alloc"] }
 mongodb = "2.3"

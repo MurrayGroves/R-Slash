@@ -24,7 +24,7 @@ tokio = { version = "*", features = [
     "full",
 ] }
 reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"] }
-serenity = { git = "https://github.com/jamesbt365/serenity.git", branch = "components-v2", default-features = false, features = [
+serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", default-features = false, features = [
     "cache",
     "gateway",
     "rustls_backend",

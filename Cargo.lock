@@ -390,14 +390,14 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "post_api",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "rslash_common",
  "sentry 0.34.0",
  "serde",
  "serde_derive",
  "serde_json",
  "serde_with 3.12.0",
- "serenity 0.12.4 (git+https://github.com/jamesbt365/serenity.git?branch=components-v2)",
+ "serenity 0.12.4 (git+https://github.com/serenity-rs/serenity.git?branch=next)",
  "tarpc",
  "timer",
  "tokio",
@@ -1184,7 +1184,7 @@ dependencies = [
  "pretty-duration",
  "pretty_env_logger",
  "rand 0.9.1",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "reqwest 0.12.18",
  "rslash_common",
  "sentry 0.34.0",
@@ -1193,7 +1193,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "serenity 0.12.4 (git+https://github.com/jamesbt365/serenity.git?branch=components-v2)",
+ "serenity 0.12.4 (git+https://github.com/serenity-rs/serenity.git?branch=next)",
  "stubborn-io",
  "tarpc",
  "tokio",
@@ -3382,14 +3382,14 @@ dependencies = [
  "mongodb 2.8.2",
  "pretty_env_logger",
  "rand 0.9.1",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "reqwest 0.12.18",
  "rslash_common",
  "sentry 0.29.3",
  "serde",
  "serde_derive",
  "serde_json",
- "serenity 0.12.4 (git+https://github.com/jamesbt365/serenity.git?branch=components-v2)",
+ "serenity 0.12.4 (git+https://github.com/serenity-rs/serenity.git?branch=next)",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3411,13 +3411,13 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "post_api",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "rslash_common",
  "sentry 0.38.1",
  "serde",
  "serde_derive",
  "serde_json",
- "serenity 0.12.4 (git+https://github.com/jamesbt365/serenity.git?branch=components-v2)",
+ "serenity 0.12.4 (git+https://github.com/serenity-rs/serenity.git?branch=next)",
  "tarpc",
  "tokio",
  "tracing",
@@ -3824,7 +3824,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "post_subscriber",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
  "reqwest 0.12.18",
  "rslash_common",
  "sentry 0.36.0",
@@ -3866,7 +3866,7 @@ dependencies = [
 [[package]]
 name = "redis"
 version = "0.31.0"
-source = "git+https://github.com/redis-rs/redis-rs.git#6a9eb9c2463b4f2130d19a252c7509cb8352c9ca"
+source = "git+https://github.com/redis-rs/redis-rs#6a9eb9c2463b4f2130d19a252c7509cb8352c9ca"
 dependencies = [
  "arc-swap",
  "backon",
@@ -4099,8 +4099,8 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "posthog",
- "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs.git)",
- "serenity 0.12.4 (git+https://github.com/jamesbt365/serenity.git?branch=components-v2)",
+ "redis 0.31.0 (git+https://github.com/redis-rs/redis-rs)",
+ "serenity 0.12.4 (git+https://github.com/serenity-rs/serenity.git?branch=next)",
  "tokio",
  "tonic 0.13.1",
  "tracing",
@@ -5100,7 +5100,7 @@ dependencies = [
 [[package]]
 name = "serenity"
 version = "0.12.4"
-source = "git+https://github.com/jamesbt365/serenity.git?branch=components-v2#7ec77520505796f779ef845180d54422a77015f0"
+source = "git+https://github.com/serenity-rs/serenity.git?branch=next#4f510506111ceb5bf2653e7fd8cd79be02574bf7"
 dependencies = [
  "aformat",
  "arrayvec",

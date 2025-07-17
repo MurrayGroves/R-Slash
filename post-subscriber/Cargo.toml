@@ -6,7 +6,7 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serenity = { git = "https://github.com/jamesbt365/serenity.git", branch = "components-v2", features = ["model"] }
+serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", features = ["model"] }
 redis = { git = "https://github.com/redis-rs/redis-rs", features = ["aio", "tokio-comp"] }
 tokio = { version = "*", features = ["rt-multi-thread"] }
 env_logger = "0.11"

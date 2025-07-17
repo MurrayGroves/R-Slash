@@ -9,7 +9,7 @@ edition = "2021"
 anyhow = "*"
 mongodb = "*"
 posthog = { path = "../posthog" }
-serenity = { git = "https://github.com/jamesbt365/serenity.git", branch = "components-v2" }
+serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next" }
 redis = { git = "https://github.com/redis-rs/redis-rs", features = ["aio", "tokio-comp"] }
 tokio = "*"
 

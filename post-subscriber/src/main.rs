@@ -10,8 +10,9 @@ use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::{Instant, interval};
+use tokio::time::{Instant, interval, timeout};
 
 use futures::future;
 
@@ -73,6 +74,7 @@ impl SubscriberServer<'_> {
                         "Waiting to send next alert, last alert was sent {} seconds ago",
                         last_alert.elapsed().as_secs()
                     );
+                    debug!("Waiting for {} seconds", inner_duration.as_secs_f64());
                     tokio::time::sleep(inner_duration - last_alert.elapsed()).await;
                 }
                 last_alert = Instant::now();
@@ -81,12 +83,24 @@ impl SubscriberServer<'_> {
                     Bot::BB => &self.discord_bb,
                     Bot::RS => &self.discord_rs,
                 };
+                debug!("Sending alert to channel {}", channel);
 
-                match channel
-                    .widen()
-                    .send_message(http, next_alert.message.clone())
-                    .await
+                let response = match timeout(
+                    Duration::from_secs(30),
+                    channel
+                        .widen()
+                        .send_message(http, next_alert.message.clone()),
+                )
+                .await
                 {
+                    Ok(resp) => resp,
+                    Err(_) => {
+                        error!("Timeout while sending message to channel");
+                        continue;
+                    }
+                };
+
+                match response {
                     Ok(_) => debug!(
                         "Sent {} to channel {}, was added {} seconds ago",
                         alert.subreddit,
@@ -317,7 +331,6 @@ impl Subscriber for SubscriberServer<'_> {
 
     #[tracing::instrument(skip(self))]
     async fn watched_subreddits(self, _: Context) -> Result<HashSet<String>, String> {
-        info!("Listing watched subreddits");
         let subscriptions = self.subscriptions.read().await;
 
         let subreddits: HashSet<String> = subscriptions

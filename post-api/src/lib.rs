@@ -220,7 +220,7 @@ impl Post {
             )),
             CreateComponent::TextDisplay(CreateTextDisplay::new(format!(
                 indoc! {"
-                    *Posted <t:{}:R>, currently has {} score*
+                    *Posted <t:{}:R>, currently has {} points*
                 "},
                 self.timestamp.unix_timestamp(),
                 pretty_number(self.score)
@@ -504,7 +504,6 @@ pub async fn get_subreddit_search<'a>(
     if length == 0 {
         return Ok(None);
     }
-
 
     if index >= length {
         let _: () = con

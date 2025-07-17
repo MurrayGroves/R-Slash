@@ -139,6 +139,7 @@ pub async fn capture_event<T, U>(
             }
         }
 
+        debug!("Capturing posthog event");
         match client
             .capture(
                 &event,
@@ -154,6 +155,7 @@ pub async fn capture_event<T, U>(
                 warn!("Error capturing event: {:?}", e);
             }
         }
+        debug!("Captured posthog event: {}", event);
     });
 }
 
@@ -356,6 +358,10 @@ impl EventHandler for Handler {
                     &format!("guild_{}", incomplete.id.get().to_string()),
                 )
                 .await;
+            }
+
+            FullEvent::Resume { event, .. } => {
+                info!("Shard resumed connection: {:?}", event);
             }
 
             FullEvent::Ready { data_about_bot, .. } => {
@@ -1047,12 +1053,15 @@ fn main() {
 					.start_shard(shard_id, total_shards)
 					.await
 					.expect("Failed to start shard");
+
+                error!("Client thread exited unexpectedly!");
 			});
 
 			// If client thread exits, shard has crashed, so mark self as unhealthy.
 			match thread.await {
 				Ok(_) => {}
 				Err(_) => {
+                    error!("Client thread exited!");
 					fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
 				}
 			}

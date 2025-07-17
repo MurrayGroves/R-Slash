@@ -214,8 +214,6 @@ async fn get_access_token(
         }
     };
 
-    debug!("Token raw: {}", token);
-
     let expires_at: u64 = token.split(",").collect::<Vec<&str>>()[1].parse()?;
     let mut access_token: String = token.split(",").collect::<Vec<&str>>()[0]
         .parse::<String>()?
@@ -381,14 +379,9 @@ async fn get_subreddit(
     downloaders_client: downloaders::client::Client,
     subscriber: SubscriberClient,
 ) -> Result<(SubredditExists, Option<String>), Error> {
-    debug!("Fetching subreddit: {}, after: {:?}", subreddit, after);
+    trace!("Fetching subreddit: {}, after: {:?}", subreddit, after);
 
     let subreddit = subreddit.to_lowercase();
-
-    if !downloaders_client.is_finished(&subreddit).await {
-        debug!("Previous iteration not finished processing, skipping for now");
-        return Ok((SubredditExists::Exists, after));
-    }
 
     let access_token = get_access_token(
         con,
@@ -803,11 +796,11 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Re
         }
 
         if next_subreddit.is_some() {
-            debug!("Next subreddit: {:?}", next_subreddit);
-        }
-
-        if next_subreddit.is_some() {
             let subreddit = next_subreddit.unwrap();
+            if !downloaders_client.is_finished(&subreddit).await {
+                trace!("Skipping {} as it is already being processed", subreddit);
+                continue;
+            }
             info!("Fetching subreddit {}", &subreddit);
             if !helpers::index_exists(&mut con, format!("idx:{}", &subreddit)).await {
                 helpers::create_index(
@@ -860,10 +853,10 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Re
             subreddit_state.last_fetched = Some(get_epoch_ms()?);
             subreddit_state.pages_left -= 1;
 
-            debug!("Subreddit has {} pages left", subreddit_state.pages_left);
+            trace!("Subreddit has {} pages left", subreddit_state.pages_left);
 
             if subreddit_state.fetched_up_to.is_none() {
-                debug!("Subreddit has no more pages left: {}", &subreddit);
+                trace!("Subreddit has no more pages left: {}", &subreddit);
                 subreddit_state.pages_left = 0;
             }
 

@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tarpc::context;
 use tokio::sync::Mutex;
-use tokio::time::Instant;
-use tracing::info;
+use tokio::time::{Instant, timeout};
 use tracing::warn;
 use tracing::{debug, error};
+use tracing::{info, trace};
 
 pub struct Token {
     url: String,
@@ -128,7 +128,7 @@ impl Limiter {
     ) -> Result<(), Error> {
         let mut state = self.state.lock().await;
 
-        debug!(
+        trace!(
             "Updating rate limit headers for {}: {:?}",
             self.name, headers
         );
@@ -201,12 +201,18 @@ impl Limiter {
     // Wait until we are allowed to request again
     #[tracing::instrument(skip(self))]
     pub async fn wait(&self) {
-        let state = self.state.lock().await;
+        let state = match timeout(Duration::from_secs(300), self.state.lock()).await {
+            Ok(state) => state,
+            Err(_) => {
+                panic!("Failed to acquire lock on rate limit state within 5 minutes");
+            }
+        };
         if state.remaining < 3 && state.reset > chrono::Utc::now().timestamp() {
             let wait = state.reset - chrono::Utc::now().timestamp();
             drop(state);
             info!("Waiting {} seconds for rate limit on {}", wait, self.name);
             tokio::time::sleep(Duration::from_secs(wait as u64)).await;
+            debug!("Finished waiting for rate limit on {}", self.name);
         }
     }
 }
@@ -321,7 +327,18 @@ impl Client {
             };
 
             let mut embed_url = post.embed_urls.get(0).unwrap().clone();
-            embed_url = match self.resolve_embed_url(&embed_url, &post.id).await {
+            embed_url = match match timeout(
+                Duration::from_secs(60),
+                self.resolve_embed_url(&embed_url, &post.id),
+            )
+            .await
+            {
+                Ok(x) => x,
+                Err(_) => {
+                    warn!("Timeout while processing post: {}", post.id);
+                    continue;
+                }
+            } {
                 Ok(url) => url,
                 Err(e) => {
                     info!("Error occurred processing {:?}", post);
@@ -679,27 +696,28 @@ impl Client {
         if let Some(started_at) = self.subreddit_started_at.lock().await.as_ref() {
             if started_at.1.elapsed() > Duration::from_secs(600) {
                 error!(
-                    "Some subreddit has been processing for over 10 minutes, current requests queue is {:?}",
-                    self.requests.lock().await
+                    "Some subreddit has been processing for over 10 minutes, has been {:?} seconds",
+                    started_at.1.elapsed().as_secs()
                 );
+                panic!("Subreddit processing timed out")
             }
         }
 
         let requests = self.requests.lock().await;
         if requests.iter().any(|request| request.0 == subreddit) {
-            debug!("Returning false, subreddit is already in queue");
+            trace!("Returning false, subreddit is already in queue");
             return false;
         }
         drop(requests);
 
         if let Some(started_at) = self.subreddit_started_at.lock().await.as_ref() {
             if started_at.0 == subreddit {
-                debug!("Returning false, subreddit is currently being processed");
+                trace!("Returning false, subreddit is currently being processed");
                 return false;
             }
         }
 
-        debug!("Returning true, subreddit is not in queue or being processed");
+        trace!("Returning true, subreddit is not in queue or being processed");
         true
     }
 

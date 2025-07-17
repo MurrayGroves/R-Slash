@@ -278,6 +278,9 @@ macro_rules! initialise_observability {
 					})),
 			) // STDOUT Layer
 			.with(otel_layer.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+				if meta.level() <= &tracing::Level::INFO  {
+					return false;
+				}
 				span_filter!(meta, cx);
 			}))) // Logging Layer
 			.with(sentry::integrations::tracing::layer()
