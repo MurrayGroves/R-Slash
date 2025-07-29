@@ -8,6 +8,7 @@ use base64::Engine;
 use post_subscriber::SubscriberClient;
 use redis::AsyncCommands;
 use reqwest::StatusCode;
+use rslash_common::Limiter;
 use sentry::integrations::anyhow::capture_anyhow;
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -92,128 +93,6 @@ impl Token {
         }
 
         Ok(&self.token)
-    }
-}
-
-struct LimitState {
-    remaining: u64,
-    reset: i64, // Unix timestamp of when the limit resets
-}
-
-// Struct for tracking rate limits
-#[derive(Clone)]
-pub struct Limiter {
-    state: Arc<Mutex<LimitState>>,
-    per_minute: Option<u64>, // User can specify rate limit per minute, otherwise use the headers
-    name: String,
-}
-
-impl Limiter {
-    pub fn new(per_minute: Option<u64>, name: String) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(LimitState {
-                remaining: 1,
-                reset: 0,
-            })),
-            name,
-            per_minute,
-        }
-    }
-
-    // Update the rate limit based on the headers from the last request
-    pub async fn update_headers(
-        &self,
-        headers: &reqwest::header::HeaderMap,
-        status: StatusCode,
-    ) -> Result<(), Error> {
-        let mut state = self.state.lock().await;
-
-        trace!(
-            "Updating rate limit headers for {}: {:?}",
-            self.name, headers
-        );
-
-        // If this limiter is using a per minute limit
-        if let Some(per_minute) = self.per_minute {
-            if state.remaining != 0 {
-                state.remaining -= 1
-            };
-            if state.reset < chrono::Utc::now().timestamp() {
-                state.remaining = per_minute;
-                state.reset = chrono::Utc::now().timestamp() + 60;
-            }
-
-            if let Some(remaining) = headers.get("Retry-After") {
-                state.reset =
-                    chrono::Utc::now().timestamp() + remaining.to_str()?.parse::<i64>()?;
-                state.remaining = 0;
-            }
-        } else {
-            if let Some(remaining) = headers.get("X-RateLimit-UserRemaining") {
-                state.remaining = remaining.to_str()?.parse()?;
-            } else if let Some(reset) = headers.get("X-RateLimit-UserReset") {
-                state.reset = reset.to_str()?.parse()?;
-            } else {
-                if status == StatusCode::TOO_MANY_REQUESTS
-                    || status == StatusCode::FORBIDDEN
-                    || status == StatusCode::UNAUTHORIZED
-                {
-                    // Wait 10 minutes if we hit the rate limit, and they didn't tell us when to try again
-                    warn!(
-                        "We hit the rate limit for {} with status {} waiting 10 mins as a pre-caution with headers: {:?}",
-                        self.name, status, headers
-                    );
-                    state.reset = chrono::Utc::now().timestamp() + 600;
-                    state.remaining = 0;
-                }
-
-                if let Some(remaining) = headers.get("x-ratelimit-remaining") {
-                    state.remaining = remaining
-                        .to_str()?
-                        .split(".")
-                        .nth(0)
-                        .ok_or(Error::msg("Failed to parse rate limit"))?
-                        .parse()?;
-                }
-                if let Some(reset) = headers.get("x-ratelimit-reset") {
-                    state.reset =
-                        chrono::Utc::now().timestamp() + reset.to_str()?.parse::<i64>()?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn update(&self) {
-        let mut state = self.state.lock().await;
-        if !state.remaining == 0 {
-            state.remaining -= 1;
-        }
-        if let Some(per_minute) = self.per_minute {
-            if state.reset < chrono::Utc::now().timestamp() {
-                state.remaining = per_minute;
-                state.reset = chrono::Utc::now().timestamp() + 60;
-            }
-        }
-    }
-
-    // Wait until we are allowed to request again
-    #[tracing::instrument(skip(self))]
-    pub async fn wait(&self) {
-        let state = match timeout(Duration::from_secs(300), self.state.lock()).await {
-            Ok(state) => state,
-            Err(_) => {
-                panic!("Failed to acquire lock on rate limit state within 5 minutes");
-            }
-        };
-        if state.remaining < 3 && state.reset > chrono::Utc::now().timestamp() {
-            let wait = state.reset - chrono::Utc::now().timestamp();
-            drop(state);
-            info!("Waiting {} seconds for rate limit on {}", wait, self.name);
-            tokio::time::sleep(Duration::from_secs(wait as u64)).await;
-            debug!("Finished waiting for rate limit on {}", self.name);
-        }
     }
 }
 
@@ -680,6 +559,7 @@ impl Client {
                 };
 
                 if process_to_gif {
+                    debug!("Converting to GIF");
                     path = self.mp4_to_gif(&path).await.context("Processing gif")?
                 };
             } else {

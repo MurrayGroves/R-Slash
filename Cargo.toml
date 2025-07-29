@@ -1,5 +1,5 @@
 [workspace]
-members = ["shard", "reddit-downloader", "auto-poster", "post-subscriber", "discord-interface"]
+members = ["shard", "reddit-downloader", "auto-poster", "post-subscriber", "discord-interface", "user-config-manager", "rslash-manager"]
 resolver = "2"
 
 [profile.release]

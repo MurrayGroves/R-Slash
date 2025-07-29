@@ -31,3 +31,4 @@ async-recursion = "*"
 url = "*"
 
 rslash_common = { path = "../rslash_common" }
+lazy_static = "1.5.0"

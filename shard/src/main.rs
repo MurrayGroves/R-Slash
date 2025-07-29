@@ -85,6 +85,7 @@ pub struct ShardState {
     pub redis: redis::aio::MultiplexedConnection,
     pub mongodb: mongodb::Client,
     pub posthog: posthog::Client,
+    pub web_client: reqwest::Client,
     pub post_subscriber: post_subscriber::SubscriberClient,
     pub auto_poster: auto_poster::AutoPosterClient,
 }
@@ -1031,6 +1032,13 @@ fn main() {
 				posthog,
 				post_subscriber: subscriber,
 				auto_poster,
+                web_client: reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .user_agent(format!(
+                        "Discord:RSlash:{} (by /u/murrax2)",
+                        env!("CARGO_PKG_VERSION")
+                    ))
+                    .build().unwrap()
 			};
 
 			let mut client = Client::builder(Token::from_env("DISCORD_TOKEN").expect("Failed to load token from env"), GatewayIntents::GUILDS)

@@ -10,12 +10,12 @@ use tracing::{debug, instrument};
 pub struct Client {
     path: String,
     client: reqwest::Client,
-    limiter: super::client::Limiter,
+    limiter: rslash_common::Limiter,
     token: Arc<RwLock<super::client::Token>>,
 }
 
 impl Client {
-    pub async fn new(path: String, limiter: super::client::Limiter) -> Result<Self> {
+    pub async fn new(path: String, limiter: rslash_common::Limiter) -> Result<Self> {
         Ok(Self {
             path,
             client: reqwest::Client::builder().user_agent("Booty Bot").build()?,

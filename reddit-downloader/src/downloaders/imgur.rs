@@ -1,4 +1,4 @@
-use std::{sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 
@@ -10,11 +10,11 @@ pub struct Client {
     path: String,
     client_id: Arc<String>,
     client: reqwest::Client,
-    limiter: super::client::Limiter,
+    limiter: rslash_common::Limiter,
 }
 
 impl Client {
-    pub fn new(path: String, client_id: Arc<String>, limiter: super::client::Limiter) -> Self {
+    pub fn new(path: String, client_id: Arc<String>, limiter: rslash_common::Limiter) -> Self {
         Self {
             path,
             client_id,
@@ -192,7 +192,7 @@ mod tests {
         let client = Client::new(
             "test-data".to_string(),
             Arc::new(client_id),
-            super::super::client::Limiter::new(Some(60), "imgur".to_string()),
+            rslash_common::Limiter::new(Some(60), "imgur".to_string()),
         );
         // Gallery that contains a GIF
         let path = format!(
@@ -213,7 +213,7 @@ mod tests {
         let client = Client::new(
             "test-data".to_string(),
             Arc::new(client_id),
-            super::super::client::Limiter::new(Some(60), "imgur".to_string()),
+            rslash_common::Limiter::new(Some(60), "imgur".to_string()),
         );
         // Gallery that contains a JPG
         let path = client
@@ -230,7 +230,7 @@ mod tests {
         let client = Client::new(
             "test-data".to_string(),
             Arc::new(client_id),
-            super::super::client::Limiter::new(Some(60), "imgur".to_string()),
+            rslash_common::Limiter::new(Some(60), "imgur".to_string()),
         );
         // Album that contains a GIF
         let path = format!(
@@ -251,7 +251,7 @@ mod tests {
         let client = Client::new(
             "test-data".to_string(),
             Arc::new(client_id),
-            super::super::client::Limiter::new(Some(60), "imgur".to_string()),
+            rslash_common::Limiter::new(Some(60), "imgur".to_string()),
         );
         // Album that contains a JPG
         let path = client
@@ -268,7 +268,7 @@ mod tests {
         let client = Client::new(
             "test-data".to_string(),
             Arc::new(client_id),
-            super::super::client::Limiter::new(Some(60), "imgur".to_string()),
+            rslash_common::Limiter::new(Some(60), "imgur".to_string()),
         );
         // Album that contains a JPG
         let path = client
@@ -285,7 +285,7 @@ mod tests {
         let client = Client::new(
             "test-data".to_string(),
             Arc::new(client_id),
-            super::super::client::Limiter::new(Some(60), "imgur".to_string()),
+            rslash_common::Limiter::new(Some(60), "imgur".to_string()),
         );
         // Single JPG image
         let path = client.request("https://imgur.com/GUvTNyl", "test").await?;
@@ -300,7 +300,7 @@ mod tests {
         let client = Client::new(
             "test-data".to_string(),
             Arc::new(client_id),
-            super::super::client::Limiter::new(Some(60), "imgur".to_string()),
+            rslash_common::Limiter::new(Some(60), "imgur".to_string()),
         );
         // Single GIF image
         let path = format!(

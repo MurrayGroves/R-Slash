@@ -15,6 +15,7 @@ use tracing::instrument;
 use std::collections::HashMap;
 use std::env;
 use std::error::Error;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use serenity::builder::{CreateActionRow, CreateEmbed, CreateEmbedFooter};
@@ -290,7 +291,8 @@ pub async fn get_custom_subreddit<'a>(
     )
     .await;
 
-    match check_subreddit_valid(&subreddit).await? {
+    let data = ctx.data::<ShardState>();
+    match check_subreddit_valid(data.redis.clone(), &data.web_client, &subreddit).await? {
         SubredditStatus::Valid => {}
         SubredditStatus::Invalid(reason) => {
             debug!("Subreddit response not 200: {}", reason);
@@ -767,7 +769,10 @@ pub async fn autopost<'a>(
                     .to_string()
                     .to_lowercase();
 
-                match check_subreddit_valid(&subreddit).await? {
+                let data = ctx.data::<ShardState>();
+                match check_subreddit_valid(data.redis.clone(), &data.web_client, &subreddit)
+                    .await?
+                {
                     SubredditStatus::Valid => {}
                     SubredditStatus::Invalid(reason) => {
                         debug!("Subreddit response not 200: {}", reason);

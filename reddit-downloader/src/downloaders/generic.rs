@@ -1,4 +1,4 @@
-use std::{ io::Write};
+use std::io::Write;
 
 use crate::REDDIT_LIMITER;
 use anyhow::{Context, Error};
@@ -8,11 +8,11 @@ use tracing::instrument;
 pub struct Client {
     path: String,
     client: reqwest::Client,
-    limiter: super::client::Limiter,
+    limiter: rslash_common::Limiter,
 }
 
 impl Client {
-    pub fn new(path: String, limiter: super::client::Limiter) -> Self {
+    pub fn new(path: String, limiter: rslash_common::Limiter) -> Self {
         Self {
             path,
             client: reqwest::Client::builder()

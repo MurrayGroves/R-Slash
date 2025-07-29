@@ -36,6 +36,7 @@ use std::env;
 use crate::helpers::{
     Embeddability, extract_raw_embed_urls_from_post, media_url_embeddability, process_post_metadata,
 };
+use rslash_common::access_tokens::get_reddit_access_token;
 use rslash_common::{initialise_observability, span_filter};
 use tarpc::{client, context, serde_transport::Transport};
 
@@ -44,8 +45,8 @@ mod helpers;
 
 lazy_static! {
     static ref MULTI_LOCK: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
-    static ref REDDIT_LIMITER: downloaders::client::Limiter =
-        downloaders::client::Limiter::new(None, "reddit".to_string());
+    static ref REDDIT_LIMITER: rslash_common::Limiter =
+        rslash_common::Limiter::new(None, "reddit".to_string());
 }
 
 /// Represents a value stored in a [ConfigStruct]
@@ -79,169 +80,6 @@ struct SubredditState {
 /// Returns current milliseconds since the Epoch
 fn get_epoch_ms() -> Result<u64, Error> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
-}
-
-/// Request an access token from Reddit
-///
-/// Returns the token and the Unix timestamp at which it expires.
-/// # Arguments
-/// ## reddit_client
-/// The bot's Reddit client_id
-/// ## reddit_secret
-/// The bot's secret
-/// ## web_client
-/// The [web_client](reqwest::Client) to make requests with.
-/// ## device_id
-/// If specified, will request and [installed_client](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token instead of a [client_credentials](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token.
-#[tracing::instrument]
-async fn request_access_token(
-    reddit_client: String,
-    reddit_secret: String,
-    web_client: &reqwest::Client,
-    device_id: Option<String>,
-) -> Result<(String, u64), Error> {
-    let post_data = match device_id {
-        Some(x) => format!(
-            "grant_type=https://oauth.reddit.com/grants/installed_client&\\device_id={}",
-            x
-        ),
-        None => "grant_type=client_credentials".to_string(),
-    };
-
-    REDDIT_LIMITER.wait().await;
-
-    let res = web_client
-        .post("https://www.reddit.com/api/v1/access_token")
-        .body(post_data)
-        .basic_auth(reddit_client, Some(reddit_secret))
-        .send()
-        .await?;
-
-    REDDIT_LIMITER
-        .update_headers(res.headers(), res.status())
-        .await?;
-
-    let text = match res.text().await {
-        Ok(x) => x,
-        Err(x) => {
-            let txt = format!("Failed to get text from reddit: {}", x);
-            warn!("{}", txt);
-            sentry::capture_message(&txt, sentry::Level::Warning);
-            return Err(x)?;
-        }
-    };
-    debug!("Matched text");
-    let results: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(x) => x,
-        Err(x) => {
-            let txt = format!("Failed to parse JSON from Reddit: {}", text);
-            warn!("{}", txt);
-            sentry::capture_message(&txt, sentry::Level::Warning);
-            return Err(x)?;
-        }
-    };
-
-    debug!("Reddit access token response: {:?}", results);
-    let token = results
-        .get("access_token")
-        .expect("Reddit did not return access token")
-        .to_string();
-    let expires_in: u64 = results
-        .get("expires_in")
-        .expect("Reddit did not provide expires_in")
-        .as_u64()
-        .unwrap();
-    let expires_at = get_epoch_ms()? + expires_in * 1000;
-
-    debug!(
-        "New token expires in {} seconds, or at {}",
-        expires_in, expires_at
-    );
-
-    Ok((token, expires_at))
-}
-
-/// Returns a String of the Reddit access token to use
-///
-/// # Arguments
-/// ## con
-/// The [connection](redis::aio::MultiplexedConnection) to the redis DB.
-/// ## reddit_client
-/// The bot's Reddit client_id
-/// ## reddit_secret
-/// The bot's secret
-/// ## device_id
-/// If specified, will request an [installed_client](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token instead of a [client_credentials](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token.
-#[tracing::instrument(skip(con, web_client))]
-async fn get_access_token(
-    con: &mut redis::aio::MultiplexedConnection,
-    reddit_client: String,
-    reddit_secret: String,
-    web_client: &reqwest::Client,
-    device_id: Option<String>,
-) -> Result<String, Error> {
-    // Return a reddit access token
-    let token_name = match device_id.clone() {
-        // The key to grab from the DB
-        Some(x) => x,
-        _ => "default".to_string(),
-    };
-
-    let token = con.hget("reddit_tokens", token_name.clone()).await;
-    let token = match token {
-        Ok(x) => x,
-        Err(_) => {
-            debug!("Requesting new access token, none exists");
-            let token_results = request_access_token(
-                reddit_client.clone(),
-                reddit_secret.clone(),
-                web_client,
-                device_id.clone(),
-            )
-            .await?;
-            let access_token = token_results.0;
-            let expires_at = token_results.1;
-
-            let _: () = con
-                .hset(
-                    "reddit_tokens",
-                    token_name.clone(),
-                    format!("{},{}", access_token, expires_at),
-                )
-                .await?;
-
-            format!("{},{}", access_token, expires_at)
-        }
-    };
-
-    let expires_at: u64 = token.split(",").collect::<Vec<&str>>()[1].parse()?;
-    let mut access_token: String = token.split(",").collect::<Vec<&str>>()[0]
-        .parse::<String>()?
-        .replace('"', "");
-
-    if expires_at < get_epoch_ms()? {
-        debug!("Requesting new access token, current one expired");
-        let token_results = request_access_token(
-            reddit_client.clone(),
-            reddit_secret.clone(),
-            web_client,
-            device_id.clone(),
-        )
-        .await?;
-        access_token = token_results.0;
-        let expires_at = token_results.1;
-
-        let _: () = con
-            .hset(
-                "reddit_tokens",
-                token_name,
-                format!("{},{}", access_token, expires_at),
-            )
-            .await?;
-    }
-
-    debug!("Reddit Token: {}", access_token.replace("\"", ""));
-    Ok(access_token)
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -383,11 +221,11 @@ async fn get_subreddit(
 
     let subreddit = subreddit.to_lowercase();
 
-    let access_token = get_access_token(
-        con,
+    let access_token = get_reddit_access_token(
+        con.clone(),
         reddit_client.clone(),
         reddit_secret.clone(),
-        web_client,
+        Some(web_client),
         device_id,
     )
     .await?;
@@ -560,7 +398,7 @@ async fn get_subreddit(
                 parent_span.clone(),
                 post,
                 &mut subreddit_name,
-                con,
+                &mut con.clone(),
                 subscriber.clone(),
                 &mut existing_posts,
                 &mut post_list,

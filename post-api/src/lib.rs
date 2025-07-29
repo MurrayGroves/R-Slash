@@ -9,6 +9,7 @@ use redis::aio::MultiplexedConnection;
 use redis::{from_redis_value, AsyncTypedCommands};
 use reqwest::header;
 use reqwest::header::HeaderMap;
+use rslash_common::access_tokens::get_reddit_access_token;
 use serde_json::json;
 use serenity::all::{
     ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateInteractionResponseFollowup,
@@ -417,6 +418,7 @@ pub async fn get_subreddit<'a>(
 
     // If all posts have been seen, find the post that the channel saw longest ago
     if post_id.is_none() {
+        debug!("Channel has seen all posts, using the oldest post");
         match minimum_post {
             Some((post, _)) => {
                 post_id = Some(post.to_string());
@@ -566,28 +568,24 @@ pub enum SubredditStatus {
     Invalid(String),
 }
 
-pub async fn check_subreddit_valid(subreddit: &str) -> Result<SubredditStatus, Error> {
-    let mut default_headers = HeaderMap::new();
-    default_headers.insert(
-        header::COOKIE,
-        header::HeaderValue::from_static("_options={%22pref_gated_sr_optin%22:true}"),
-    );
-
+pub async fn check_subreddit_valid(
+    con: MultiplexedConnection,
+    web_client: &reqwest::Client,
+    subreddit: &str,
+) -> Result<SubredditStatus, Error> {
     debug!("Checking subreddit validity: {}", subreddit);
 
-    let web_client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .default_headers(default_headers)
-        .user_agent(format!(
-            "Discord:RSlash:{} (by /u/murrax2)",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()?;
+    let access_token =
+        get_reddit_access_token(con, "".to_string(), "".to_string(), Some(web_client), None)
+            .await?;
+
     let res = web_client
-        .head(format!("https://www.reddit.com/r/{}.json", subreddit))
+        .head(format!("https://oauth.reddit.com/r/{}.json", subreddit))
+        .header("Authorization", format!("bearer {}", access_token))
         .send()
         .await?;
 
+    debug!("Subreddit check response: {:?}", res);
     Ok(if res.status() == 200 {
         SubredditStatus::Valid
     } else {
