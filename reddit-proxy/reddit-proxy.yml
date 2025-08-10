@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reddit-proxy
+  namespace: discord-bot-shared
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: reddit-proxy
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: reddit-proxy
+    spec:
+      initContainers:
+        - name: gluetun
+          image: qmcgaw/gluetun:v3
+          restartPolicy: Always
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          volumeMounts:
+            - name: vpn-conf
+              mountPath: /secret
+              readOnly: false
+          env:
+            - name: VPN_SERVICE_PROVIDER
+              value: custom
+            - name: VPN_TYPE
+              value: openvpn
+            - name: OPENVPN_CUSTOM_CONFIG
+              value: /secret/ovpn.conf
+            - name: OPENVPN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: vpn-conf
+                  key: OPENVPN_USER
+            - name: OPENVPN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vpn-conf
+                  key: OPENVPN_PASSWORD
+            # kubernetes specifics
+            - name: DNS_KEEP_NAMESERVER
+              value: "on"
+            - name: FIREWALL_OUTBOUND_SUBNETS
+              value: "10.1.0.0/16,10.152.183.0/24"
+            - name: FIREWALL_INPUT_PORTS
+              value: "50051"
+
+      volumes:
+        - name: vpn-conf
+          secret:
+            secretName: vpn-conf
+      containers:
+        - name: reddit-proxy
+          image: registry.murraygrov.es/reddit-proxy
+          imagePullPolicy: Always
+          tty: true
+          ports:
+            - containerPort: 50051
+              name: rpc
+          env:
+            - name: REDIS_URL
+              value: redis://redis.discord-bot-shared.svc.cluster.local/
+            - name: REDDIT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: reddit-credentials
+                  key: REDDIT_TOKEN
+            - name: REDDIT_CLIENT
+              valueFrom:
+                secretKeyRef:
+                  name: reddit-credentials
+                  key: REDDIT_CLIENT_ID
+
+          resources:
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+            requests:
+              cpu: "100m"
+              memory: "50Mi"
+
+      imagePullSecrets:
+        - name: murraygroves-registry-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reddit-proxy
+  namespace: discord-bot-shared
+spec:
+  selector:
+    app: reddit-proxy
+  ports:
+    - protocol: TCP
+      port: 50051
+      targetPort: 50051

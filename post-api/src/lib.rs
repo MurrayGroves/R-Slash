@@ -10,6 +10,7 @@ use redis::{from_redis_value, AsyncTypedCommands};
 use reqwest::header;
 use reqwest::header::HeaderMap;
 use rslash_common::access_tokens::get_reddit_access_token;
+use rslash_common::SubredditStatus;
 use serde_json::json;
 use serenity::all::{
     ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateInteractionResponseFollowup,
@@ -563,21 +564,14 @@ pub async fn list_contains(
     to_return
 }
 
-pub enum SubredditStatus {
-    Valid,
-    Invalid(String),
-}
-
 pub async fn check_subreddit_valid(
-    con: MultiplexedConnection,
+    con: &mut MultiplexedConnection,
     web_client: &reqwest::Client,
     subreddit: &str,
 ) -> Result<SubredditStatus, Error> {
     debug!("Checking subreddit validity: {}", subreddit);
 
-    let access_token =
-        get_reddit_access_token(con, "".to_string(), "".to_string(), Some(web_client), None)
-            .await?;
+    let access_token = get_reddit_access_token(con, "", "", Some(web_client), None).await?;
 
     let res = web_client
         .head(format!("https://oauth.reddit.com/r/{}.json", subreddit))

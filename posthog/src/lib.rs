@@ -1,4 +1,4 @@
-#![feature(duration_constructors)]
+#![feature(duration_constructors_lite)]
 
 use anyhow::anyhow;
 use log::*;

@@ -9,7 +9,6 @@ use serenity::all::{
 };
 use serenity::gateway::{ShardRunnerInfo, ShardRunnerMessage};
 use serenity::model::Colour;
-use stubborn_io::tokio::{StubbornIo, UnderlyingIo};
 use stubborn_io::{ReconnectOptions, StubbornTcpStream};
 use tarpc::serde_transport::Transport;
 use tarpc::tokio_serde::formats::Bincode;
@@ -21,7 +20,7 @@ use tracing_subscriber::{
     EnvFilter, Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
 };
 
-use rslash_common::{initialise_observability, span_filter};
+use rslash_common::{initialise_observability, rpc::RetryingTcpStream, span_filter};
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Debug;
@@ -88,6 +87,7 @@ pub struct ShardState {
     pub web_client: reqwest::Client,
     pub post_subscriber: post_subscriber::SubscriberClient,
     pub auto_poster: auto_poster::AutoPosterClient,
+    pub reddit_proxy: reddit_proxy::RedditProxyClient,
 }
 
 pub fn redis_sanitise(input: &str) -> String {
@@ -795,92 +795,6 @@ async fn monitor_total_shards(
     }
 }
 
-struct RetryingTcpStream<T, C>
-where
-    T: UnderlyingIo<C> + AsyncRead,
-    C: Clone + Send + Unpin + 'static,
-{
-    underlying: StubbornIo<T, C>,
-}
-
-impl<T, C> AsyncRead for RetryingTcpStream<T, C>
-where
-    T: UnderlyingIo<C> + AsyncRead,
-    C: Clone + Send + Unpin + 'static,
-{
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        match Pin::new(&mut self.underlying).poll_read(cx, buf) {
-            Poll::Ready(x) => match x {
-                Ok(x) => Poll::Ready(Ok(x)),
-                Err(e) => {
-                    warn!("Error with underlying: {}", e);
-                    match Box::pin(tokio::time::sleep(Duration::from_millis(500))).poll_unpin(cx) {
-                        Poll::Ready(_) => {}
-                        Poll::Pending => return Poll::Pending,
-                    };
-                    self.poll_read(cx, buf)
-                }
-            },
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<T, C> AsyncWrite for RetryingTcpStream<T, C>
-where
-    T: UnderlyingIo<C> + AsyncWrite + AsyncRead,
-    C: Clone + Send + Unpin + 'static,
-{
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        match Pin::new(&mut self.underlying).poll_write(cx, buf) {
-            Poll::Ready(x) => match x {
-                Ok(x) => Poll::Ready(Ok(x)),
-                Err(e) => {
-                    warn!("Error with underlying: {}", e);
-                    match Box::pin(tokio::time::sleep(Duration::from_millis(500))).poll_unpin(cx) {
-                        Poll::Ready(_) => {}
-                        Poll::Pending => return Poll::Pending,
-                    };
-                    self.poll_write(cx, buf)
-                }
-            },
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.underlying).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.underlying).poll_shutdown(cx)
-    }
-}
-
-impl<T, C> RetryingTcpStream<T, C>
-where
-    T: UnderlyingIo<C> + AsyncWrite + AsyncRead,
-    C: Clone + Send + Unpin + 'static,
-{
-    fn new(underlying: StubbornIo<T, C>) -> Self {
-        Self { underlying }
-    }
-}
-
 fn main() {
     let application_id: u64 = env::var("DISCORD_APPLICATION_ID")
         .expect("DISCORD_APPLICATION_ID not set")
@@ -1024,6 +938,26 @@ fn main() {
 
 			println!("Connected to auto poster");
 
+			println!("Connecting to reddit proxy...");
+			let reconnect_opts = ReconnectOptions::new()
+				.with_exit_if_first_connect_fails(false)
+				.with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
+			let tcp_stream = RetryingTcpStream::new(
+				StubbornTcpStream::connect_with_options(
+					"reddit-proxy.discord-bot-shared.svc.cluster.local:50051",
+					reconnect_opts,
+				)
+					.await
+					.expect("Failed to connect to reddit-proxy"),
+			);
+			let transport = Transport::from((tcp_stream, Bincode::default()));
+
+			let reddit_proxy =
+				reddit_proxy::RedditProxyClient::new(tarpc::client::Config::default(), transport).spawn();
+
+			println!("Connected to reddit proxy");
+
+
 			let state = ShardState {
 				shard_id,
 				nsfw_subreddits,
@@ -1032,6 +966,7 @@ fn main() {
 				posthog,
 				post_subscriber: subscriber,
 				auto_poster,
+				reddit_proxy,
                 web_client: reqwest::Client::builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .user_agent(format!(

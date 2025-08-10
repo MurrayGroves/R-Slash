@@ -29,10 +29,10 @@ use serenity::model::application::CommandInteraction;
 use anyhow::{Result, anyhow, bail};
 use memberships::*;
 
-use post_api::*;
-
 use crate::discord::ResponseTracker;
 use crate::{NAMESPACE, ShardState, capture_event};
+use post_api::*;
+use rslash_common::SubredditStatus;
 
 // Return error interaction response from current function if bot doesn't have permission to send messages in the channel
 macro_rules! error_if_no_send_message_perm {
@@ -292,7 +292,11 @@ pub async fn get_custom_subreddit<'a>(
     .await;
 
     let data = ctx.data::<ShardState>();
-    match check_subreddit_valid(data.redis.clone(), &data.web_client, &subreddit).await? {
+    match data
+        .reddit_proxy
+        .check_subreddit_valid(context::current(), subreddit.clone())
+        .await??
+    {
         SubredditStatus::Valid => {}
         SubredditStatus::Invalid(reason) => {
             debug!("Subreddit response not 200: {}", reason);
@@ -770,8 +774,10 @@ pub async fn autopost<'a>(
                     .to_lowercase();
 
                 let data = ctx.data::<ShardState>();
-                match check_subreddit_valid(data.redis.clone(), &data.web_client, &subreddit)
-                    .await?
+                match data
+                    .reddit_proxy
+                    .check_subreddit_valid(context::current(), subreddit.clone())
+                    .await??
                 {
                     SubredditStatus::Valid => {}
                     SubredditStatus::Invalid(reason) => {

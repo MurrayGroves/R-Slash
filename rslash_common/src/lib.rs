@@ -1,4 +1,6 @@
 pub mod access_tokens;
+pub mod rpc;
+
 pub use access_tokens::Limiter;
 
 use std::time::Duration;
@@ -21,6 +23,7 @@ pub enum AutoPostCommand {
     Stop(ChannelId),
 }
 
+use serde::{Deserialize, Serialize};
 use serenity::all::{
     ChannelId, CreateEmbed, CreateInteractionResponse, CreateInteractionResponseFollowup,
     CreateInteractionResponseMessage, CreateMessage, CreateModal, UserId,
@@ -293,4 +296,10 @@ macro_rules! initialise_observability {
 			) // Sentry Layer
 			.init();
     };
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum SubredditStatus {
+    Valid,
+    Invalid(String),
 }

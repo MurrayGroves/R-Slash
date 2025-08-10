@@ -32,7 +32,7 @@ serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next
     "builder",
     "http",
 ] }
-redis = { git = "https://github.com/redis-rs/redis-rs", features = [
+redis = { version = "0.32", features = [
     "aio",
     "tokio-comp",
     "connection-manager",
@@ -79,6 +79,7 @@ rslash_common = { path = "../rslash_common" }
 post_api = { path = "../post-api" }
 post_subscriber = { path = "../post-subscriber" }
 auto_poster = { path = "../auto-poster" }
+reddit-proxy = { path = "../reddit-proxy" }
 
 
 [[bin]]

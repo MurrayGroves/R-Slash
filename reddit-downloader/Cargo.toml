@@ -7,29 +7,29 @@ edition = "2024"
 
 [dependencies]
 reqwest = { version = "*", features = [
-    "json",
-    "rustls-tls",
-    "cookies",
-    "stream",
+	"json",
+	"rustls-tls",
+	"cookies",
+	"stream",
 ] }
-redis = { git = "https://github.com/redis-rs/redis-rs.git", features = [
-    "aio",
-    "tokio-comp",
-    "connection-manager",
+redis = { version = "0.32", features = [
+	"aio",
+	"tokio-comp",
+	"connection-manager",
 ] }
 mongodb = "3.2.1"
 
 tokio = { version = "*", features = [
-    "macros",
-    "sync",
-    "rt-multi-thread",
-    "time",
-    "full",
-    "tracing",
+	"macros",
+	"sync",
+	"rt-multi-thread",
+	"time",
+	"full",
+	"tracing",
 ] }
 futures-util = { version = "0.3", default-features = false, features = [
-    "sink",
-    "std",
+	"sink",
+	"std",
 ] }
 futures = { version = "0.3" }
 
@@ -40,10 +40,10 @@ base64 = "*"
 chrono = "*"
 
 sentry = { version = "0.36.0", features = [
-    "tracing",
-    "anyhow",
-    "backtrace",
-    "debug-images",
+	"tracing",
+	"anyhow",
+	"backtrace",
+	"debug-images",
 ] }
 log = "*"
 anyhow = { version = "*", features = ["backtrace"] }
@@ -59,15 +59,16 @@ itertools = "*"
 dash-mpd = "*"
 metascraper = "*"
 tarpc = { version = "*", features = [
-    "serde-transport",
-    "tcp",
-    "serde-transport-bincode",
+	"serde-transport",
+	"tcp",
+	"serde-transport-bincode",
 ] }
 stubborn-io = "*"
 lazy_static = "*"
 
 post_subscriber = { path = "../post-subscriber" }
 rslash_common = { path = "../rslash_common" }
+reddit-proxy = { path = "../reddit-proxy" }
 
 [patch.crates-io]
 protobuf-src = { git = "https://github.com/emarsden/rust-protobuf-native" }

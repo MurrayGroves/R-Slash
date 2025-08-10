@@ -3,6 +3,7 @@ extern crate lazy_static;
 
 use futures::lock::Mutex;
 use post_subscriber::SubscriberClient;
+use reddit_proxy::RedditProxyClient;
 use sentry::integrations::anyhow::capture_anyhow;
 use std::collections::HashMap;
 use std::iter::{self, FromIterator};
@@ -37,7 +38,7 @@ use crate::helpers::{
     Embeddability, extract_raw_embed_urls_from_post, media_url_embeddability, process_post_metadata,
 };
 use rslash_common::access_tokens::get_reddit_access_token;
-use rslash_common::{initialise_observability, span_filter};
+use rslash_common::{initialise_observability, rpc::RetryingTcpStream, span_filter};
 use tarpc::{client, context, serde_transport::Transport};
 
 mod downloaders;
@@ -198,7 +199,7 @@ enum SubredditExists {
 /// None if a default subreddit, otherwise is the user's ID.
 #[tracing::instrument(skip(
     con,
-    web_client,
+    reddit_proxy,
     downloaders_client,
     reddit_client,
     reddit_secret,
@@ -208,7 +209,7 @@ enum SubredditExists {
 async fn get_subreddit(
     subreddit: String,
     con: &mut redis::aio::MultiplexedConnection,
-    web_client: &reqwest::Client,
+    reddit_proxy: &RedditProxyClient,
     reddit_client: String,
     reddit_secret: String,
     device_id: Option<String>,
@@ -220,15 +221,6 @@ async fn get_subreddit(
     trace!("Fetching subreddit: {}, after: {:?}", subreddit, after);
 
     let subreddit = subreddit.to_lowercase();
-
-    let access_token = get_reddit_access_token(
-        con.clone(),
-        reddit_client.clone(),
-        reddit_secret.clone(),
-        Some(web_client),
-        device_id,
-    )
-    .await?;
 
     let url_base = format!(
         "https://oauth.reddit.com/r/{}/hot.json?limit=100",
@@ -266,53 +258,27 @@ async fn get_subreddit(
 
         debug!("URL: {}", url);
 
-        // Set headers to tell Reddit who we are
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            USER_AGENT,
-            format!(
-                "Discord:RSlash:v{} (by /u/murrax2)",
-                env!("CARGO_PKG_VERSION")
-            )
-            .parse()?,
-        );
-        headers.insert(
-            "Authorization",
-            format!("bearer {}", access_token.clone()).parse()?,
-        );
-
-        debug!("{}", url);
-        debug!("{:?}", headers);
-
-        REDDIT_LIMITER.wait().await;
-
-        let res = web_client.get(&url).headers(headers).send().await?;
-
-        REDDIT_LIMITER
-            .update_headers(res.headers(), res.status())
-            .await?;
-
-        debug!("Finished request");
-        debug!("Response Headers: {:?}", res.headers());
-
-        // Process text response from Reddit
-        let text = match res.text().await {
-            Ok(x) => x,
-            Err(x) => {
-                let txt = format!("Failed to get text from reddit: {}", x);
+        let text = match reddit_proxy.get(context::current(), url).await {
+            Ok(Ok(text)) => text,
+            Ok(Err(e)) => {
+                let txt = format!("Error fetching subreddit: {}", e);
+                warn!("{}", txt);
+                sentry::capture_message(&txt, sentry::Level::Warning);
+                return Ok((SubredditExists::Exists, after));
+            }
+            Err(e) => {
+                let txt = format!("Error fetching subreddit: {}", e);
                 warn!("{}", txt);
                 sentry::capture_message(&txt, sentry::Level::Warning);
                 return Ok((SubredditExists::Exists, after));
             }
         };
 
-        debug!("Response successfully processed as text");
-
         // Convert text response to JSON
         let results: serde_json::Value = match serde_json::from_str(&text) {
             Ok(x) => x,
-            Err(_) => {
-                let txt = format!("Failed to parse JSON from Reddit: {}", text);
+            Err(e) => {
+                let txt = format!("Failed to decode JSON from Reddit response: {}", e);
                 warn!("{}", txt);
                 sentry::capture_message(&txt, sentry::Level::Warning);
                 return Ok((SubredditExists::Exists, after));
@@ -329,7 +295,7 @@ async fn get_subreddit(
                         None => {
                             let txt = format!(
                                 "Failed to convert field `children` in reddit response to array: {}",
-                                text
+                                results
                             );
                             warn!("{}", txt);
                             sentry::capture_message(&txt, sentry::Level::Warning);
@@ -339,7 +305,7 @@ async fn get_subreddit(
                     None => {
                         let txt = format!(
                             "Failed to get field `children` in reddit response: {}",
-                            text
+                            results
                         );
                         warn!("{}", txt);
                         sentry::capture_message(&txt, sentry::Level::Warning);
@@ -348,7 +314,7 @@ async fn get_subreddit(
                 }
             }
             None => {
-                let txt = format!("Failed to get field `data` in reddit response: {}", text);
+                let txt = format!("Failed to get field `data` in reddit response: {}", results);
                 warn!("{}", txt);
                 sentry::capture_message(&txt, sentry::Level::Warning);
 
@@ -447,17 +413,24 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Re
         .await
         .expect("Can't connect to redis");
 
-    let mut default_headers = HeaderMap::new();
-    default_headers.insert(
-        header::COOKIE,
-        header::HeaderValue::from_static("_options={%22pref_gated_sr_optin%22:true}"),
+    println!("Connecting to reddit proxy...");
+    let reconnect_opts = ReconnectOptions::new()
+        .with_exit_if_first_connect_fails(false)
+        .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
+    let tcp_stream = RetryingTcpStream::new(
+        StubbornTcpStream::connect_with_options(
+            "reddit-proxy.discord-bot-shared.svc.cluster.local:50051",
+            reconnect_opts,
+        )
+        .await
+        .expect("Failed to connect to reddit-proxy"),
     );
-    let web_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .user_agent("Discord:RSlash:v1.0.1 (by /u/murrax2)")
-        .default_headers(default_headers)
-        .build()
-        .expect("Failed to build client");
+    let transport = Transport::from((tcp_stream, Bincode::default()));
+
+    let reddit_proxy =
+        reddit_proxy::RedditProxyClient::new(tarpc::client::Config::default(), transport).spawn();
+
+    println!("Connected to reddit proxy");
 
     let data_lock = data.lock().await;
     let reddit_secret = match data_lock.get("reddit_secret").unwrap() {
@@ -655,7 +628,7 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Re
             subreddit_state.fetched_up_to = match get_subreddit(
                 subreddit.clone(),
                 &mut con,
-                &web_client,
+                &reddit_proxy,
                 reddit_client.clone(),
                 reddit_secret.clone(),
                 None,

@@ -10,7 +10,9 @@ anyhow = "*"
 mongodb = "*"
 posthog = { path = "../posthog" }
 serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next" }
-redis = { git = "https://github.com/redis-rs/redis-rs", features = ["aio", "tokio-comp"] }
+redis = { version = "0.32", features = ["aio", "tokio-comp"] }
+
+futures = "*"
 tokio = "*"
 
 tracing = "*"
@@ -27,3 +29,6 @@ lazy_static = "1.5.0"
 serde_json = "1.0.140"
 
 sentry = "*"
+serde = { version = "1.0.219", features = ["derive"] }
+
+stubborn-io = "*"

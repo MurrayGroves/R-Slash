@@ -1,0 +1,41 @@
+[package]
+name = "reddit-proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thiserror = "*"
+tokio = { version = "*", features = ["rt-multi-thread", "rt", "macros"] }
+
+tarpc = { version = "*", features = [
+    "serde-transport",
+    "tcp",
+    "serde-transport-bincode",
+] }
+redis = { version = "0.32", features = ["aio", "tokio-comp"] }
+
+reqwest = "*"
+serde_json = "*"
+serde = "*"
+
+sentry = { version = "*", features = [
+    "tracing",
+    "anyhow",
+    "debug-images",
+    "tokio",
+] }
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+tracing-opentelemetry = { version = "0.27" }
+opentelemetry-otlp = { version = "0.26", features = ["tonic", "grpc-tonic"] }
+tonic = "*"
+opentelemetry = "0.26"
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+opentelemetry-appender-tracing = "0.26"
+
+rslash_common = { path = "../rslash_common" }
+futures = "0.3.31"
+
+[lib]
+name = "reddit_proxy"
+path = "src/reddit_proxy.rs"

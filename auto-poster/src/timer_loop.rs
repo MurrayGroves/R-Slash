@@ -1,13 +1,15 @@
 use std::{ops::Deref, sync::Arc, time::Duration};
 
+use crate::{AutoPostServer, UnsafeMemory};
 use auto_poster::PostMemory;
 use mongodb::bson::doc;
-use post_api::{optional_post_to_message, queue_subreddit, PostApiError, SubredditStatus};
+use post_api::{optional_post_to_message, queue_subreddit, PostApiError};
+use reddit_proxy::RedditProxyClient;
+use rslash_common::SubredditStatus;
 use serenity::all::CreateMessage;
+use tarpc::context::Context;
 use tokio::{select, time::Instant};
 use tracing::{debug, error, warn};
-
-use crate::{AutoPostServer, UnsafeMemory};
 
 async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) {
     let client = server.db.lock().await;
@@ -42,9 +44,18 @@ async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) 
     drop(autoposts);
 }
 
-async fn post_error_to_message(e: anyhow::Error, subreddit: &str) -> CreateMessage<'static> {
-    let validity = post_api::check_subreddit_valid(subreddit)
+async fn post_error_to_message(
+    reddit_proxy: RedditProxyClient,
+    e: anyhow::Error,
+    subreddit: &str,
+) -> CreateMessage<'static> {
+    let validity = reddit_proxy
+        .check_subreddit_valid(Context::current(), subreddit.to_string())
         .await
+        .unwrap_or_else(|e| {
+            warn!("Error checking subreddit validity: {}", e);
+            Ok(SubredditStatus::Valid)
+        })
         .unwrap_or_else(|e| {
             warn!("Error checking subreddit validity: {}", e);
             SubredditStatus::Valid

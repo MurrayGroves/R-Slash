@@ -36,8 +36,8 @@ fn get_epoch_ms() -> Result<u64, Error> {
 /// If specified, will request and [installed_client](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token instead of a [client_credentials](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token.
 #[tracing::instrument]
 async fn request_reddit_access_token(
-    reddit_client: String,
-    reddit_secret: String,
+    reddit_client: &str,
+    reddit_secret: &str,
     web_client: Option<&reqwest::Client>,
     device_id: Option<String>,
 ) -> Result<(String, u64), Error> {
@@ -135,9 +135,9 @@ async fn request_reddit_access_token(
 /// If specified, will request an [installed_client](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token instead of a [client_credentials](https://github.com/reddit-archive/reddit/wiki/OAuth2#application-only-oauth) token.
 #[tracing::instrument(skip(con, web_client))]
 pub async fn get_reddit_access_token(
-    mut con: redis::aio::MultiplexedConnection,
-    reddit_client: String,
-    reddit_secret: String,
+    con: &mut redis::aio::MultiplexedConnection,
+    reddit_client: &str,
+    reddit_secret: &str,
     web_client: Option<&reqwest::Client>,
     device_id: Option<String>,
 ) -> Result<String, Error> {
@@ -154,8 +154,8 @@ pub async fn get_reddit_access_token(
         _ => {
             debug!("Requesting new access token, none exists");
             let token_results = request_reddit_access_token(
-                reddit_client.clone(),
-                reddit_secret.clone(),
+                reddit_client,
+                reddit_secret,
                 web_client,
                 device_id.clone(),
             )

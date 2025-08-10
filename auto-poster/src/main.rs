@@ -37,6 +37,8 @@ use tracing::instrument;
 use tracing::{debug, error, info, warn};
 
 use auto_poster::{AutoPoster, PostMemory};
+use reddit_proxy::RedditProxyClient;
+
 use rslash_common::initialise_observability;
 
 mod timer_loop;
@@ -114,6 +116,7 @@ struct AutoPostServer {
     sender: tokio::sync::mpsc::Sender<()>,
     waiting_until: Arc<RwLock<Instant>>,
     default_subs: Vec<String>,
+    reddit_proxy: RedditProxyClient,
 }
 
 impl AutoPostServer {
