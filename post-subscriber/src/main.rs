@@ -13,11 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{Instant, interval, timeout};
+use user_config_manager::{TextAllowLevel, get_channel_config};
 
 use futures::future;
 
 use post_subscriber::{Bot, Subscriber, Subscription};
-use rslash_common::{initialise_observability, span_filter};
+use rslash_common::{get_post_content_type, initialise_observability, span_filter};
 use tarpc::{
     server::{self, Channel},
     tokio_serde::formats::Bincode,
@@ -40,11 +41,12 @@ struct PostAlert<'a> {
     message: CreateMessage<'a>,
     subscriptions: Vec<Arc<Subscription>>,
     timestamp: Instant,
+    text_level: TextAllowLevel,
 }
 
 #[derive(Clone)]
 struct SubscriberServer<'a> {
-    db: Arc<Mutex<mongodb::Client>>,
+    db: mongodb::Client,
     subscriptions: Arc<RwLock<Subscriptions>>,
     discord_bb: Arc<Http>,
     discord_rs: Arc<Http>,
@@ -84,6 +86,24 @@ impl SubscriberServer<'_> {
                     Bot::RS => &self.discord_rs,
                 };
                 debug!("Sending alert to channel {}", channel);
+
+                let text_allow_level = match get_channel_config(&mut self.db.clone(), channel).await
+                {
+                    Ok(x) => x.text_allowed.unwrap_or_default(),
+                    Err(e) => {
+                        info!("Error getting channel config: {:?}", e);
+                        error!("Error getting channel config");
+                        continue;
+                    }
+                };
+
+                if !text_allow_level.allows_for(next_alert.text_level) {
+                    debug!(
+                        "Post with {:?} doesn't match text allow level of {:?}",
+                        next_alert.text_level, text_allow_level
+                    );
+                    continue;
+                }
 
                 let response = match timeout(
                     Duration::from_secs(30),
@@ -175,9 +195,8 @@ impl Subscriber for SubscriberServer<'_> {
         };
         drop(subscriptions);
 
-        let client = self.db.lock().await;
         let coll: mongodb::Collection<Subscription> =
-            client.database("state").collection("subscriptions");
+            self.db.database("state").collection("subscriptions");
 
         match coll.insert_one(&subscription).await {
             Ok(_) => (),
@@ -211,9 +230,8 @@ impl Subscriber for SubscriberServer<'_> {
             subreddit, channel
         );
 
-        let client = self.db.lock().await;
         let coll: mongodb::Collection<Subscription> =
-            client.database("state").collection("subscriptions");
+            self.db.database("state").collection("subscriptions");
 
         let filter = doc! {
             "subreddit": &subreddit,
@@ -317,10 +335,24 @@ impl Subscriber for SubscriberServer<'_> {
         debug!("Got post {:?}", post);
         debug!("Filtered subscriptions {:?}", filtered);
 
+        let text_allow_level = match get_post_content_type(
+            &mut self.redis.clone(),
+            &format!("subreddit:{}:post:{}", subreddit.to_lowercase(), &post_id),
+        )
+        .await
+        {
+            Ok(x) => x,
+            Err(e) => {
+                error!("Failed to get post text allow level");
+                return Err("Failed to get post text allow level".to_string());
+            }
+        };
+
         let alert = PostAlert {
             message: post.buttonless_message(),
             subscriptions: filtered.into_iter().map(|x| (*x).clone()).collect(),
             timestamp: Instant::now(),
+            text_level: text_allow_level,
         };
 
         let mut queued_alerts = self.queued_alerts.lock().await;
@@ -345,16 +377,14 @@ impl Subscriber for SubscriberServer<'_> {
     #[tracing::instrument(skip(self))]
     async fn remove_subreddit(self, _: Context, subreddit: String) -> Result<(), String> {
         info!("Removing subreddit {}", subreddit);
-        let client = self.db.lock().await;
         let coll: mongodb::Collection<Subscription> =
-            client.database("state").collection("subscriptions");
+            self.db.database("state").collection("subscriptions");
         let filter = doc! {
             "subreddit": &subreddit,
         };
 
         coll.delete_many(filter).await.map_err(|e| e.to_string())?;
 
-        drop(client);
         let mut subscriptions = self.subscriptions.write().await;
 
         for sub in subscriptions
@@ -422,14 +452,11 @@ async fn main() {
     let mongo_url = env::var("MONGO_URL").expect("MONGO_URL not set");
     let mut client_options = ClientOptions::parse(mongo_url).await.unwrap();
     client_options.app_name = Some("Post Subscriber".to_string());
-    let mongodb_client = Arc::new(Mutex::new(
-        mongodb::Client::with_options(client_options).unwrap(),
-    ));
+    let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
 
     let existing_subs = {
-        let client = mongodb_client.lock().await;
         let coll: mongodb::Collection<Subscription> =
-            client.database("state").collection("subscriptions");
+            mongodb_client.database("state").collection("subscriptions");
 
         let mut cursor = coll
             .find(doc! {})

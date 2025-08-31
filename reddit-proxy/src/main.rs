@@ -18,8 +18,8 @@ use tarpc::tokio_serde::formats::Bincode;
 use futures::StreamExt;
 use tokio::spawn;
 
-use tracing::log::debug;
-use tracing::{error, info, warn};
+use tokio::time::Instant;
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{
     EnvFilter, Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
 };
@@ -55,9 +55,11 @@ impl RedditProxyServer {
 
 impl RedditProxy for RedditProxyServer {
     async fn get(self, _: Context, url: String) -> Result<String, RedditProxyError> {
+        let start_time = Instant::now();
+        debug!("Starting req for URL: {}", url);
         self.limiter.wait().await;
         let resp = match self
-            .attach_auth_token(self.web_client.get(url))
+            .attach_auth_token(self.web_client.get(&url))
             .await?
             .send()
             .await
@@ -68,10 +70,17 @@ impl RedditProxy for RedditProxyServer {
             }
         };
 
-        match resp.text().await {
+        let resp = match resp.text().await {
             Ok(text) => Ok(text),
             Err(e) => Err(TextDecodeError(e.to_string())),
-        }
+        };
+
+        debug!(
+            "Finished req for URL: {} in {:?}",
+            url,
+            Instant::now() - start_time
+        );
+        resp
     }
 
     async fn check_subreddit_valid(

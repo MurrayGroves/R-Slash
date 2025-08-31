@@ -1,23 +1,25 @@
+#![feature(str_as_str)]
+
 #[macro_use]
 extern crate lazy_static;
 
 use futures::lock::Mutex;
 use post_subscriber::SubscriberClient;
 use reddit_proxy::RedditProxyClient;
+use rslash_common::Post;
 use sentry::integrations::anyhow::capture_anyhow;
 use std::collections::HashMap;
-use std::iter::{self, FromIterator};
+use std::iter;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use stubborn_io::{ReconnectOptions, StubbornTcpStream};
 use tarpc::tokio_serde::formats::Bincode;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, sleep};
 
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
-use truncrate::*;
 
 use anyhow::{Context, Error, anyhow};
 
@@ -29,15 +31,9 @@ use mongodb::options::ClientOptions;
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
-use reqwest::header;
-use reqwest::header::{HeaderMap, USER_AGENT};
-use serde_json::Value::Null;
 use std::env;
 
-use crate::helpers::{
-    Embeddability, extract_raw_embed_urls_from_post, media_url_embeddability, process_post_metadata,
-};
-use rslash_common::access_tokens::get_reddit_access_token;
+use crate::helpers::{Embeddability, process_post_metadata};
 use rslash_common::{initialise_observability, rpc::RetryingTcpStream, span_filter};
 use tarpc::{client, context, serde_transport::Transport};
 
@@ -86,70 +82,34 @@ fn get_epoch_ms() -> Result<u64, Error> {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct NewPost {
     redis_key: String,
-    id: String,
-    embed_urls: Vec<String>,
-    score: i64,
-    title: String,
-    url: String,
-    timestamp: u64,
-    needs_processing: bool,
-    author: String,
+    embeddability: Embeddability,
+    post: Post,
 }
 
-impl From<NewPost> for Vec<(String, String)> {
-    #[tracing::instrument]
-    fn from(post: NewPost) -> Vec<(String, String)> {
-        vec![
-            ("score".to_string(), post.score.to_string()),
-            ("url".to_string(), post.url),
-            ("title".to_string(), post.title),
-            ("author".to_string(), post.author),
-            ("id".to_string(), post.id),
-            ("timestamp".to_string(), post.timestamp.to_string()),
-            ("embed_url".to_string(), post.embed_urls.join(",")),
-        ]
+impl Into<PostInList> for NewPost {
+    fn into(self) -> PostInList {
+        PostInList::New(self)
     }
 }
 
-impl From<&NewPost> for Vec<(String, String)> {
-    #[tracing::instrument]
-    fn from(post: &NewPost) -> Vec<(String, String)> {
-        vec![
-            ("score".to_string(), post.score.to_string()),
-            ("url".to_string(), post.url.to_string()),
-            ("title".to_string(), post.title.to_string()),
-            ("author".to_string(), post.author.to_string()),
-            ("id".to_string(), post.id.to_string()),
-            ("timestamp".to_string(), post.timestamp.to_string()),
-            ("embed_url".to_string(), post.embed_urls.join(",")),
-        ]
-    }
-}
-
-impl Into<Post> for NewPost {
-    fn into(self) -> Post {
-        Post::New(self)
-    }
-}
-
-impl Into<Post> for String {
-    fn into(self) -> Post {
-        Post::Existing(self)
+impl Into<PostInList> for String {
+    fn into(self) -> PostInList {
+        PostInList::Existing(self)
     }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum Post {
+pub enum PostInList {
     /// Contains redis key
     Existing(String),
     New(NewPost),
 }
 
-impl FromRedisValue for Post {
+impl FromRedisValue for PostInList {
     fn from_redis_value(v: &Value) -> RedisResult<Self> {
         match v {
-            Value::SimpleString(x) => Ok(Post::Existing(x.clone().replace('"', ""))),
-            Value::BulkString(x) => Ok(Post::Existing(
+            Value::SimpleString(x) => Ok(PostInList::Existing(x.clone().replace('"', ""))),
+            Value::BulkString(x) => Ok(PostInList::Existing(
                 String::from_utf8_lossy(x).to_string().replace('"', ""),
             )),
             _ => Err(redis::RedisError::from((
@@ -162,8 +122,8 @@ impl FromRedisValue for Post {
 
     fn from_owned_redis_value(v: Value) -> RedisResult<Self> {
         match v {
-            Value::SimpleString(x) => Ok(Post::Existing(x.clone().replace('"', ""))),
-            Value::BulkString(x) => Ok(Post::Existing(
+            Value::SimpleString(x) => Ok(PostInList::Existing(x.clone().replace('"', ""))),
+            Value::BulkString(x) => Ok(PostInList::Existing(
                 String::from_utf8_lossy(&x).to_string().replace('"', ""),
             )),
             _ => Err(redis::RedisError::from((
@@ -197,22 +157,12 @@ enum SubredditExists {
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-#[tracing::instrument(skip(
-    con,
-    reddit_proxy,
-    downloaders_client,
-    reddit_client,
-    reddit_secret,
-    device_id,
-    subscriber,
-))]
+#[tracing::instrument(skip(con, reddit_proxy, downloaders_client, subscriber,))]
 async fn get_subreddit(
     subreddit: String,
     con: &mut redis::aio::MultiplexedConnection,
+    web_client: &reqwest::Client,
     reddit_proxy: &RedditProxyClient,
-    reddit_client: String,
-    reddit_secret: String,
-    device_id: Option<String>,
     mut after: Option<String>,
     pages: Option<u8>,
     downloaders_client: downloaders::client::Client,
@@ -227,7 +177,7 @@ async fn get_subreddit(
         subreddit
     );
 
-    let mut existing_posts: Vec<Post> = redis::cmd("LRANGE")
+    let mut existing_posts: Vec<PostInList> = redis::cmd("LRANGE")
         .arg(format!("subreddit:{}:posts", subreddit.clone()))
         .arg(0i64)
         .arg(-1i64)
@@ -235,7 +185,7 @@ async fn get_subreddit(
         .await
         .context("Getting existing posts")?;
 
-    let mut post_list: Vec<Post> = Vec::new();
+    let mut post_list: Vec<PostInList> = Vec::new();
     post_list.reserve(existing_posts.len() + 1000);
 
     let mut subreddit_name = None;
@@ -258,7 +208,9 @@ async fn get_subreddit(
 
         debug!("URL: {}", url);
 
-        let text = match reddit_proxy.get(context::current(), url).await {
+        let mut ctx = context::current();
+        ctx.deadline = std::time::Instant::now() + Duration::from_secs(3600);
+        let text = match reddit_proxy.get(ctx, url).await {
             Ok(Ok(text)) => text,
             Ok(Err(e)) => {
                 let txt = format!("Error fetching subreddit: {}", e);
@@ -366,6 +318,7 @@ async fn get_subreddit(
                 &mut subreddit_name,
                 &mut con.clone(),
                 subscriber.clone(),
+                web_client,
                 &mut existing_posts,
                 &mut post_list,
                 &subreddit,
@@ -382,7 +335,7 @@ async fn get_subreddit(
     }
 
     // Append post_list with existing posts that aren't in the current fetch
-    let existing_posts: Vec<Post> = existing_posts
+    let existing_posts: Vec<PostInList> = existing_posts
         .into_iter()
         .filter(|x| !post_list.contains(x))
         .collect();
@@ -406,7 +359,7 @@ async fn get_subreddit(
 /// # Arguments
 /// ## data
 /// A thread-safe wrapper of the [Config](ConfigStruct)
-async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Result<(), Error> {
+async fn download_loop<'a>() -> Result<(), Error> {
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/")?;
     let mut con = db_client
         .get_multiplexed_async_connection()
@@ -431,19 +384,6 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Re
         reddit_proxy::RedditProxyClient::new(tarpc::client::Config::default(), transport).spawn();
 
     println!("Connected to reddit proxy");
-
-    let data_lock = data.lock().await;
-    let reddit_secret = match data_lock.get("reddit_secret").unwrap() {
-        ConfigValue::String(x) => x,
-        _ => panic!("Failed to get reddit_secret"),
-    }
-    .clone();
-
-    let reddit_client = match data_lock.get("reddit_client").unwrap() {
-        ConfigValue::String(x) => x,
-        _ => panic!("Failed to get reddit_client"),
-    }
-    .clone();
 
     let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
 
@@ -474,6 +414,8 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Re
         subscriber.clone(),
     )
     .await?;
+
+    let web_client = reqwest::Client::builder().user_agent("R Slash").build()?;
 
     debug!("Starting subreddit loop");
     let mut subreddits: HashMap<String, SubredditState> = HashMap::new();
@@ -628,10 +570,8 @@ async fn download_loop<'a>(data: Arc<Mutex<HashMap<String, ConfigValue>>>) -> Re
             subreddit_state.fetched_up_to = match get_subreddit(
                 subreddit.clone(),
                 &mut con,
+                &web_client,
                 &reddit_proxy,
-                reddit_client.clone(),
-                reddit_secret.clone(),
-                None,
                 fetched_up_to.clone(),
                 Some(1),
                 downloaders_client.clone(),
@@ -704,24 +644,8 @@ async fn main() {
 
     println!("Initialised sentry");
 
-    let reddit_secret = env::var("REDDIT_TOKEN").expect("REDDIT_TOKEN not set");
-    let reddit_client = env::var("REDDIT_CLIENT_ID").expect("REDDIT_CLIENT_ID not set");
-
-    let contents: HashMap<String, ConfigValue> = HashMap::from_iter([
-        (
-            "reddit_secret".to_string(),
-            ConfigValue::String(reddit_secret.to_string()),
-        ),
-        (
-            "reddit_client".to_string(),
-            ConfigValue::String(reddit_client.to_string()),
-        ),
-    ]);
-
-    let data = Arc::new(Mutex::new(contents));
-
     info!("Starting loops");
-    match download_loop(data).await {
+    match download_loop().await {
         Ok(_) => {
             info!("Finished");
         }

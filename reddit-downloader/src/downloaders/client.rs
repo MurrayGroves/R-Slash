@@ -2,7 +2,8 @@ use super::dash;
 use super::generic;
 use super::imgur;
 use super::redgifs;
-use crate::Post;
+use crate::PostInList;
+use crate::helpers::Embeddability;
 use anyhow::{Context, Error, Result, anyhow, bail};
 use base64::Engine;
 use post_subscriber::SubscriberClient;
@@ -105,7 +106,7 @@ pub struct Client {
     redgifs: Option<redgifs::Client>,
     path: String,
     process_lock: Arc<Mutex<()>>,
-    requests: Arc<Mutex<VecDeque<(String, Vec<Post>)>>>,
+    requests: Arc<Mutex<VecDeque<(String, Vec<PostInList>)>>>,
     redis: redis::aio::MultiplexedConnection,
     subscriber_client: SubscriberClient,
     /// The time the current subreddit started processing, and which subreddit that is.
@@ -176,7 +177,7 @@ impl Client {
     async fn process_subreddit_posts(
         &mut self,
         subreddit: String,
-        mut posts: Vec<Post>,
+        mut posts: Vec<PostInList>,
     ) -> Result<()> {
         debug!("Processing media for subreddit: {}", subreddit);
 
@@ -186,8 +187,8 @@ impl Client {
 
         for i in 0..posts.len() {
             // If post has already been processed, or is existing post, skip
-            let post = if let Some(Post::New(post)) = posts.get_mut(i) {
-                if post.needs_processing {
+            let post = if let Some(PostInList::New(post)) = posts.get_mut(i) {
+                if post.embeddability == Embeddability::NeedsProcessing {
                     post
                 } else {
                     continue;
@@ -196,25 +197,25 @@ impl Client {
                 continue;
             };
 
-            debug!("Processing media for post: {}", post.id);
+            debug!("Processing media for post: {}", post.post.id);
 
-            if post.embed_urls.len() != 1 {
+            if post.post.embed_urls.len() != 1 {
                 bail!(
                     "Post has multiple embed URLs that need processing, this should not happen, skipping post: {}",
-                    post.id
+                    post.post.id
                 )
             };
 
-            let mut embed_url = post.embed_urls.get(0).unwrap().clone();
+            let mut embed_url = post.post.embed_urls.get(0).unwrap().clone();
             embed_url = match match timeout(
                 Duration::from_secs(60),
-                self.resolve_embed_url(&embed_url, &post.id),
+                self.resolve_embed_url(&embed_url, &post.post.id),
             )
             .await
             {
                 Ok(x) => x,
                 Err(_) => {
-                    warn!("Timeout while processing post: {}", post.id);
+                    warn!("Timeout while processing post: {}", post.post.id);
                     continue;
                 }
             } {
@@ -230,24 +231,24 @@ impl Client {
                 embed_url = format!("https://cdn.rsla.sh/gifs/{}", embed_url);
             };
 
-            post.embed_urls = vec![embed_url];
+            post.post.embed_urls = vec![embed_url];
 
-            post.needs_processing = false;
+            post.embeddability = Embeddability::Embeddable;
 
             let redis_key = post.redis_key.clone();
-            let post_id = post.id.clone();
+            let post_id = post.post.id.clone();
 
-            let post = Vec::from(post.clone());
+            let post = Vec::from(post.post.clone());
 
             let post_keys: Vec<&String> = posts
                 .iter()
                 .filter(|p| match p {
-                    Post::New(p) => !p.needs_processing,
-                    Post::Existing(_) => true,
+                    PostInList::New(p) => p.embeddability != Embeddability::NeedsProcessing,
+                    PostInList::Existing(_) => true,
                 })
                 .map(|p| match p {
-                    Post::New(p) => &p.redis_key,
-                    Post::Existing(key) => &key,
+                    PostInList::New(p) => &p.redis_key,
+                    PostInList::Existing(key) => &key,
                 })
                 .collect();
 
@@ -605,7 +606,7 @@ impl Client {
     pub async fn queue_subreddit_for_processing(
         &self,
         subreddit: &str,
-        posts: Vec<Post>,
+        posts: Vec<PostInList>,
     ) -> Result<()> {
         let subreddit = subreddit.to_lowercase();
         debug!("Adding subreddit to process queue: {}", subreddit);

@@ -313,26 +313,16 @@ impl EventHandler for Handler {
             .expect("Failed to register slash commands");
         }
 
-        if command == "config" || command == "all" {
+        if command == "configure" || command == "all" {
             Command::create_global_command(
                 &ctx.http,
-                CreateCommand::new("config")
-                    .description("Configure the bot in this server")
-                    .add_option(
-                        CreateCommandOption::new(
-                            CommandOptionType::SubCommand,
-                            "starboard",
-                            "Channel to send messages with a star reaction to",
-                        )
-                        .add_sub_option(
-                            CreateCommandOption::new(
-                                CommandOptionType::Channel,
-                                "channel",
-                                "Target channel",
-                            )
-                            .required(true),
-                        ),
-                    ),
+                CreateCommand::new("configure")
+                    .description("Configure the bot")
+                    .add_option(CreateCommandOption::new(
+                        CommandOptionType::SubCommand,
+                        "channel",
+                        "Configure the bot's behaviour in this channel",
+                    )),
             )
             .await
             .expect("Failed to register slash command");

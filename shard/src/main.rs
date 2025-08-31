@@ -61,6 +61,7 @@ mod command_handlers;
 mod component_handlers;
 mod discord;
 mod feature_flags;
+mod feature_handlers;
 mod modal_handlers;
 
 /// Returns current milliseconds since the Epoch
@@ -216,6 +217,8 @@ async fn get_command_response<'a>(
 
         "autopost" => command_handlers::autopost(&command, &ctx, tracker).await,
 
+        "configure" => feature_handlers::config::command::config(&command, &ctx, tracker).await,
+
         "help" => {
             capture_event(
                 ctx.data(),
@@ -362,7 +365,14 @@ impl EventHandler for Handler {
             }
 
             FullEvent::Resume { event, .. } => {
-                info!("Shard resumed connection: {:?}", event);
+                info!(
+                    "Shard resumed connection: {:?}, restarting self to be safe. Since this causes issues sometimes.",
+                    event
+                );
+
+                if Path::new("/etc/probes/live").exists() {
+                    fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
+                }
             }
 
             FullEvent::Ready { data_about_bot, .. } => {
@@ -408,16 +418,7 @@ impl EventHandler for Handler {
                     _ => false,
                 };
 
-                if alive {
-                    if !Path::new("/etc/probes/live").exists() {
-                        fs::create_dir_all("/etc/probes")
-                            .expect("Couldn't create /etc/probes directory");
-                        let mut file = File::create("/etc/probes/live")
-                            .expect("Unable to create /etc/probes/live");
-                        file.write_all(b"alive")
-                            .expect("Unable to write to /etc/probes/live");
-                    }
-                } else {
+                if !alive {
                     fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
                 }
             }
@@ -465,7 +466,7 @@ impl EventHandler for Handler {
                         match command.guild_id {
                             Some(guild_id) => {
                                 info!(
-                                    "{:?} ({:?}) > {:?} ({:?}) : Button {} {:?}",
+                                    "{:?} ({:?}) > {:?} ({:?}) : Component {} {:?}",
                                     guild_id
                                         .name(&ctx.cache)
                                         .unwrap_or("Name Unavailable".into()),
@@ -479,7 +480,7 @@ impl EventHandler for Handler {
                             }
                             None => {
                                 info!(
-                                    "{:?} ({:?}) : Button {} {:?}",
+                                    "{:?} ({:?}) : Component {} {:?}",
                                     command.user.name,
                                     command.user.id.get(),
                                     command.data.custom_id,
@@ -490,29 +491,30 @@ impl EventHandler for Handler {
                         }
 
                         // If custom_id uses invalid data structure (old version of bot), ignore interaction
-                        let custom_id: HashMap<String, serde_json::Value> =
+                        let custom_id_data: HashMap<String, serde_json::Value> =
                             if let Ok(custom_id) = serde_json::from_str(&command.data.custom_id) {
                                 custom_id
                             } else {
                                 return;
                             };
 
-                        let button_command = match custom_id.get("command") {
+                        let component_command = match custom_id_data.get("command") {
                             Some(command) => command.to_string().replace('"', ""),
                             None => "again".to_string(),
                         };
 
-                        match button_command.as_str() {
-							"again" => component_handlers::post_again(&ctx, &command, custom_id, tracker).await,
+                        match component_command.as_str() {
+							"again" => component_handlers::post_again(&ctx, &command, custom_id_data, tracker).await,
 							"unsubscribe" => component_handlers::unsubscribe(&ctx, &command, tracker).await,
 							"autopost_cancel" => component_handlers::autopost_cancel(&ctx, &command, tracker).await,
 							"where-autopost" => tracker.send_response(CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(
 								"Auto-post setup has been moved to the `/autopost start` command to reduce clutter on the post view\nand because only users with Manage Channels can setup auto-posts so it doesn't make much sense to show to everyone.".to_string()
 							).ephemeral(true)
 							)).await,
+                            "configure_channel" => feature_handlers::config::channel_config::configure_channel_component_handler(&ctx, &command, custom_id_data, tracker).await,
 
 							_ => {
-								warn!("Unknown button command: {}", button_command);
+								warn!("Unknown component command: {}", component_command);
 								return;
 							}
 						}

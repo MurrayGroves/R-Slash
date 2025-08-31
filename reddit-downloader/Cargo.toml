@@ -56,8 +56,11 @@ opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
 opentelemetry-appender-tracing = "0.26"
 
 itertools = "*"
+
 dash-mpd = "*"
+tl = "*"
 metascraper = "*"
+
 tarpc = { version = "*", features = [
 	"serde-transport",
 	"tcp",

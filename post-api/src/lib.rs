@@ -1,20 +1,23 @@
+#![feature(round_char_boundary)]
+
+use chrono::format::parse;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, ensure, Context, Error};
+use anyhow::{Context, Error, bail, ensure};
 use async_recursion::async_recursion;
+use ellipse::Ellipse;
 use indoc::indoc;
 use redis::aio::MultiplexedConnection;
-use redis::{from_redis_value, AsyncTypedCommands};
-use reqwest::header;
-use reqwest::header::HeaderMap;
+use redis::{AsyncTypedCommands, from_redis_value};
 use rslash_common::access_tokens::get_reddit_access_token;
-use rslash_common::SubredditStatus;
+use rslash_common::{Post, SubredditStatus, get_post_content_type};
 use serde_json::json;
 use serenity::all::{
-    ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateInteractionResponseFollowup,
-    CreateMediaGallery, GenericChannelId, MessageFlags,
+    ButtonStyle, ChannelId, CreateActionRow, CreateButton, CreateEmbed,
+    CreateInteractionResponseFollowup, CreateMediaGallery, CreateSeparator, GenericChannelId,
+    MessageFlags,
 };
 use serenity::builder::{
     CreateComponent, CreateContainer, CreateInteractionResponse, CreateInteractionResponseMessage,
@@ -22,6 +25,8 @@ use serenity::builder::{
 };
 use tokio::time::sleep;
 use tracing::{debug, error, error_span, info, instrument};
+use url::Url;
+use user_config_manager::get_channel_config;
 
 /// Returns current milliseconds since the Epoch
 fn get_epoch_ms() -> u64 {
@@ -179,20 +184,11 @@ pub async fn get_post_at_list_index(
 
 /// Represents a fetched Reddit post including some context about how it was fetched
 #[derive(Debug)]
-pub struct Post {
+pub struct PostInContext {
     pub subreddit: String,
-    pub author: String,
-    pub title: String,
-    /// The URL of the post on Reddit
-    pub url: String,
-    /// The converted embed URL
-    pub embed_urls: Vec<String>,
-    /// The timestamp when the post was made on Reddit
-    pub timestamp: serenity::model::timestamp::Timestamp,
-    /// The search term used to fetch this post, if any
+    /// The search term that was used to fetch this post, if any
     pub search: Option<String>,
-    /// The score of the post
-    pub score: isize,
+    pub post: Post,
 }
 
 fn pretty_number(num: isize) -> String {
@@ -203,44 +199,117 @@ fn pretty_number(num: isize) -> String {
     }
 }
 
-impl Post {
+impl PostInContext {
     fn get_components<'a>(self, include_buttons: bool) -> Vec<CreateComponent<'a>> {
-        let mut components = vec![CreateComponent::Container(CreateContainer::new(vec![
-            CreateComponent::TextDisplay(CreateTextDisplay::new(format!(
+        let mut container = Vec::new();
+        container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
+            format!(
                 indoc! {"
                     ## [{}]({})
                     by [u/{}](https://reddit.com/u/{}) in [r/{}](https://reddit.com/r/{})
                 "},
-                self.title, self.url, self.author, self.author, self.subreddit, self.subreddit
-            ))),
-            CreateComponent::MediaGallery(CreateMediaGallery::new(
-                self.embed_urls
+                self.post.title,
+                self.post.url,
+                self.post.author,
+                self.post.author,
+                self.subreddit,
+                self.subreddit
+            ),
+        )));
+
+        container.push(CreateComponent::Separator(CreateSeparator::new(true)));
+
+        if !self.post.embed_urls.is_empty() && self.post.embed_urls.first().unwrap() != "" {
+            container.push(CreateComponent::MediaGallery(CreateMediaGallery::new(
+                self.post
+                    .embed_urls
                     .into_iter()
                     .take(10) // Media gallery can only show 10 items
                     .map(|url| CreateMediaGalleryItem::new(CreateUnfurledMediaItem::new(url)))
                     .collect::<Vec<_>>(),
-            )),
-            CreateComponent::TextDisplay(CreateTextDisplay::new(format!(
-                indoc! {"
-                    *Posted <t:{}:R>, currently has {} points*
-                "},
-                self.timestamp.unix_timestamp(),
-                pretty_number(self.score)
-            ))),
-        ]))];
+            )));
+        }
+
+        let mut text_chars = self.post.title.len() + self.post.author.len() + self.subreddit.len();
+
+        if let Some(title) = self.post.linked_url_title {
+            let title = html_escape::decode_html_entities(&title);
+            if title != self.post.title {
+                // No point putting it twice
+                container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
+                    format!("### [{}]({})", title, self.post.linked_url.clone().unwrap()),
+                )));
+                text_chars += title.len();
+            }
+        }
+
+        if let Some(mut url) = self.post.linked_url_image.clone() {
+            if url.starts_with("//") {
+                // Deal with protocol relative URLs
+                url = format!("https:{}", url);
+            };
+            if let Ok(mut url) = Url::parse(&url) {
+                url.set_query(None);
+                container.push(CreateComponent::MediaGallery(CreateMediaGallery::new(
+                    vec![CreateMediaGalleryItem::new(CreateUnfurledMediaItem::new(
+                        url.as_str().to_string(),
+                    ))],
+                )))
+            }
+        }
+
+        if let Some(description) = self.post.linked_url_description {
+            let description = html_escape::decode_html_entities(&description).to_string();
+            text_chars += description.len();
+            container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
+                description,
+            )));
+        }
+
+        if let Some(url) = self.post.linked_url {
+            if let Ok(url_obj) = Url::parse(&url)
+                && let Some(domain) = url_obj.domain()
+            {
+                container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
+                    format!("-# [{}]({})", domain, url),
+                )))
+            } else {
+                debug!("Failed to parse URL: {:?}", url);
+            }
+        }
+
+        if let Some(text) = self.post.text {
+            container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
+                text.as_str()
+                    .truncate_ellipse_with(3500 - text_chars, " ...")
+                    .to_string(),
+            ))); // Truncate to fit in Discord char limit
+        }
+
+        container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
+            format!(
+                "*Posted <t:{}:R>, currently has {} points*",
+                self.post.timestamp,
+                pretty_number(self.post.score)
+            ),
+        )));
+
+        let mut components = vec![CreateComponent::Container(CreateContainer::new(container))];
 
         if include_buttons {
             components.push(CreateComponent::ActionRow(CreateActionRow::Buttons(
-                Cow::from(vec![CreateButton::new(
-                    json!({
-                        "subreddit": self.subreddit,
-                        "search": self.search,
-                        "command": "again"
-                    })
-                    .to_string(),
-                )
-                .label("🔁")
-                .style(ButtonStyle::Primary)]),
+                Cow::from(vec![
+                    CreateButton::new(
+                        json!({
+                            "subreddit": self.subreddit,
+                            "search": self.search,
+                            "command": "again"
+                        })
+                        .to_string(),
+                    )
+                    .label("🔁")
+                    .style(ButtonStyle::Primary),
+                ]),
             )))
         }
 
@@ -254,14 +323,14 @@ impl Post {
     }
 }
 
-impl<'a> Into<CreateInteractionResponse<'a>> for Post {
+impl<'a> Into<CreateInteractionResponse<'a>> for PostInContext {
     /// Includes buttons
     fn into(self) -> CreateInteractionResponse<'a> {
         CreateInteractionResponse::Message(self.into())
     }
 }
 
-impl<'a> Into<CreateInteractionResponseMessage<'a>> for Post {
+impl<'a> Into<CreateInteractionResponseMessage<'a>> for PostInContext {
     fn into(self) -> CreateInteractionResponseMessage<'a> {
         CreateInteractionResponseMessage::default()
             .flags(MessageFlags::IS_COMPONENTS_V2)
@@ -269,7 +338,7 @@ impl<'a> Into<CreateInteractionResponseMessage<'a>> for Post {
     }
 }
 
-impl<'a> Into<CreateInteractionResponseFollowup<'a>> for Post {
+impl<'a> Into<CreateInteractionResponseFollowup<'a>> for PostInContext {
     /// Includes buttons
     fn into(self) -> CreateInteractionResponseFollowup<'a> {
         CreateInteractionResponseFollowup::default()
@@ -278,7 +347,7 @@ impl<'a> Into<CreateInteractionResponseFollowup<'a>> for Post {
     }
 }
 
-impl<'a> Into<CreateMessage<'a>> for Post {
+impl<'a> Into<CreateMessage<'a>> for PostInContext {
     fn into(self) -> CreateMessage<'a> {
         CreateMessage::new()
             .flags(MessageFlags::IS_COMPONENTS_V2)
@@ -286,20 +355,25 @@ impl<'a> Into<CreateMessage<'a>> for Post {
     }
 }
 
-pub fn optional_post_to_response(post: Option<Post>) -> CreateInteractionResponse<'static> {
+pub fn optional_post_to_response(
+    post: Option<PostInContext>,
+) -> CreateInteractionResponse<'static> {
     match post {
-        Some(post) => post.into(),
-        None => CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().embed(
-            CreateEmbed::default()
-                .title("No Posts Found")
-                .description("No supported posts found in this subreddit. Try searching for something else.")
-                .color(0xff0000)
-                .to_owned(),)
-        ),
-    }
+		Some(post) => post.into(),
+		None => CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().embed(
+			CreateEmbed::default()
+				.title("No Posts Found")
+				.description("No supported posts found in this subreddit. Try searching for something else.")
+				.color(0xff0000)
+				.to_owned(), )
+		),
+	}
 }
 
-pub fn optional_post_to_message(post: Option<Post>, buttons: bool) -> CreateMessage<'static> {
+pub fn optional_post_to_message(
+    post: Option<PostInContext>,
+    buttons: bool,
+) -> CreateMessage<'static> {
     match post {
         Some(post) => {
             if buttons {
@@ -326,77 +400,46 @@ pub async fn get_post_by_id<'a>(
     post_id: &str,
     search: Option<&str>,
     con: &mut MultiplexedConnection,
-) -> Result<Post, Error> {
+) -> Result<PostInContext, Error> {
     let post_id = post_id.to_lowercase();
     debug!("Getting post by ID: {}", post_id);
 
-    let post: HashMap<String, String> = con.hgetall(&post_id).await?;
+    let post: Post = redis::AsyncCommands::hgetall(con, &post_id).await?;
 
-    ensure!(
-        !post.is_empty(),
-        PostApiError::PostNotFound {
-            post_id: post_id.to_string()
-        }
-    );
-
-    let subreddit = post_id.split(":").collect::<Vec<&str>>()[1].to_string();
-    let author = post.get("author").context("No author in post")?.clone();
-    let title = post.get("title").context("No title in post")?.clone();
-    let url = post.get("url").context("No url in post")?.clone();
-    let embed_urls: Vec<String> = post
-        .get("embed_url")
-        .context("No embed_url in post")?
-        .clone()
-        .split(",")
-        .into_iter()
-        .map(|s| {
-            if !s.starts_with("http") {
-                format!("https://cdn.rsla.sh/gifs/{}", s)
-            } else {
-                s.to_string()
-            }
-        })
-        .collect();
-    let timestamp = post
-        .get("timestamp")
-        .context("No timestamp in post")?
-        .parse()?;
-    let score = post
-        .get("score")
-        .context("No score in post")?
-        .parse()
-        .context("Failed to parse score")?;
-
-    Ok(Post {
-        subreddit,
-        author,
-        title,
-        url,
-        embed_urls,
-        timestamp: serenity::model::timestamp::Timestamp::from_unix_timestamp(timestamp)?,
+    Ok(PostInContext {
+        subreddit: post_id.split(':').nth(1).unwrap_or("").to_string(),
         search: search.map(|s| s.to_string()),
-        score,
+        post,
     })
 }
 
-#[instrument(skip(con))]
+#[instrument(skip(redis, mongodb))]
 #[async_recursion]
 pub async fn get_subreddit<'a>(
     subreddit: &str,
-    con: &mut MultiplexedConnection,
+    redis: &mut MultiplexedConnection,
+    mongodb: &mut mongodb::Client,
     channel: GenericChannelId,
     recursion_level: Option<u8>,
-) -> Result<Post, Error> {
+) -> Result<PostInContext, Error> {
     let subreddit = subreddit.to_lowercase();
 
     let fetched_posts: HashMap<String, u64> = redis::AsyncCommands::hgetall(
-        con,
+        redis,
         format!("subreddit:{}:channels:{}:posts", &subreddit, channel),
     )
     .await?;
-    let posts: Vec<String> = con
+
+    let posts: Vec<String> = redis
         .lrange(format!("subreddit:{}:posts", &subreddit), 0, -1)
         .await?;
+
+    let text_allow_level = get_channel_config(mongodb, ChannelId::new(channel.get()))
+        .await?
+        .text_allowed
+        .unwrap_or_default();
+
+    debug!("Text allow level is {:?}", text_allow_level);
 
     // Find the first post that the channel has not seen before
     let mut post_id: Option<String> = None;
@@ -406,14 +449,23 @@ pub async fn get_subreddit<'a>(
             let timestamp = *fetched_posts.get(&post).unwrap();
             if let Some(current_min) = &minimum_post {
                 if timestamp < current_min.1 {
-                    minimum_post = Some((post, timestamp));
+                    let content_type = get_post_content_type(redis, &post).await?;
+                    if text_allow_level.allows_for(content_type) {
+                        minimum_post = Some((post, timestamp));
+                    }
                 }
             } else {
-                minimum_post = Some((post, timestamp));
+                let content_type = get_post_content_type(redis, &post).await?;
+                if text_allow_level.allows_for(content_type) {
+                    minimum_post = Some((post, timestamp));
+                }
             }
         } else {
-            post_id = Some(post);
-            break;
+            let content_type = get_post_content_type(redis, &post).await?;
+            if text_allow_level.allows_for(content_type) {
+                post_id = Some(post);
+                break;
+            }
         }
     }
 
@@ -433,14 +485,15 @@ pub async fn get_subreddit<'a>(
         None => bail!(PostApiError::NoPostsFound { subreddit }),
     };
 
-    con.hset(
-        format!("subreddit:{}:channels:{}:posts", &subreddit, channel),
-        &post_id,
-        get_epoch_ms(),
-    )
-    .await?;
+    redis
+        .hset(
+            format!("subreddit:{}:channels:{}:posts", &subreddit, channel),
+            &post_id,
+            get_epoch_ms(),
+        )
+        .await?;
 
-    let mut post = get_post_by_id(&post_id, None, con).await;
+    let mut post = get_post_by_id(&post_id, None, redis).await;
 
     // If the post is not found, some bug has occurred, remove the post from the subreddit list and call this function again to get a new one
     if let Err(e) = post {
@@ -449,7 +502,8 @@ pub async fn get_subreddit<'a>(
             let _ = span.enter();
             info!("Error was: {:?}, getting {:?}", e, post_id);
             error!("Error getting post by ID");
-            con.lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
+            redis
+                .lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
                 .await?;
         }
 
@@ -464,7 +518,14 @@ pub async fn get_subreddit<'a>(
             }
         }
 
-        post = get_subreddit(&subreddit, con, channel, recursion_level.map(|x| x + 1)).await;
+        post = get_subreddit(
+            &subreddit,
+            redis,
+            mongodb,
+            channel,
+            recursion_level.map(|x| x + 1),
+        )
+        .await;
     }
 
     post
@@ -477,7 +538,7 @@ pub async fn get_subreddit_search<'a>(
     search: &str,
     con: &mut MultiplexedConnection,
     channel: GenericChannelId,
-) -> Result<Option<Post>, Error> {
+) -> Result<Option<PostInContext>, Error> {
     debug!(
         "Getting post for search: {} in subreddit: {}",
         search, subreddit

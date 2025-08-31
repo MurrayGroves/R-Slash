@@ -4,18 +4,21 @@ use futures::{Future, StreamExt, TryStreamExt};
 use mongodb::bson::{doc, Document};
 use mongodb::options::ClientOptions;
 use redis::AsyncTypedCommands;
+use rslash_common::rpc::RetryingTcpStream;
 use rslash_common::span_filter;
 use serenity::all::{ChannelId, GatewayIntents, Http};
 use serenity::{all::EventHandler, async_trait};
+use stubborn_io::{ReconnectOptions, StubbornTcpStream};
+use tarpc::Transport;
 use tokio::time::{Duration, Instant};
 
 use std::cell::SyncUnsafeCell;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::env;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
+use std::{env, iter};
 use tokio::sync::{Mutex, RwLock};
 
 use futures::future::{self};
@@ -109,7 +112,7 @@ struct AutoPosts {
 
 #[derive(Clone)]
 struct AutoPostServer {
-    db: Arc<Mutex<mongodb::Client>>,
+    db: mongodb::Client,
     autoposts: Arc<RwLock<AutoPosts>>,
     discords: HashMap<u64, Arc<Http>>,
     redis: redis::aio::MultiplexedConnection,
@@ -124,8 +127,8 @@ impl AutoPostServer {
     pub async fn add_autopost(self, autopost: Arc<UnsafeMemory>) {
         info!("Adding autopost {:?}", autopost);
 
-        let client = self.db.lock().await;
-        let coll = client
+        let coll = self
+            .db
             .database("state")
             .collection::<PostMemory>("autoposts");
         coll.insert_one(&*autopost.deref().deref())
@@ -134,7 +137,6 @@ impl AutoPostServer {
 
         debug!("Inserted autopost into database");
 
-        drop(client);
         let next = (*autopost).next_post;
         let mut autoposts = self.autoposts.write().await;
         autoposts.queue.push(autopost);
@@ -167,9 +169,8 @@ impl AutoPostServer {
     ) -> Result<PostMemory, String> {
         info!("Deleting autopost {}", id);
 
-        let client = self.db.lock().await;
         let coll: mongodb::Collection<PostMemory> =
-            client.database("state").collection("autoposts");
+            self.db.database("state").collection("autoposts");
 
         let filter = doc! {
             "id": id,
@@ -179,8 +180,6 @@ impl AutoPostServer {
             Ok(_) => (),
             Err(e) => return Err(e.to_string()),
         };
-
-        drop(client);
 
         let mut autoposts = self.autoposts.write().await;
 
@@ -441,16 +440,36 @@ async fn main() {
     subreddits_vec.append(&mut nsfw_subreddits);
     subreddits_vec.append(&mut sfw_subreddits);
 
-    let mongodb_client = Arc::new(Mutex::new(mongodb_client));
     let (sender, receiver) = tokio::sync::mpsc::channel(50);
+
+    println!("Connecting to reddit proxy...");
+    let reconnect_opts = ReconnectOptions::new()
+        .with_exit_if_first_connect_fails(false)
+        .with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
+    let tcp_stream = RetryingTcpStream::new(
+        StubbornTcpStream::connect_with_options(
+            "reddit-proxy.discord-bot-shared.svc.cluster.local:50051",
+            reconnect_opts,
+        )
+        .await
+        .expect("Failed to connect to reddit-proxy"),
+    );
+    let transport = tarpc::serde_transport::Transport::from((tcp_stream, Bincode::default()));
+
+    let reddit_proxy =
+        reddit_proxy::RedditProxyClient::new(tarpc::client::Config::default(), transport).spawn();
+
+    println!("Connected to reddit proxy");
+
     let server = AutoPostServer {
-        db: Arc::clone(&mongodb_client),
+        db: mongodb_client,
         autoposts: Arc::clone(&autoposts),
         discords: discord_https.clone(),
         redis: redis.clone(),
         sender,
         default_subs: subreddits_vec,
         waiting_until: Arc::new(RwLock::new(Instant::now())),
+        reddit_proxy,
     };
 
     info!("Connecting to discords");

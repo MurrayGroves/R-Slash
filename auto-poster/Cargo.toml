@@ -13,12 +13,14 @@ env_logger = "0.11"
 log = "*"
 mongodb = "*"
 tarpc = { version = "*", features = [
-    "serde-transport",
-    "tcp",
-    "serde-transport-bincode",
-    "tokio1",
-    "tokio-serde",
+	"serde-transport",
+	"tcp",
+	"serde-transport-bincode",
+	"tokio1",
+	"tokio-serde",
 ] }
+stubborn-io = "*"
+
 anyhow = "*"
 futures = "*"
 serde_derive = "*"
@@ -30,10 +32,10 @@ timer = "*"
 async-recursion = "*"
 integer-hasher = "*"
 sentry = { version = "0.34", features = [
-    "tracing",
-    "anyhow",
-    "debug-images",
-    "tokio",
+	"tracing",
+	"anyhow",
+	"debug-images",
+	"tokio",
 ] }
 
 tracing = "*"

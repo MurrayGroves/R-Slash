@@ -1,8 +1,13 @@
 pub mod access_tokens;
+mod guards;
 pub mod rpc;
 
 pub use access_tokens::Limiter;
+use redis::aio::MultiplexedConnection;
+use redis::{FromRedisValue, RedisError};
+use user_config_manager::TextAllowLevel;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -30,6 +35,7 @@ use serenity::all::{
 };
 use serenity::builder::CreateComponent;
 use tokio::time::Instant;
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct InteractionResponseMessage<'a> {
@@ -302,4 +308,231 @@ macro_rules! initialise_observability {
 pub enum SubredditStatus {
     Valid,
     Invalid(String),
+}
+
+/// Represents a Reddit post stored in the database.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Post {
+    /// Reddit ID, not database ID
+    pub id: String,
+    pub author: String,
+    pub title: String,
+    /// The URL of the post on Reddit
+    pub url: String,
+    /// The converted embed URLs
+    pub embed_urls: Vec<String>,
+    /// The timestamp when the post was made on Reddit
+    pub timestamp: u64,
+    /// The score of the post
+    pub score: isize,
+    /// Body text of the post, if present
+    pub text: Option<String>,
+    /// URL the post links to, if it wasn't embeddable
+    pub linked_url: Option<String>,
+    /// Link to the image to use when displaying the linked_url
+    pub linked_url_image: Option<String>,
+    pub linked_url_title: Option<String>,
+    pub linked_url_description: Option<String>,
+}
+
+impl FromRedisValue for Post {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
+        let post: HashMap<String, String> = redis::from_redis_value(v)?;
+
+        if post.is_empty() {
+            return Err(RedisError::from((
+                redis::ErrorKind::ParseError,
+                "Post data is empty",
+            )));
+        }
+
+        let id = post.get("id").ok_or(RedisError::from((
+            redis::ErrorKind::ParseError,
+            "id missing",
+        )))?;
+
+        let author = post.get("author").ok_or(RedisError::from((
+            redis::ErrorKind::ParseError,
+            "author missing",
+        )))?;
+
+        let title = post.get("title").ok_or(RedisError::from((
+            redis::ErrorKind::ParseError,
+            "title missing",
+        )))?;
+
+        let url = post.get("url").ok_or(RedisError::from((
+            redis::ErrorKind::ParseError,
+            "url missing",
+        )))?;
+
+        let embed_urls: Vec<String> = post
+            .get("embed_url")
+            .ok_or(RedisError::from((
+                redis::ErrorKind::ParseError,
+                "embed_url missing",
+            )))?
+            .split(",")
+            .into_iter()
+            .filter(|x| !x.is_empty())
+            .map(|s| {
+                if !s.starts_with("http") {
+                    format!("https://cdn.rsla.sh/gifs/{}", s)
+                } else {
+                    s.to_string()
+                }
+            })
+            .collect();
+        let timestamp = post
+            .get("timestamp")
+            .map(|s| {
+                s.parse::<u64>().map_err(|_| {
+                    RedisError::from((
+                        redis::ErrorKind::ParseError,
+                        "timestamp must be a valid u64",
+                    ))
+                })
+            })
+            .ok_or(RedisError::from((
+                redis::ErrorKind::ParseError,
+                "timestamp missing",
+            )))??;
+
+        let score = post
+            .get("score")
+            .map(|s| {
+                s.parse::<isize>().map_err(|_| {
+                    RedisError::from((redis::ErrorKind::ParseError, "score must be a valid isize"))
+                })
+            })
+            .ok_or(RedisError::from((
+                redis::ErrorKind::ParseError,
+                "score missing",
+            )))??;
+
+        Ok(Post {
+            id: id.to_string(),
+            title: title.to_string(),
+            url: url.to_string(),
+            text: post.get("text").cloned(),
+            linked_url: post.get("linked_url").cloned(),
+            linked_url_image: post.get("linked_url_image").cloned(),
+            linked_url_description: post.get("linked_url_description").cloned(),
+            linked_url_title: post.get("linked_url_title").cloned(),
+            timestamp,
+            score,
+            author: author.to_string(),
+            embed_urls,
+        })
+    }
+}
+
+impl From<Post> for Vec<(String, String)> {
+    #[tracing::instrument]
+    fn from(post: Post) -> Vec<(String, String)> {
+        let mut vec = vec![
+            ("score".to_string(), post.score.to_string()),
+            ("url".to_string(), post.url),
+            ("title".to_string(), post.title),
+            ("author".to_string(), post.author),
+            ("id".to_string(), post.id),
+            ("timestamp".to_string(), post.timestamp.to_string()),
+            ("embed_url".to_string(), post.embed_urls.join(",")),
+        ];
+
+        if let Some(text) = post.text {
+            vec.push(("text".to_string(), text))
+        }
+
+        if let Some(url) = post.linked_url {
+            vec.push(("linked_url".to_string(), url))
+        }
+
+        if let Some(image) = post.linked_url_image {
+            vec.push(("linked_url_image".to_string(), image))
+        }
+
+        if let Some(description) = post.linked_url_description {
+            vec.push(("linked_url_description".to_string(), description))
+        }
+
+        if let Some(title) = post.linked_url_title {
+            vec.push(("linked_url_title".to_string(), title))
+        }
+
+        vec
+    }
+}
+
+impl From<&Post> for Vec<(String, String)> {
+    #[tracing::instrument]
+    fn from(post: &Post) -> Vec<(String, String)> {
+        let mut vec = vec![
+            ("score".to_string(), post.score.to_string()),
+            ("url".to_string(), post.url.to_string()),
+            ("title".to_string(), post.title.to_string()),
+            ("author".to_string(), post.author.to_string()),
+            ("id".to_string(), post.id.to_string()),
+            ("timestamp".to_string(), post.timestamp.to_string()),
+            ("embed_url".to_string(), post.embed_urls.join(",")),
+        ];
+
+        if let Some(text) = &post.text {
+            vec.push(("text".to_string(), text.to_string()))
+        }
+
+        if let Some(url) = &post.linked_url {
+            vec.push(("linked_url".to_string(), url.to_string()))
+        }
+
+        if let Some(image) = &post.linked_url_image {
+            vec.push(("linked_url_image".to_string(), image.to_string()))
+        }
+
+        if let Some(description) = &post.linked_url_description {
+            vec.push((
+                "linked_url_description".to_string(),
+                description.to_string(),
+            ))
+        }
+
+        if let Some(title) = &post.linked_url_title {
+            vec.push(("linked_url_title".to_string(), title.to_string()))
+        }
+
+        vec
+    }
+}
+
+pub async fn get_post_content_type(
+    con: &mut MultiplexedConnection,
+    post_id: &str,
+) -> Result<TextAllowLevel, anyhow::Error> {
+    debug!("Getting content type for {:?}", post_id);
+    let (media, text, linked_url): (Option<String>, Option<String>, Option<String>) = redis::pipe()
+        .hget(post_id, "embed_url")
+        .hget(post_id, "text")
+        .hget(post_id, "linked_url")
+        .query_async(con)
+        .await?;
+
+    let has_media = if let Some(urls) = media {
+        if urls.is_empty() {
+            false
+        } else {
+            true
+        }
+    } else {
+        false
+    };
+
+    let has_text = text.is_some() || linked_url.is_some();
+
+    if has_media && has_text {
+        Ok(TextAllowLevel::Both)
+    } else if has_media {
+        Ok(TextAllowLevel::MediaOnly)
+    } else {
+        Ok(TextAllowLevel::TextOnly)
+    }
 }

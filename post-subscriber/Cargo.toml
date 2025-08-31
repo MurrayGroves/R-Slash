@@ -6,16 +6,18 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", features = ["model"] }
+serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", features = [
+	"model",
+] }
 redis = { version = "0.32", features = ["aio", "tokio-comp"] }
 tokio = { version = "*", features = ["rt-multi-thread"] }
 env_logger = "0.11"
 log = "*"
 mongodb = "*"
 tarpc = { version = "*", features = [
-    "serde-transport",
-    "tcp",
-    "serde-transport-bincode",
+	"serde-transport",
+	"tcp",
+	"serde-transport-bincode",
 ] }
 anyhow = "*"
 futures = "*"
@@ -24,14 +26,15 @@ serde = "*"
 chrono = "*"
 
 sentry = { version = "*", features = [
-    "tracing",
-    "anyhow",
-    "debug-images",
-    "tokio",
+	"tracing",
+	"anyhow",
+	"debug-images",
+	"tokio",
 ] }
 
 post_api = { path = "../post-api" }
 rslash_common = { path = "../rslash_common" }
+user-config-manager = { path = "../user-config-manager" }
 
 tracing = "*"
 tracing-subscriber = { version = "*" }

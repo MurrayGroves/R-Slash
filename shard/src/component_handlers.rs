@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Result, anyhow, bail};
 use post_api::{get_subreddit, get_subreddit_search, optional_post_to_response};
-use post_subscriber::{Bot};
+use post_subscriber::Bot;
 use serenity::all::{
     ComponentInteraction, ComponentInteractionDataKind, Context, CreateInteractionResponse,
     CreateInteractionResponseMessage,
@@ -29,10 +29,7 @@ pub async fn unsubscribe<'a>(
         }
     };
 
-    let client = ctx
-        .data::<ShardState>()
-        .post_subscriber
-        .clone();
+    let client = ctx.data::<ShardState>().post_subscriber.clone();
 
     let bot = match (&*NAMESPACE).as_str() {
         "r-slash" => Bot::RS,
@@ -164,7 +161,9 @@ pub async fn post_again<'a>(
     )
     .await;
 
-    let mut con = ctx.data::<ShardState>().redis.clone();
+    let data = ctx.data::<ShardState>();
+    let mut con = data.redis.clone();
+    let mut mongodb = data.mongodb.clone();
 
     let component_response = match search_enabled {
         true => {
@@ -179,7 +178,13 @@ pub async fn post_again<'a>(
         }
         false => timeout(
             Duration::from_secs(30),
-            get_subreddit(&subreddit, &mut con, interaction.channel_id, Some(0)),
+            get_subreddit(
+                &subreddit,
+                &mut con,
+                &mut mongodb,
+                interaction.channel_id,
+                Some(0),
+            ),
         )
         .await
         .unwrap_or_else(|x| Err(anyhow!("Timeout getting subreddit: {:?}", x)))

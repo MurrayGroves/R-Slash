@@ -12,8 +12,7 @@ use tokio::{select, time::Instant};
 use tracing::{debug, error, warn};
 
 async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) {
-    let client = server.db.lock().await;
-    let coll: mongodb::Collection<PostMemory> = client.database("state").collection("autoposts");
+    let coll: mongodb::Collection<PostMemory> = server.db.database("state").collection("autoposts");
 
     let filter = doc! {
         "id": autopost.id,
@@ -45,7 +44,7 @@ async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) 
 }
 
 async fn post_error_to_message(
-    reddit_proxy: RedditProxyClient,
+    reddit_proxy: &RedditProxyClient,
     e: anyhow::Error,
     subreddit: &str,
 ) -> CreateMessage<'static> {
@@ -126,6 +125,7 @@ pub async fn timer_loop(
                     debug!("Posting autopost: {:?}", autopost);
 
                     let channel = autopost.channel.clone();
+
                     let bot = autopost.bot.clone();
 
                     let http = server.discords[&bot].clone();
@@ -169,6 +169,7 @@ pub async fn timer_loop(
                                 post_api::get_subreddit(
                                     &autopost_clone.subreddit,
                                     &mut server.redis,
+                                    &mut server.db,
                                     autopost_clone.channel.widen(),
                                     Some(0),
                                 )
@@ -185,7 +186,12 @@ pub async fn timer_loop(
                                 delete_auto_post(&server, autopost_clone.clone()).await;
                                 failed = true;
 
-                                post_error_to_message(e, &autopost_clone.subreddit.clone()).await
+                                post_error_to_message(
+                                    &server.reddit_proxy,
+                                    e,
+                                    &autopost_clone.subreddit.clone(),
+                                )
+                                .await
                             }
                         };
 

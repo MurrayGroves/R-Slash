@@ -1,7 +1,7 @@
 [package]
 name = "post_api"
 version = "0.1.1"
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -12,23 +12,51 @@ indoc = "*"
 futures = { version = "0.3" }
 log = "0.4"
 env_logger = "*"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-tokio = { version = "*", features = ["macros", "sync", "rt-multi-thread", "time", "full"] }
+futures-util = { version = "0.3", default-features = false, features = [
+    "sink",
+    "std",
+] }
+tokio = { version = "*", features = [
+    "macros",
+    "sync",
+    "rt-multi-thread",
+    "time",
+    "full",
+] }
 reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"] }
-serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", default-features = false, features = ["cache", "gateway", "rustls_backend", "model", "builder", "http"] }
-redis = { version = "0.32", features = ["aio", "tokio-comp", "connection-manager"] }
+serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", default-features = false, features = [
+    "cache",
+    "gateway",
+    "rustls_backend",
+    "model",
+    "builder",
+    "http",
+] }
+redis = { version = "0.32", features = [
+    "aio",
+    "tokio-comp",
+    "connection-manager",
+] }
 rand = { version = "*", features = ["alloc"] }
-mongodb = "2.3"
+mongodb = "3"
 serde_derive = "1.0"
 pretty_env_logger = "*"
 anyhow = { version = "*", features = ["backtrace"] }
-sentry = { version = "0.29.3", features = ["tracing", "anyhow", "debug-images"] }
+sentry = { version = "0.29.3", features = [
+    "tracing",
+    "anyhow",
+    "debug-images",
+] }
 tracing = "*"
 tracing-subscriber = { version = "*" }
 compile-time = "*"
 chrono = "*"
 async-recursion = "*"
 url = "*"
+lazy_static = "1.5.0"
+
+ellipse = "*"
+html-escape = "*"
 
 rslash_common = { path = "../rslash_common" }
-lazy_static = "1.5.0"
+user-config-manager = { path = "../user-config-manager" }

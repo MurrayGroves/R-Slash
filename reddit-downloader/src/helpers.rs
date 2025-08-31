@@ -1,14 +1,17 @@
-use crate::helpers::Embeddability::{Embeddable, NeedsProcessing, NotEmbeddable};
-use crate::{NewPost, Post};
+use crate::helpers::Embeddability::{Embeddable, NeedsProcessing, NotEmbeddable, TextOnly};
+use crate::{NewPost, PostInList};
 use anyhow::{Context, Error, anyhow};
 use log::error;
 use mime2ext::mime2ext;
 use post_subscriber::SubscriberClient;
 use redis::AsyncTypedCommands;
+use rslash_common::Post;
 use sentry::TransactionOrSpan;
 use serde_json::Value::Null;
 use serde_json::{Map, Value};
+use std::time::Duration;
 use tarpc::context;
+use tl::ParserOptions;
 use tracing::{debug, trace, warn};
 use truncrate::TruncateToBoundary;
 
@@ -68,10 +71,12 @@ pub fn extract_raw_embed_urls_from_post(post: Map<String, Value>) -> Result<Vec<
     })
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Embeddability {
     Embeddable,
     NeedsProcessing,
-    NotEmbeddable,
+    NotEmbeddable, // Post contains a non-embeddable link, so we'll send it as a normal link, but also need to fetch thumbnail
+    TextOnly,      // Post contains only text so is inherently embeddable
 }
 
 pub fn media_url_embeddability(url: &str) -> Embeddability {
@@ -85,6 +90,8 @@ pub fn media_url_embeddability(url: &str) -> Embeddability {
         Embeddable
     } else if url.contains("imgur.com") || url.contains("redgifs.com") || url.contains(".mpd") {
         NeedsProcessing
+    } else if url.starts_with("https://www.reddit.com/r/") {
+        TextOnly
     } else {
         debug!("URL not embeddable and not convertable: {}", url);
         NotEmbeddable
@@ -140,8 +147,9 @@ pub async fn process_post_metadata(
     subreddit_name: &mut Option<String>,
     con: &mut redis::aio::MultiplexedConnection,
     subscriber: SubscriberClient,
-    existing_posts: &mut Vec<Post>,
-    post_list: &mut Vec<Post>,
+    web_client: &reqwest::Client,
+    existing_posts: &mut Vec<PostInList>,
+    post_list: &mut Vec<PostInList>,
     subreddit: &str,
 ) -> Result<(), Error> {
     // Create a new transaction as an independent continuation
@@ -179,7 +187,7 @@ pub async fn process_post_metadata(
     }
 
     let exists = existing_posts.iter().any(|x| match x {
-        Post::Existing(x) => x == &key,
+        PostInList::Existing(x) => x == &key,
         _ => false,
     });
 
@@ -233,7 +241,7 @@ pub async fn process_post_metadata(
             };
 
             existing_posts.retain(|x| {
-                if let Post::Existing(x) = x {
+                if let PostInList::Existing(x) = x {
                     x != &key
                 } else {
                     false
@@ -287,14 +295,56 @@ pub async fn process_post_metadata(
 
     let urls = extract_raw_embed_urls_from_post(post.clone())?;
 
-    let needs_processing = match media_url_embeddability(
-        urls.iter().next().ok_or(anyhow!("Post has no embed URL"))?,
-    ) {
-        Embeddability::Embeddable => false,
-        Embeddability::NeedsProcessing => true,
-        // Stop processing post if it can't be made embeddable
-        Embeddability::NotEmbeddable => return Ok(()),
+    let embeddability =
+        media_url_embeddability(urls.iter().next().ok_or(anyhow!("Post has no embed URL"))?);
+
+    let linked_url = if let Embeddability::NotEmbeddable = embeddability {
+        urls.first().cloned()
+    } else {
+        None
     };
+
+    let embed_urls = match embeddability {
+        TextOnly => Vec::new(),
+        NotEmbeddable => Vec::new(),
+        _ => urls,
+    };
+
+    let mut linked_url_image = None;
+    let mut linked_url_title = None;
+    let mut linked_url_description = None;
+
+    if let Some(ref linked_url) = linked_url {
+        let html = web_client
+            .get(linked_url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?
+            .text()
+            .await?;
+        let dom = tl::parse(&html, ParserOptions::default().track_classes())?;
+        let metas = dom.query_selector("meta");
+        if let Some(metas) = metas {
+            for node_handle in metas {
+                debug!("Node Handle: {:?}", node_handle);
+                if let Some(node) = node_handle.get(dom.parser())
+                    && let Some(tag) = node.as_tag()
+                    && let Some(Some(property)) = tag.attributes().get("property")
+                    && let Some(Some(content)) = tag.attributes().get("content")
+                {
+                    let property = property.as_utf8_str();
+                    let content = content.as_utf8_str();
+                    debug!("Property: {:?}, Content: {:?}", property, content);
+                    match property.as_str() {
+                        "og:title" => linked_url_title = Some(content.to_string()),
+                        "og:image" => linked_url_image = Some(content.to_string()),
+                        "og:description" => linked_url_description = Some(content.to_string()),
+                        _ => (),
+                    }
+                }
+            }
+        }
+    }
 
     let timestamp = post["created_utc"].as_f64().unwrap() as u64;
     let mut title = post["title"]
@@ -306,28 +356,41 @@ pub async fn process_post_metadata(
 
     let post_object = NewPost {
         redis_key: key.clone(),
-        score: post["score"].as_i64().unwrap_or(0),
-        url: format!(
-            "https://reddit.com{}",
-            post["permalink"].to_string().replace('"', "")
-        ),
-        title,
-        embed_urls: urls,
-        author: post["author"].to_string().replace('"', ""),
-        id: post["id"].to_string().replace('"', ""),
-        timestamp,
-        needs_processing,
+        post: Post {
+            score: post["score"].as_i64().unwrap_or(0) as isize,
+            url: format!(
+                "https://reddit.com{}",
+                post["permalink"].to_string().replace('"', "")
+            ),
+            title,
+            embed_urls,
+            author: post["author"].to_string().replace('"', ""),
+            id: post["id"].to_string().replace('"', ""),
+            timestamp,
+            text: post["selftext"]
+                .as_str()
+                .map(|x| x.to_string())
+                .filter(|x| !x.is_empty()),
+
+            linked_url,
+            linked_url_description,
+            linked_url_title,
+            linked_url_image,
+        },
+        embeddability,
     };
 
-    // If it doesn't need further processing, we can add it right now
-    if !needs_processing {
+    if let Embeddability::NeedsProcessing = post_object.embeddability {
+        post_list.push(post_object.into());
+    } else {
+        // If it doesn't need further processing, we can add it right now
         debug!(
             "Adding to redis immediately with key {:?}: {:?}",
             key, post_object
         );
 
         // Push post to Redis
-        let value = Vec::from(&post_object);
+        let value = Vec::from(&post_object.post);
         match con.hset_multiple(&key, &value).await {
             Ok(_) => {}
             Err(x) => {
@@ -356,15 +419,16 @@ pub async fn process_post_metadata(
 
         post_list.push(post_object.into());
 
+        // Get new list of post keys (existing posts + new posts that don't need processing)
         let mut post_keys: Vec<&String> = post_list
             .iter()
             .filter(|p| match p {
-                Post::New(p) => !p.needs_processing,
-                Post::Existing(_) => true,
+                PostInList::New(p) => p.embeddability != Embeddability::NeedsProcessing,
+                PostInList::Existing(_) => true,
             })
             .map(|p| match p {
-                Post::New(p) => &p.redis_key,
-                Post::Existing(key) => &key,
+                PostInList::New(p) => &p.redis_key,
+                PostInList::Existing(key) => &key,
             })
             .collect();
 
@@ -372,8 +436,8 @@ pub async fn process_post_metadata(
         let existing_posts: Vec<String> = existing_posts
             .iter()
             .map(|x| match x {
-                Post::Existing(x) => x.clone(),
-                Post::New(x) => x.redis_key.clone(),
+                PostInList::Existing(x) => x.clone(),
+                PostInList::New(x) => x.redis_key.clone(),
             })
             .filter(|x| !post_keys.contains(&x))
             .collect();
@@ -386,8 +450,6 @@ pub async fn process_post_metadata(
             .rpush::<String, Vec<&String>>(format!("subreddit:{}:posts", subreddit), post_keys)
             .query_async::<()>(con)
             .await?;
-    } else {
-        post_list.push(post_object.into());
     }
 
     transaction.finish();

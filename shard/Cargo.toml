@@ -37,10 +37,13 @@ redis = { version = "0.32", features = [
     "tokio-comp",
     "connection-manager",
 ] }
-rand = { version = "*", features = ["alloc"] }
 mongodb = "*"
+
+rand = { version = "*", features = ["alloc"] }
 serde_derive = "1.0"
 pretty_env_logger = "*"
+indoc = "2.0.6"
+
 anyhow = { version = "*", features = ["backtrace"] }
 sentry = { version = "0.34", features = [
     "tracing",
@@ -79,8 +82,8 @@ rslash_common = { path = "../rslash_common" }
 post_api = { path = "../post-api" }
 post_subscriber = { path = "../post-subscriber" }
 auto_poster = { path = "../auto-poster" }
+user-config-manager = { path = "../user-config-manager" }
 reddit-proxy = { path = "../reddit-proxy" }
-
 
 [[bin]]
 name = "discord-shard"
