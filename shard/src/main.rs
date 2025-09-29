@@ -52,6 +52,7 @@ use serenity::model::application::{CommandInteraction, Interaction};
 use anyhow::anyhow;
 use dashmap::DashMap;
 use futures::channel::mpsc::UnboundedSender;
+use metrics::{counter, gauge};
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
@@ -258,6 +259,7 @@ impl EventHandler for Handler {
         match event {
             FullEvent::GuildCreate { guild, is_new, .. } => {
                 debug!("Guild create event fired");
+                gauge!("discordshard_guild_count").set(ctx.cache.guild_count() as f64);
                 let mut con = ctx.data::<ShardState>().redis.clone();
                 con.hset(
                     format!("shard_guild_counts_{}", &*NAMESPACE),
@@ -340,6 +342,7 @@ impl EventHandler for Handler {
             }
 
             FullEvent::GuildDelete { incomplete, .. } => {
+                gauge!("discordshard_guild_count").set(ctx.cache.guild_count() as f64);
                 {
                     ctx.data::<ShardState>()
                         .redis
@@ -425,6 +428,7 @@ impl EventHandler for Handler {
 
             FullEvent::InteractionCreate { interaction, .. } => {
                 debug!("Interaction received");
+                counter!("discordshard_received_interactions").increment(1);
                 let tx_ctx = sentry::TransactionContext::new("interaction_create", "http.server");
                 let transaction = sentry::start_transaction(tx_ctx);
                 sentry::configure_scope(|scope| scope.set_span(Some(transaction.clone().into())));
@@ -433,6 +437,7 @@ impl EventHandler for Handler {
 
                 let result = match &interaction {
                     Interaction::Command(command) => {
+                        counter!("discordshard_received_commands").increment(1);
                         match command.guild_id {
                             Some(guild_id) => {
                                 info!(
@@ -463,6 +468,7 @@ impl EventHandler for Handler {
                     }
 
                     Interaction::Component(command) => {
+                        counter!("discordshard_received_component_interactions").increment(1);
                         match command.guild_id {
                             Some(guild_id) => {
                                 info!(
@@ -521,6 +527,7 @@ impl EventHandler for Handler {
                     }
 
                     Interaction::Modal(modal) => {
+                        counter!("discordshard_received_modal_interactions").increment(1);
                         match modal.guild_id {
                             Some(guild_id) => {
                                 info!(
@@ -679,23 +686,23 @@ impl EventHandler for Handler {
 
                 if let Err(e) = result {
                     let report_error;
-                    let error_message;
 
-                    if e.to_string() == "Missing Access".to_string() {
+                    let error_message = if e.to_string() == "Missing Access".to_string() {
                         report_error = false;
-                        error_message =
-                            "The bot does not have permissions to send messages in this channel"
-                                .to_string();
+                        counter!("discordshard_missing_access").increment(1);
+                        "The bot does not have permissions to send messages in this channel"
+                            .to_string()
                     } else {
                         report_error = true;
-                        error_message = format!(
+                        format!(
                             "An error occurred while processing your request, please report it in the [support server](https://discord.gg/BggYYTpdG5):\n\n{}",
                             e.to_string()
-                        );
-                    }
+                        )
+                    };
 
                     if report_error {
                         capture_anyhow(&e);
+                        counter!("discordshard_reportable_errors").increment(1);
                         error!("Error: {:?}", e);
                     }
 

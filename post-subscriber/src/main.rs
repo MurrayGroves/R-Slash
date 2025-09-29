@@ -16,7 +16,7 @@ use tokio::time::{Instant, interval, timeout};
 use user_config_manager::{TextAllowLevel, get_channel_config};
 
 use futures::future;
-
+use metrics::{counter, gauge, histogram};
 use post_subscriber::{Bot, Subscriber, Subscription};
 use rslash_common::{get_post_content_type, initialise_observability, span_filter};
 use tarpc::{
@@ -68,6 +68,8 @@ impl SubscriberServer<'_> {
             };
             drop(queued_alerts);
 
+            counter!("subscriber_processed_alert_batches").increment(1);
+
             let mut last_alert = Instant::now() - inner_duration;
             for alert in next_alert.subscriptions {
                 // Ensure we don't send more than 35 messages per second
@@ -85,7 +87,10 @@ impl SubscriberServer<'_> {
                     Bot::BB => &self.discord_bb,
                     Bot::RS => &self.discord_rs,
                 };
-                debug!("Sending alert to channel {}", channel);
+                debug!(
+                    "Sending alert for {} to channel {}",
+                    alert.subreddit, channel
+                );
 
                 let text_allow_level = match get_channel_config(&mut self.db.clone(), channel).await
                 {
@@ -121,12 +126,18 @@ impl SubscriberServer<'_> {
                 };
 
                 match response {
-                    Ok(_) => debug!(
-                        "Sent {} to channel {}, was added {} seconds ago",
-                        alert.subreddit,
-                        channel,
-                        next_alert.timestamp.elapsed().as_secs()
-                    ),
+                    Ok(_) => {
+                        let elapsed = next_alert.timestamp.elapsed();
+                        debug!(
+                            "Sent {} to channel {}, was added {} seconds ago",
+                            alert.subreddit,
+                            channel,
+                            elapsed.as_secs()
+                        );
+                        histogram!("subscriber_notification_latency")
+                            .record(elapsed.as_millis() as f64);
+                        counter!("subscriber_sent_messages").increment(1);
+                    }
                     Err(e) => {
                         warn!("Failed to send message to channel {}: {:?}", channel, e);
                         if let serenity::Error::Http(e) = e {
@@ -177,6 +188,8 @@ impl Subscriber for SubscriberServer<'_> {
             "Registering subscription for subreddit {} to channel {}",
             subreddit, channel
         );
+
+        gauge!("subscriber_registered_subscriptions").increment(1);
 
         // If this channel is already subscribed to this subreddit, return an error
         let subscriptions = self.subscriptions.read().await;
@@ -229,6 +242,8 @@ impl Subscriber for SubscriberServer<'_> {
             "Deleting subscription for subreddit {} to channel {}",
             subreddit, channel
         );
+
+        gauge!("subscriber_registered_subscriptions").decrement(1);
 
         let coll: mongodb::Collection<Subscription> =
             self.db.database("state").collection("subscriptions");
@@ -302,6 +317,8 @@ impl Subscriber for SubscriberServer<'_> {
             "Notifying subscribers of post {} in subreddit {}",
             post_id, subreddit
         );
+
+        counter!("subscriber_posts_received").increment(1);
 
         let subscriptions = self.subscriptions.read().await;
         debug!("Lock acquired, checking subscriptions");

@@ -1,18 +1,19 @@
-use std::{ops::Deref, sync::Arc, time::Duration};
-
 use crate::{AutoPostServer, UnsafeMemory};
 use auto_poster::PostMemory;
+use metrics::{counter, gauge, histogram};
 use mongodb::bson::doc;
 use post_api::{optional_post_to_message, queue_subreddit, PostApiError};
 use reddit_proxy::RedditProxyClient;
 use rslash_common::SubredditStatus;
 use serenity::all::CreateMessage;
+use std::{ops::Deref, sync::Arc, time::Duration};
 use tarpc::context::Context;
 use tokio::{select, time::Instant};
 use tracing::{debug, error, warn};
 
 async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) {
     let coll: mongodb::Collection<PostMemory> = server.db.database("state").collection("autoposts");
+    counter!("autoposter_deleted_autoposts_by_system").increment(1);
 
     let filter = doc! {
         "id": autopost.id,
@@ -110,6 +111,7 @@ pub async fn timer_loop(
                 let now = Instant::now();
                 if memory.next_post <= now {
                     debug!("Running {:?} behind", now - memory.next_post);
+                    histogram!("autoposter_post_delay").record(now - memory.next_post);
 
                     // Get next autopost from queue, removing it from the queue
                     drop(autoposts);
@@ -123,6 +125,7 @@ pub async fn timer_loop(
                     drop(autoposts);
 
                     debug!("Posting autopost: {:?}", autopost);
+                    counter!("autoposter_attempted_posts").increment(1);
 
                     let channel = autopost.channel.clone();
 
@@ -208,12 +211,16 @@ pub async fn timer_loop(
                                     // Unknown channel (we got removed from server)
                                     if e.error.code.0 == 10003 {
                                         delete_auto_post(&server, autopost.clone()).await;
+                                        counter!("autoposter_missing_channel").increment(1);
                                         failed = true;
                                     }
                                 }
                             } else {
                                 warn!("Error sending message: {:?}", why);
+                                counter!("autoposter_unknown_sending_error").increment(1);
                             }
+                        } else {
+                            counter!("autoposter_sent_messages").increment(1);
                         }
 
                         // If we succeeded in sending the message, or it failed due to a temporary error, re-add the autopost to the queue
@@ -271,6 +278,7 @@ pub async fn timer_loop(
                     }
                 } else {
                     // We woke up too early and need to sleep more
+                    counter!("autoposter_early_wakeups").increment(1);
                     let to_return = memory.next_post - now;
                     let mut waiting_until = server.waiting_until.write().await;
                     *waiting_until = memory.next_post;

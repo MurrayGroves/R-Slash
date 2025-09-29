@@ -16,6 +16,9 @@ spec:
     metadata:
       labels:
         app: reddit-proxy
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
     spec:
       initContainers:
         - name: gluetun
@@ -52,7 +55,7 @@ spec:
             - name: FIREWALL_OUTBOUND_SUBNETS
               value: "10.1.0.0/16,10.152.183.0/24"
             - name: FIREWALL_INPUT_PORTS
-              value: "50051"
+              value: "50051,9000"
 
       volumes:
         - name: vpn-conf

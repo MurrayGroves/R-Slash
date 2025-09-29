@@ -2,6 +2,7 @@ use crate::helpers::Embeddability::{Embeddable, NeedsProcessing, NotEmbeddable, 
 use crate::{NewPost, PostInList};
 use anyhow::{Context, Error, anyhow};
 use log::error;
+use metrics::counter;
 use mime2ext::mime2ext;
 use post_subscriber::SubscriberClient;
 use redis::AsyncTypedCommands;
@@ -198,6 +199,7 @@ pub async fn process_post_metadata(
         debug!("Post is deleted");
         if exists {
             debug!("Removing post {:?} from DB", post["id"]);
+            counter!("downloader_deleted_posts").increment(1);
             match con
                 .lrem(
                     format!("subreddit:{}:posts", subreddit),
@@ -271,6 +273,7 @@ pub async fn process_post_metadata(
 
     if exists {
         trace!("Post already exists in DB");
+        counter!("downloader_posts_updated").increment(1);
         // Update post's score with new score
         match con
             .hset(&key, "score", post["score"].as_i64().unwrap_or(0))
@@ -380,14 +383,17 @@ pub async fn process_post_metadata(
         embeddability,
     };
 
+    counter!("downloader_new_posts").increment(1);
     if let Embeddability::NeedsProcessing = post_object.embeddability {
         post_list.push(post_object.into());
+        counter!("downloader_new_posts_needs_processing").increment(1);
     } else {
         // If it doesn't need further processing, we can add it right now
         debug!(
             "Adding to redis immediately with key {:?}: {:?}",
             key, post_object
         );
+        counter!("downloader_new_posts_no_processing_needed").increment(1);
 
         // Push post to Redis
         let value = Vec::from(&post_object.post);

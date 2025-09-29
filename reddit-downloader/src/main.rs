@@ -25,16 +25,16 @@ use anyhow::{Context, Error, anyhow};
 
 use redis::{AsyncCommands, FromRedisValue, RedisResult, Value};
 
+use crate::helpers::{Embeddability, process_post_metadata};
 use futures_util::TryStreamExt;
+use metrics::counter;
 use mongodb::bson::{Document, doc};
 use mongodb::options::ClientOptions;
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
-use std::env;
-
-use crate::helpers::{Embeddability, process_post_metadata};
 use rslash_common::{initialise_observability, rpc::RetryingTcpStream, span_filter};
+use std::env;
 use tarpc::{client, context, serde_transport::Transport};
 
 mod downloaders;
@@ -177,6 +177,8 @@ async fn get_subreddit(
         subreddit
     );
 
+    counter!("downloader_subreddits_fetched").increment(1);
+
     let mut existing_posts: Vec<PostInList> = redis::cmd("LRANGE")
         .arg(format!("subreddit:{}:posts", subreddit.clone()))
         .arg(0i64)
@@ -207,6 +209,7 @@ async fn get_subreddit(
         };
 
         debug!("URL: {}", url);
+        counter!("downloader_pages_fetched").increment(1);
 
         let mut ctx = context::current();
         ctx.deadline = std::time::Instant::now() + Duration::from_secs(3600);

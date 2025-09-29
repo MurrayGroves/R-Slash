@@ -7,18 +7,21 @@ edition = "2024"
 
 [dependencies]
 serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", features = [
-	"model",
+    "model",
 ] }
 redis = { version = "0.32", features = ["aio", "tokio-comp"] }
 tokio = { version = "*", features = ["rt-multi-thread"] }
 env_logger = "0.11"
 log = "*"
 mongodb = "*"
+
 tarpc = { version = "*", features = [
-	"serde-transport",
-	"tcp",
-	"serde-transport-bincode",
+    "serde-transport",
+    "tcp",
+    "serde-transport-bincode",
 ] }
+rustls = { version = "0.23", features = ["ring"] }
+
 anyhow = "*"
 futures = "*"
 serde_derive = "*"
@@ -26,10 +29,10 @@ serde = "*"
 chrono = "*"
 
 sentry = { version = "*", features = [
-	"tracing",
-	"anyhow",
-	"debug-images",
-	"tokio",
+    "tracing",
+    "anyhow",
+    "debug-images",
+    "tokio",
 ] }
 
 post_api = { path = "../post-api" }
@@ -43,6 +46,9 @@ opentelemetry-otlp = { version = "0.26", features = ["tonic", "grpc-tonic"] }
 opentelemetry = "0.26"
 opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
 opentelemetry-appender-tracing = "0.26"
+metrics = "*"
+metrics-exporter-prometheus = "*"
+
 serde_json = "1.0.140"
 
 

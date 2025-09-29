@@ -9,6 +9,7 @@ use anyhow::{Context, Error, bail, ensure};
 use async_recursion::async_recursion;
 use ellipse::Ellipse;
 use indoc::indoc;
+use metrics::counter;
 use redis::aio::MultiplexedConnection;
 use redis::{AsyncTypedCommands, from_redis_value};
 use rslash_common::access_tokens::get_reddit_access_token;
@@ -401,6 +402,7 @@ pub async fn get_post_by_id<'a>(
     search: Option<&str>,
     con: &mut MultiplexedConnection,
 ) -> Result<PostInContext, Error> {
+    counter!("postapi_fetched_posts").increment(1);
     let post_id = post_id.to_lowercase();
     debug!("Getting post by ID: {}", post_id);
 

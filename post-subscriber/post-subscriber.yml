@@ -14,8 +14,11 @@ spec:
   replicas: 1
   template:
     metadata:
-        labels:
-            app: post-subscriber
+      labels:
+        app: post-subscriber
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
     spec:
       containers:
         - name: post-subscriber
@@ -23,8 +26,8 @@ spec:
           imagePullPolicy: Always
           tty: true
           ports:
-          - containerPort: 50051
-            name: rpc
+            - containerPort: 50051
+              name: rpc
           env:
             - name: DISCORD_TOKEN_BB
               valueFrom:

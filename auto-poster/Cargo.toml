@@ -13,11 +13,11 @@ env_logger = "0.11"
 log = "*"
 mongodb = "*"
 tarpc = { version = "*", features = [
-	"serde-transport",
-	"tcp",
-	"serde-transport-bincode",
-	"tokio1",
-	"tokio-serde",
+    "serde-transport",
+    "tcp",
+    "serde-transport-bincode",
+    "tokio1",
+    "tokio-serde",
 ] }
 stubborn-io = "*"
 
@@ -31,13 +31,14 @@ chrono = "*"
 timer = "*"
 async-recursion = "*"
 integer-hasher = "*"
-sentry = { version = "0.34", features = [
-	"tracing",
-	"anyhow",
-	"debug-images",
-	"tokio",
-] }
+rustls = { version = "0.23", features = ["ring"] }
 
+sentry = { version = "0.34", features = [
+    "tracing",
+    "anyhow",
+    "debug-images",
+    "tokio",
+] }
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
 tracing-opentelemetry = "0.27"
@@ -46,6 +47,8 @@ tonic = "*"
 opentelemetry = "0.26"
 opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
 opentelemetry-appender-tracing = "0.26"
+metrics-exporter-prometheus = "*"
+metrics = "*"
 
 post_api = { path = "../post-api" }
 rslash_common = { path = "../rslash_common" }

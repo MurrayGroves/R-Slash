@@ -15,6 +15,8 @@ tarpc = { version = "*", features = [
 redis = { version = "0.32", features = ["aio", "tokio-comp"] }
 
 reqwest = "*"
+rustls = { version = "0.23", features = ["ring"] }
+
 serde_json = "*"
 serde = "*"
 
@@ -32,6 +34,8 @@ tonic = "*"
 opentelemetry = "0.26"
 opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
 opentelemetry-appender-tracing = "0.26"
+metrics = "*"
+metrics-exporter-prometheus = "*"
 
 rslash_common = { path = "../rslash_common" }
 futures = "0.3.31"

@@ -6,6 +6,7 @@ use crate::PostInList;
 use crate::helpers::Embeddability;
 use anyhow::{Context, Error, Result, anyhow, bail};
 use base64::Engine;
+use metrics::counter;
 use post_subscriber::SubscriberClient;
 use redis::AsyncCommands;
 use reqwest::StatusCode;
@@ -215,17 +216,21 @@ impl Client {
             {
                 Ok(x) => x,
                 Err(_) => {
+                    counter!("downloader_timed_out_posts").increment(1);
                     warn!("Timeout while processing post: {}", post.post.id);
                     continue;
                 }
             } {
                 Ok(url) => url,
                 Err(e) => {
+                    counter!("downloader_failed_post_processing").increment(1);
                     info!("Error occurred processing {:?}", post);
                     warn!("Failed to process media: {:?}", e);
                     continue;
                 }
             };
+
+            counter!("downloader_processed_posts").increment(1);
 
             if !embed_url.starts_with("http") {
                 embed_url = format!("https://cdn.rsla.sh/gifs/{}", embed_url);

@@ -12,6 +12,7 @@ use lazy_static::lazy_static;
 use redis::AsyncTypedCommands;
 use reqwest::header::HeaderMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use metrics::{counter, histogram};
 
 lazy_static! {
     static ref REDDIT_LIMITER: Limiter = Limiter::new(None, "reddit".to_string());
@@ -319,6 +320,8 @@ impl Limiter {
         };
         if state.remaining < 3 && state.reset > chrono::Utc::now().timestamp() {
             let wait = state.reset - chrono::Utc::now().timestamp();
+            counter!(format!("ratelimit_{}_hit", self.name)).increment(1);
+            histogram!(format!("ratelimit_{}_wait", self.name)).record(wait as f64);
             drop(state);
             info!("Waiting {} seconds for rate limit on {}", wait, self.name);
             tokio::time::sleep(Duration::from_secs(wait as u64)).await;

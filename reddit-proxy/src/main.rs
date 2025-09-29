@@ -16,6 +16,7 @@ use tarpc::server::Channel;
 use tarpc::tokio_serde::formats::Bincode;
 
 use futures::StreamExt;
+use metrics::counter;
 use tokio::spawn;
 
 use tokio::time::Instant;
@@ -58,6 +59,7 @@ impl RedditProxy for RedditProxyServer {
         let start_time = Instant::now();
         debug!("Starting req for URL: {}", url);
         self.limiter.wait().await;
+        counter!("redditproxy_sent_requests").increment(1);
         let resp = match self
             .attach_auth_token(self.web_client.get(&url))
             .await?
@@ -68,6 +70,10 @@ impl RedditProxy for RedditProxyServer {
             Err(e) => {
                 return Err(RequestError(e.to_string()));
             }
+        };
+
+        if let Err(e) = self.limiter.update_headers(resp.headers(), resp.status()).await {
+            warn!("{e} while updating rate limit from headers");
         };
 
         let resp = match resp.text().await {
@@ -88,6 +94,7 @@ impl RedditProxy for RedditProxyServer {
         _: Context,
         subreddit: String,
     ) -> Result<SubredditStatus, RedditProxyError> {
+        counter!("redditproxy_sent_requests").increment(1);
         let res = match self
             .attach_auth_token(
                 self.web_client

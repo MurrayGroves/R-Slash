@@ -22,7 +22,7 @@ use std::{env, iter};
 use tokio::sync::{Mutex, RwLock};
 
 use futures::future::{self};
-
+use metrics::counter;
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
@@ -126,6 +126,7 @@ impl AutoPostServer {
     #[instrument(skip(self))]
     pub async fn add_autopost(self, autopost: Arc<UnsafeMemory>) {
         info!("Adding autopost {:?}", autopost);
+        counter!("autoposter_added_autoposts").increment(1);
 
         let coll = self
             .db
@@ -168,6 +169,7 @@ impl AutoPostServer {
         id: i64,
     ) -> Result<PostMemory, String> {
         info!("Deleting autopost {}", id);
+        counter!("autoposter_deleted_autoposts_by_user").increment(1);
 
         let coll: mongodb::Collection<PostMemory> =
             self.db.database("state").collection("autoposts");

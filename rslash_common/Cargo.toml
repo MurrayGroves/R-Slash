@@ -23,6 +23,9 @@ tonic = "*"
 opentelemetry = "0.26"
 opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
 opentelemetry-appender-tracing = "0.26"
+metrics = "*"
+metrics-exporter-prometheus = "*"
+
 reqwest = "0.12.18"
 chrono = "0.4.41"
 lazy_static = "1.5.0"

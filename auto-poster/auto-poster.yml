@@ -16,6 +16,9 @@ spec:
     metadata:
       labels:
         app: auto-poster
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
     spec:
       containers:
         - name: auto-poster
@@ -37,6 +40,12 @@ spec:
                 secretKeyRef:
                   name: discord-credentials
                   key: DISCORD_TOKEN_RS
+
+            - name: DISCORD_TOKEN_291255986742624256
+              valueFrom:
+                secretKeyRef:
+                  name: discord-credentials
+                  key: DISCORD_TOKEN_TESTING
 
             - name: MONGO_URL
               value: mongodb://r-slash:r-slash@mongodb-primary.discord-bot-shared.svc.cluster.local/admin?ssl=false

@@ -23,7 +23,10 @@ tokio = { version = "*", features = [
     "time",
     "full",
 ] }
+
 reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"] }
+rustls = { version = "0.23", features = ["ring"] }
+
 serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", default-features = false, features = [
     "cache",
     "gateway",
@@ -59,7 +62,8 @@ tonic = "*"
 opentelemetry = "0.26"
 opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
 opentelemetry-appender-tracing = "0.26"
-
+metrics = "*"
+metrics-exporter-prometheus = "*"
 
 compile-time = "*"
 chrono = "*"

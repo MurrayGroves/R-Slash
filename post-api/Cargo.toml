@@ -48,7 +48,8 @@ sentry = { version = "0.29.3", features = [
     "debug-images",
 ] }
 tracing = "*"
-tracing-subscriber = { version = "*" }
+metrics = "*"
+
 compile-time = "*"
 chrono = "*"
 async-recursion = "*"

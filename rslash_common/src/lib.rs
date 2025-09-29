@@ -234,6 +234,11 @@ pub fn error_message<'a>(error_title: String, error_desc: String) -> CreateMessa
 macro_rules! initialise_observability {
 	($service_name: literal) => {initialise_observability!($service_name,)};
     ($service_name:literal, $(($key:literal, $value:ident),)*) => {
+        rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
+
+        let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
+        builder.install().expect("Failed to install Prometheus exporter");
+
         let trace_exporter = opentelemetry_otlp::SpanExporterBuilder::Tonic(opentelemetry_otlp::TonicExporterBuilder::default().with_endpoint("http://100.67.30.19:4317"))
             .build_span_exporter().expect("Failed to create trace exporter");
 
@@ -517,11 +522,7 @@ pub async fn get_post_content_type(
         .await?;
 
     let has_media = if let Some(urls) = media {
-        if urls.is_empty() {
-            false
-        } else {
-            true
-        }
+        if urls.is_empty() { false } else { true }
     } else {
         false
     };
