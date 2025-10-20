@@ -1,5 +1,5 @@
-use crate::{AutoPostServer, UnsafeMemory};
-use auto_poster::PostMemory;
+use crate::AutoPostServer;
+use auto_poster::{check_ordered, MemoryRef, PostMemory};
 use metrics::{counter, gauge, histogram};
 use mongodb::bson::doc;
 use post_api::{optional_post_to_message, queue_subreddit, PostApiError};
@@ -11,7 +11,7 @@ use tarpc::context::Context;
 use tokio::{select, time::Instant};
 use tracing::{debug, error, warn};
 
-async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<UnsafeMemory>) {
+async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<MemoryRef>) {
     let coll: mongodb::Collection<PostMemory> = server.db.database("state").collection("autoposts");
     counter!("autoposter_deleted_autoposts_by_system").increment(1);
 
@@ -109,44 +109,53 @@ pub async fn timer_loop(
             let autoposts = server.autoposts.read().await;
             if let Some(memory) = autoposts.queue.peek() {
                 let now = Instant::now();
-                if memory.next_post <= now {
-                    debug!("Running {:?} behind", now - memory.next_post);
-                    histogram!("autoposter_post_delay").record(now - memory.next_post);
-
-                    // Get next autopost from queue, removing it from the queue
-                    drop(autoposts);
-                    let mut autoposts = server.autoposts.write().await;
-                    let autopost = match autoposts.queue.pop() {
-                        Some(x) => x,
-                        None => {
-                            continue;
-                        }
-                    };
+                if memory.next() <= now {
+                    debug!("Running {:?} behind", now - memory.next());
+                    histogram!("autoposter_post_delay").record(now - memory.next());
                     drop(autoposts);
 
-                    debug!("Posting autopost: {:?}", autopost);
-                    counter!("autoposter_attempted_posts").increment(1);
-
-                    let channel = autopost.channel.clone();
-
-                    let bot = autopost.bot.clone();
-
-                    let http = server.discords[&bot].clone();
-                    let autopost_clone = autopost.clone();
-                    let redis = server.redis.clone();
+                    // Used to ensure loop waits until task has popped from queue before continuing
+                    let (tx, rx) = tokio::sync::oneshot::channel();
                     let server_clone = server.clone();
-
-                    let is_custom = !server.default_subs.contains(&autopost.subreddit);
                     // Spawn task to post the autopost
                     tokio::spawn(async move {
                         let mut server = server_clone;
 
+                        // Get next autopost from queue, removing it from the queue
+                        let mut autoposts = server.autoposts.write().await;
+                        let autopost: Arc<MemoryRef> = match autoposts.queue.pop() {
+                            Some(x) => x,
+                            None => {
+                                if let Err(_) = tx.send(()) {
+                                    error!("Timer loop receiver dropped!");
+                                };
+                                return;
+                            }
+                        };
+
+                        if let Err(_) = tx.send(()) {
+                            error!("Timer loop receiver dropped!");
+                        };
+
+                        let autopost_guard = autopost.lock().await;
+                        drop(autoposts);
+                        debug!("Posting autopost: {:?}", autopost);
+                        counter!("autoposter_attempted_posts").increment(1);
+
+                        let channel = autopost.channel.clone();
+
+                        let bot = autopost.bot.clone();
+
+                        let http = server.discords[&bot].clone();
+
+                        let is_custom = !server.default_subs.contains(&autopost.subreddit);
+
                         // Queue subreddit for downloading if it's a custom subreddit
                         if is_custom {
                             match queue_subreddit(
-                                &autopost_clone.subreddit,
-                                &mut redis.clone(),
-                                autopost_clone.bot,
+                                &autopost.subreddit,
+                                &mut server.redis,
+                                autopost.bot,
                             )
                             .await
                             {
@@ -159,21 +168,21 @@ pub async fn timer_loop(
 
                         // Get subreddit post
                         let message: Result<CreateMessage, anyhow::Error> =
-                            if let Some(search) = autopost_clone.search.clone() {
+                            if let Some(search) = autopost.search.clone() {
                                 post_api::get_subreddit_search(
-                                    &autopost_clone.subreddit,
+                                    &autopost.subreddit,
                                     &search,
                                     &mut server.redis,
-                                    autopost_clone.channel.widen(),
+                                    autopost.channel.widen(),
                                 )
                                 .await
                                 .map(|post| optional_post_to_message(post, false))
                             } else {
                                 post_api::get_subreddit(
-                                    &autopost_clone.subreddit,
+                                    &autopost.subreddit,
                                     &mut server.redis,
                                     &mut server.db,
-                                    autopost_clone.channel.widen(),
+                                    autopost.channel.widen(),
                                     Some(0),
                                 )
                                 .await
@@ -186,19 +195,14 @@ pub async fn timer_loop(
                             Ok(x) => x,
                             Err(e) => {
                                 warn!("Error getting subreddit for autopost: {}", e);
-                                delete_auto_post(&server, autopost_clone.clone()).await;
+                                let subreddit = autopost.subreddit.clone();
                                 failed = true;
 
-                                post_error_to_message(
-                                    &server.reddit_proxy,
-                                    e,
-                                    &autopost_clone.subreddit.clone(),
-                                )
-                                .await
+                                post_error_to_message(&server.reddit_proxy, e, &subreddit).await
                             }
                         };
 
-                        debug!("Sending message: {:?}", message);
+                        debug!("Sending message: {:?} for autopost {:?}", message, autopost);
                         let message_send_result =
                             channel.widen().send_message(&*http, message).await;
                         debug!("Sent message");
@@ -210,7 +214,6 @@ pub async fn timer_loop(
                                 if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
                                     // Unknown channel (we got removed from server)
                                     if e.error.code.0 == 10003 {
-                                        delete_auto_post(&server, autopost.clone()).await;
                                         counter!("autoposter_missing_channel").increment(1);
                                         failed = true;
                                     }
@@ -223,54 +226,61 @@ pub async fn timer_loop(
                             counter!("autoposter_sent_messages").increment(1);
                         }
 
-                        // If we succeeded in sending the message, or it failed due to a temporary error, re-add the autopost to the queue
+                        // If we succeeded in sending the message, or it failed due to a temporary error
                         if !failed {
-                            // Re-add autopost to queue if it hasn't reached its limit
+                            autopost.increment(&autopost_guard);
+
+                            // Delete autopost if exceeded limit
                             if let Some(limit) = autopost.limit {
-                                let autoposts = server.autoposts.write().await;
-                                autopost.deref().get_mut().current += 1;
-                                drop(autoposts);
-                                if autopost.current < limit {
-                                    let mut autoposts = server.autoposts.write().await;
-                                    autopost.deref().get_mut().next_post =
-                                        Instant::now() + autopost.interval;
-                                    autoposts.queue.push(autopost.clone());
-                                    let waiting_until = server.waiting_until.read().await;
-                                    if autopost.next_post < *waiting_until {
-                                        debug!("Next post is sooner than waiting until, updating waiting until");
-                                        drop(waiting_until);
-                                        *server.waiting_until.write().await = autopost.next_post;
-                                        server.sender.send(()).await.unwrap();
-                                    }
-                                } else {
-                                    delete_auto_post(&server, autopost.clone()).await;
+                                if autopost.current() >= limit {
+                                    drop(autopost_guard);
+                                    delete_auto_post(&server, autopost).await;
+                                    return;
                                 }
-                            } else {
-                                let mut autoposts = server.autoposts.write().await;
-                                autopost.deref().get_mut().current += 1;
-                                autopost.deref().get_mut().next_post =
-                                    Instant::now() + autopost.interval;
-                                let waiting_until = server.waiting_until.read().await;
-                                if autopost.next_post < *waiting_until {
-                                    debug!("Next post is sooner than waiting until, updating waiting until");
-                                    drop(waiting_until);
-                                    *server.waiting_until.write().await = autopost.next_post;
-                                    server.sender.send(()).await.unwrap();
-                                }
-                                autoposts.queue.push(autopost.clone());
-                            };
-                        };
+                            }
+
+                            // Add back to queue
+                            let next = autopost.next();
+                            debug!(
+                                "Next occurrence of current post {:?} is in {:?}",
+                                autopost,
+                                next - Instant::now()
+                            );
+
+                            let mut autoposts = server.autoposts.write().await;
+                            drop(autopost_guard);
+                            autoposts.queue.push(autopost);
+                            drop(autoposts);
+
+                            debug!("Re-added autopost to queue");
+
+                            let waiting_until = server.waiting_until.read().await;
+                            if next < *waiting_until {
+                                debug!("Next post is sooner than waiting until, updating waiting until");
+                                drop(waiting_until);
+                                *server.waiting_until.write().await = next;
+                                server.sender.send(()).await.unwrap();
+                            }
+                        } else {
+                            drop(autopost_guard); // Must be dropped, or deletion won't be able to get it!
+                            delete_auto_post(&server, autopost).await;
+                        }
                     });
+
+                    if let Err(_) = rx.await {
+                        error!("Timer loop task sender dropped!");
+                    };
 
                     // Calculate time to sleep to next post
                     let autoposts = server.autoposts.read().await;
                     if let Some(next) = autoposts.queue.peek() {
+                        check_ordered(&autoposts.queue);
                         debug!("Next post: {:?}", next);
-                        debug!("Next post in: {:?}", next.next_post - Instant::now());
+                        debug!("Next post in: {:?}", next.next() - Instant::now());
                         debug!("Now: {:?}", Instant::now());
                         let mut waiting_until = server.waiting_until.write().await;
-                        *waiting_until = next.next_post;
-                        next.next_post - Instant::now()
+                        *waiting_until = next.next();
+                        next.next() - Instant::now()
                     } else {
                         let mut waiting_until = server.waiting_until.write().await;
                         *waiting_until = Instant::now() + Duration::from_secs(3600);
@@ -279,9 +289,17 @@ pub async fn timer_loop(
                 } else {
                     // We woke up too early and need to sleep more
                     counter!("autoposter_early_wakeups").increment(1);
-                    let to_return = memory.next_post - now;
+                    let to_return = memory.next() - now;
+                    debug!(
+                        "Woke up {:?} too early, it's now {:?} and next is {:?}",
+                        to_return,
+                        now,
+                        memory.next()
+                    );
+                    check_ordered(&autoposts.queue);
+                    histogram!("autoposter_early_wakeup_secs").record(to_return.as_secs_f64());
                     let mut waiting_until = server.waiting_until.write().await;
-                    *waiting_until = memory.next_post;
+                    *waiting_until = memory.next();
                     drop(autoposts);
                     to_return
                 }

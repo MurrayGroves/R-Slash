@@ -35,7 +35,7 @@ use serenity::all::{
 };
 use serenity::builder::CreateComponent;
 use tokio::time::Instant;
-use tracing::debug;
+use tracing::{debug, trace};
 
 #[derive(Debug, Clone)]
 pub struct InteractionResponseMessage<'a> {
@@ -513,7 +513,7 @@ pub async fn get_post_content_type(
     con: &mut MultiplexedConnection,
     post_id: &str,
 ) -> Result<TextAllowLevel, anyhow::Error> {
-    debug!("Getting content type for {:?}", post_id);
+    trace!("Getting content type for {:?}", post_id);
     let (media, text, linked_url): (Option<String>, Option<String>, Option<String>) = redis::pipe()
         .hget(post_id, "embed_url")
         .hget(post_id, "text")

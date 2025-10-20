@@ -1,18 +1,19 @@
 #![feature(sync_unsafe_cell)]
+#![feature(ptr_as_ref_unchecked)]
 
 use futures::{Future, StreamExt, TryStreamExt};
 use mongodb::bson::{doc, Document};
 use mongodb::options::ClientOptions;
 use redis::AsyncTypedCommands;
 use rslash_common::rpc::RetryingTcpStream;
-use rslash_common::span_filter;
+use rslash_common::{span_filter, Post};
 use serenity::all::{ChannelId, GatewayIntents, Http};
 use serenity::{all::EventHandler, async_trait};
 use stubborn_io::{ReconnectOptions, StubbornTcpStream};
 use tarpc::Transport;
 use tokio::time::{Duration, Instant};
 
-use std::cell::SyncUnsafeCell;
+use std::cell::{SyncUnsafeCell, UnsafeCell};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
@@ -39,75 +40,16 @@ use tarpc::{
 use tracing::instrument;
 use tracing::{debug, error, info, warn};
 
-use auto_poster::{AutoPoster, PostMemory};
+use auto_poster::{AutoPoster, MemoryRef, PostMemory};
 use reddit_proxy::RedditProxyClient;
 
 use rslash_common::initialise_observability;
 
 mod timer_loop;
 
-struct UnsafeMemory(SyncUnsafeCell<PostMemory>);
-
-impl Debug for UnsafeMemory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        unsafe {
-            let post_memory = &*self.0.get();
-            post_memory.fmt(f)
-        }
-    }
-}
-
-impl Hash for UnsafeMemory {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.get().hash(state);
-    }
-}
-
-impl PartialEq for UnsafeMemory {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.get() == other.0.get()
-    }
-}
-
-impl Eq for UnsafeMemory {}
-
-impl Ord for UnsafeMemory {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        unsafe { (&*(self.0.get())).cmp(&*(other.0.get())) }
-    }
-}
-
-impl PartialOrd for UnsafeMemory {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Deref for UnsafeMemory {
-    type Target = PostMemory;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*(self.0.get()) }
-    }
-}
-
-impl UnsafeMemory {
-    pub fn into_inner(self) -> PostMemory {
-        self.0.into_inner()
-    }
-
-    pub fn new(value: PostMemory) -> Self {
-        Self(SyncUnsafeCell::new(value))
-    }
-
-    pub fn get_mut(&self) -> &mut PostMemory {
-        unsafe { &mut *(self.0.get()) }
-    }
-}
-
 struct AutoPosts {
-    by_channel: HashMap<ChannelId, HashSet<Arc<UnsafeMemory>>>,
-    queue: BinaryHeap<Arc<UnsafeMemory>>,
+    by_channel: HashMap<ChannelId, HashSet<Arc<MemoryRef>>>,
+    queue: BinaryHeap<Arc<MemoryRef>>,
 }
 
 #[derive(Clone)]
@@ -124,7 +66,7 @@ struct AutoPostServer {
 
 impl AutoPostServer {
     #[instrument(skip(self))]
-    pub async fn add_autopost(self, autopost: Arc<UnsafeMemory>) {
+    pub async fn add_autopost(self, autopost: Arc<MemoryRef>) {
         info!("Adding autopost {:?}", autopost);
         counter!("autoposter_added_autoposts").increment(1);
 
@@ -138,14 +80,15 @@ impl AutoPostServer {
 
         debug!("Inserted autopost into database");
 
-        let next = (*autopost).next_post;
+        let next = autopost.next();
+
         let mut autoposts = self.autoposts.write().await;
         autoposts.queue.push(autopost);
 
         if let Some(first) = autoposts.queue.peek() {
             debug!("First autopost in queue: {:?}", first);
             debug!("Next post for post we're adding: {:?}", next);
-            if first.next_post >= next {
+            if first.next() >= next {
                 drop(autoposts);
                 debug!("Updating timer from add_autopost");
                 match self.sender.send(()).await {
@@ -162,12 +105,13 @@ impl AutoPostServer {
         debug!("Finished adding autopost");
     }
 
+    /// Returns `Some` if the post existed to be deleted, or `None` if it was already deleted.
     #[instrument(skip(self))]
     pub async fn delete_autopost(
         self,
         channel_id: ChannelId,
         id: i64,
-    ) -> Result<PostMemory, String> {
+    ) -> Result<Option<PostMemory>, String> {
         info!("Deleting autopost {}", id);
         counter!("autoposter_deleted_autoposts_by_user").increment(1);
 
@@ -188,23 +132,26 @@ impl AutoPostServer {
         let by_channel = match autoposts.by_channel.get_mut(&channel_id) {
             Some(x) => x,
             None => {
-                warn!(
+                // Happens if autopost has been deleted already, and there are no other autoposts
+                info!(
                     "Tried to delete autopost with id {} but channel doesn't exist",
                     id
                 );
-                return Err("Tried to delete autopost but channel doesn't exist".to_string());
+                return Ok(None);
             }
         };
         let autopost = match by_channel.iter().find(|x| x.id == id) {
             Some(x) => x.clone(),
             None => {
-                warn!(
+                // Happens if autopost has been deleted already, and there are other autoposts
+                info!(
                     "Tried to delete autopost with id {} but it doesn't exist",
                     id
                 );
-                return Err("Tried to delete autopost but it doesn't exist".to_string());
+                return Ok(None);
             }
         };
+        let _lock = autopost.lock().await;
         by_channel.remove(&autopost);
         if by_channel.is_empty() {
             autoposts.by_channel.remove(&autopost.channel);
@@ -214,9 +161,14 @@ impl AutoPostServer {
         let queue = &mut autoposts.queue;
         queue.retain(|element| element.id != id);
 
-        Ok(Arc::into_inner(autopost)
-            .ok_or("Failed to take ownership of PostMemory".to_string())?
-            .into_inner())
+        if Arc::strong_count(&autopost) != 1 {
+            error!(
+                "Deleting autopost with strong count of {}",
+                Arc::strong_count(&autopost)
+            );
+        }
+
+        Ok(Some(autopost.clone_inner()))
     }
 }
 
@@ -245,13 +197,13 @@ impl AutoPoster for AutoPostServer {
             limit,
             search,
             bot,
-            current: 0,
-            next_post: tokio::time::Instant::now() + interval,
             id: interaction_id as i64,
         };
 
+        debug!("Waiting for write lock");
         let mut autoposts = self.autoposts.write().await;
-        let memory = Arc::new(UnsafeMemory::new(memory));
+        debug!("Write lock acquired");
+        let memory = Arc::new(MemoryRef::new(memory));
         autoposts
             .by_channel
             .entry(channel.into())
@@ -270,7 +222,7 @@ impl AutoPoster for AutoPostServer {
         _: tarpc::context::Context,
         id: i64,
         channel_id: u64,
-    ) -> Result<PostMemory, String> {
+    ) -> Result<Option<PostMemory>, String> {
         self.delete_autopost(ChannelId::new(channel_id), id).await
     }
 
@@ -360,9 +312,8 @@ async fn main() {
     let mut by_channel = HashMap::new();
     let mut queue = BinaryHeap::new();
 
-    for mut sub in existing_subs {
-        sub.next_post = sub.next_post + sub.interval;
-        let sub = Arc::new(UnsafeMemory::new(sub));
+    for sub in existing_subs {
+        let sub = Arc::new(MemoryRef::new(sub));
         by_channel
             .entry(sub.channel.clone())
             .or_insert_with(HashSet::new)

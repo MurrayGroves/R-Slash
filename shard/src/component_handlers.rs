@@ -100,6 +100,18 @@ pub async fn autopost_cancel<'a>(
         }
     };
 
+    let autopost = if let Some(autopost) = autopost {
+        autopost
+    } else {
+        return tracker
+            .send_response(CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::default()
+                    .content("You already stopped this autopost.")
+                    .ephemeral(true),
+            ))
+            .await;
+    };
+
     let fancy_text = format!(
         "r/{} - {}, every {} up to {} times",
         autopost.subreddit,
