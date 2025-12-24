@@ -235,6 +235,7 @@ async fn get_subreddit(
             Err(e) => {
                 let txt = format!("Failed to decode JSON from Reddit response: {}", e);
                 warn!("{}", txt);
+                warn!("{}", text);
                 sentry::capture_message(&txt, sentry::Level::Warning);
                 return Ok((SubredditExists::Exists, after));
             }

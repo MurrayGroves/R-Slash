@@ -71,11 +71,11 @@ pub async fn autopost_create<'a>(
         Some(x) => match x.parse::<u32>() {
             Ok(x) => Some(x),
             Err(_) => {
-                if x == "infinite" && is_premium {
+                if x.to_lowercase() == "infinite" && is_premium {
                     None
                 } else {
                     debug!("Invalid limit: {:?}", x);
-                    let error_message = if x == "infinite" {
+                    let error_message = if x.to_lowercase() == "infinite" {
                         "You must be a premium user to set the limit to infinite.\n[Buy Premium](https://ko-fi.com/rslash)"
                     } else {
                         "Invalid limit, must be a number."
