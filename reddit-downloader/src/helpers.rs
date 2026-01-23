@@ -10,11 +10,13 @@ use rslash_common::Post;
 use sentry::TransactionOrSpan;
 use serde_json::Value::Null;
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::time::Duration;
 use tarpc::context;
 use tl::ParserOptions;
 use tracing::{debug, trace, warn};
 use truncrate::TruncateToBoundary;
+use user_config_manager::TextAllowLevel;
 
 /// Extract the i.redd.it URL from a media metadata item.
 fn extract_i_reddit_url(metadata: &Value) -> Result<String, Error> {
@@ -149,8 +151,8 @@ pub async fn process_post_metadata(
     con: &mut redis::aio::MultiplexedConnection,
     subscriber: SubscriberClient,
     web_client: &reqwest::Client,
-    existing_posts: &mut Vec<PostInList>,
-    post_list: &mut Vec<PostInList>,
+    existing_posts: &mut PostLists,
+    post_list: &mut PostLists,
     subreddit: &str,
 ) -> Result<(), Error> {
     // Create a new transaction as an independent continuation
@@ -187,22 +189,22 @@ pub async fn process_post_metadata(
         *subreddit_name = Some(post["subreddit"].to_string().replace("\"", ""));
     }
 
-    let exists = existing_posts.iter().any(|x| match x {
-        PostInList::Existing(x) => x == &key,
-        _ => false,
-    });
+    let existing_allow_level = existing_posts.get_post_type(PostInList::Existing(key.clone()));
+
+    let exists = existing_allow_level.is_some();
 
     // If the post has been removed by a moderator, remove it from the DB and skip it
     if post.get("removed_by_category").unwrap_or(&Null) != &Null
         || post["author"].to_string().replace('"', "") == "[deleted]"
     {
         debug!("Post is deleted");
-        if exists {
+        // If post exists already
+        if let Some(level) = existing_allow_level {
             debug!("Removing post {:?} from DB", post["id"]);
             counter!("downloader_deleted_posts").increment(1);
             match con
                 .lrem(
-                    format!("subreddit:{}:posts", subreddit),
+                    format!("subreddit:{}:posts:{}", subreddit, level),
                     0,
                     format!(
                         "subreddit:{}:post:{}",
@@ -242,13 +244,10 @@ pub async fn process_post_metadata(
                 }
             };
 
-            existing_posts.retain(|x| {
-                if let PostInList::Existing(x) = x {
-                    x != &key
-                } else {
-                    false
-                }
-            });
+            // Remove post from list of existing posts, so it will get removed when the list is sent back to Redis
+            let posts = existing_posts.get_mut(level);
+            let index = posts.iter().position(|post| post.key() == &key).unwrap();
+            posts.remove(index);
         }
 
         // Post has been removed, so we don't need to process it further
@@ -271,7 +270,8 @@ pub async fn process_post_metadata(
         warn!("{}", txt);
     }
 
-    if exists {
+    // Post already exists
+    if let Some(level) = existing_allow_level {
         trace!("Post already exists in DB");
         counter!("downloader_posts_updated").increment(1);
         // Update post's score with new score
@@ -287,7 +287,11 @@ pub async fn process_post_metadata(
             }
         };
 
-        post_list.push(key.into());
+        // Move post from existing list to list of posts still in front pages
+        let post = key.into();
+        let existing = existing_posts.get_mut(level);
+        existing.remove(existing.iter().position(|x| x == &post).unwrap());
+        post_list.get_mut(level).push(post);
         return Ok(());
     }
 
@@ -385,7 +389,9 @@ pub async fn process_post_metadata(
 
     counter!("downloader_new_posts").increment(1);
     if let Embeddability::NeedsProcessing = post_object.embeddability {
-        post_list.push(post_object.into());
+        post_list
+            .get_mut(post_object.post.get_text_level())
+            .push(post_object.into());
         counter!("downloader_new_posts_needs_processing").increment(1);
     } else {
         // If it doesn't need further processing, we can add it right now
@@ -423,41 +429,116 @@ pub async fn process_post_metadata(
             }
         };
 
-        post_list.push(post_object.into());
-
-        // Get new list of post keys (existing posts + new posts that don't need processing)
-        let mut post_keys: Vec<&String> = post_list
-            .iter()
-            .filter(|p| match p {
-                PostInList::New(p) => p.embeddability != Embeddability::NeedsProcessing,
-                PostInList::Existing(_) => true,
-            })
-            .map(|p| match p {
-                PostInList::New(p) => &p.redis_key,
-                PostInList::Existing(key) => &key,
-            })
-            .collect();
-
-        // Append post_list with existing posts that aren't in the current fetch
-        let existing_posts: Vec<String> = existing_posts
-            .iter()
-            .map(|x| match x {
-                PostInList::Existing(x) => x.clone(),
-                PostInList::New(x) => x.redis_key.clone(),
-            })
-            .filter(|x| !post_keys.contains(&x))
-            .collect();
-        post_keys = post_keys.into_iter().chain(existing_posts.iter()).collect();
-
-        // Update redis with new post keys
-        redis::pipe()
-            .atomic()
-            .del::<String>(format!("subreddit:{}:posts", subreddit))
-            .rpush::<String, Vec<&String>>(format!("subreddit:{}:posts", subreddit), post_keys)
-            .query_async::<()>(con)
-            .await?;
+        push_post_to_redis(con, existing_posts, post_list, subreddit, post_object).await?;
     }
 
     transaction.finish();
     Ok(())
+}
+
+pub async fn push_post_to_redis(
+    redis: &mut redis::aio::MultiplexedConnection,
+    existing_posts: &mut PostLists,
+    new_posts: &mut PostLists,
+    subreddit: &str,
+    post: NewPost,
+) -> Result<(), Error> {
+    let all_new_posts = new_posts.get_mut(TextAllowLevel::Both);
+    all_new_posts.push(post.clone().into());
+
+    let post_keys = all_new_posts
+        .iter()
+        .chain(existing_posts.get(TextAllowLevel::Both))
+        .filter(|post| {
+            if let PostInList::New(post) = post {
+                post.embeddability != NeedsProcessing
+            } else {
+                true
+            }
+        })
+        .map(|post| post.key())
+        .collect();
+
+    let mut pipe = redis::pipe();
+
+    pipe.atomic()
+        .del(format!("subreddit:{}:posts:both", subreddit))
+        .rpush::<String, Vec<&String>>(format!("subreddit:{}:posts:both", subreddit), post_keys);
+
+    match post.post.get_text_level() {
+        TextAllowLevel::Both => {}
+        level => {
+            let key = format!("subreddit:{}:posts:{}", subreddit, level);
+            let all_new_posts = new_posts.get_mut(TextAllowLevel::Both);
+            all_new_posts.push(post.clone().into());
+
+            let post_keys = all_new_posts
+                .iter()
+                .chain(existing_posts.get(level))
+                .filter(|post| {
+                    if let PostInList::New(post) = post {
+                        post.embeddability != NeedsProcessing
+                    } else {
+                        true
+                    }
+                })
+                .map(|post| post.key())
+                .collect();
+            pipe.del(&key).rpush::<String, Vec<&String>>(key, post_keys);
+        }
+    }
+
+    Ok(pipe.query_async::<()>(redis).await?)
+}
+
+/// List of posts by text allow level
+pub struct PostLists {
+    pub both: Vec<PostInList>,
+    pub text_only: Vec<PostInList>,
+    pub media_only: Vec<PostInList>,
+}
+
+impl PostLists {
+    pub fn get_mut(&mut self, level: TextAllowLevel) -> &mut Vec<PostInList> {
+        match level {
+            TextAllowLevel::TextOnly => &mut self.text_only,
+            TextAllowLevel::MediaOnly => &mut self.media_only,
+            TextAllowLevel::Both => &mut self.both,
+        }
+    }
+
+    pub fn get(&self, level: TextAllowLevel) -> &Vec<PostInList> {
+        match level {
+            TextAllowLevel::TextOnly => &self.text_only,
+            TextAllowLevel::MediaOnly => &self.media_only,
+            TextAllowLevel::Both => &self.both,
+        }
+    }
+    pub fn get_post_type(&self, post: PostInList) -> Option<TextAllowLevel> {
+        if self.both.contains(&post) {
+            return Some(TextAllowLevel::Both);
+        }
+        if self.text_only.contains(&post) {
+            return Some(TextAllowLevel::TextOnly);
+        }
+        if self.media_only.contains(&post) {
+            return Some(TextAllowLevel::MediaOnly);
+        }
+        None
+    }
+
+    /// Append other onto self
+    pub fn append(&mut self, mut other: Self) {
+        self.both.append(&mut other.both);
+        self.media_only.append(&mut other.media_only);
+        self.text_only.append(&mut other.text_only);
+    }
+
+    pub fn new() -> Self {
+        Self {
+            both: Vec::with_capacity(1000),
+            media_only: Vec::with_capacity(1000),
+            text_only: Vec::with_capacity(1000),
+        }
+    }
 }

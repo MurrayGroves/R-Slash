@@ -25,7 +25,7 @@ use anyhow::{Context, Error, anyhow};
 
 use redis::{AsyncCommands, FromRedisValue, RedisResult, Value};
 
-use crate::helpers::{Embeddability, process_post_metadata};
+use crate::helpers::{Embeddability, PostLists, process_post_metadata};
 use futures_util::TryStreamExt;
 use metrics::counter;
 use mongodb::bson::{Document, doc};
@@ -105,6 +105,15 @@ pub enum PostInList {
     New(NewPost),
 }
 
+impl PostInList {
+    pub fn key(&self) -> &String {
+        match self {
+            PostInList::Existing(x) => x,
+            PostInList::New(x) => &x.redis_key,
+        }
+    }
+}
+
 impl FromRedisValue for PostInList {
     fn from_redis_value(v: &Value) -> RedisResult<Self> {
         match v {
@@ -179,16 +188,29 @@ async fn get_subreddit(
 
     counter!("downloader_subreddits_fetched").increment(1);
 
-    let mut existing_posts: Vec<PostInList> = redis::cmd("LRANGE")
-        .arg(format!("subreddit:{}:posts", subreddit.clone()))
+    let (both, media_only, text_only) = redis::pipe()
+        .cmd("LRANGE")
+        .arg(format!("subreddit:{}:posts:both", subreddit.clone()))
+        .arg(0i64)
+        .arg(-1i64)
+        .cmd("LRANGE")
+        .arg(format!("subreddit:{}:posts:media", subreddit.clone()))
+        .arg(0i64)
+        .arg(-1i64)
+        .cmd("LRANGE")
+        .arg(format!("subreddit:{}:posts:text", subreddit.clone()))
         .arg(0i64)
         .arg(-1i64)
         .query_async(con)
         .await
         .context("Getting existing posts")?;
+    let mut existing_posts = PostLists {
+        both,
+        media_only,
+        text_only,
+    };
 
-    let mut post_list: Vec<PostInList> = Vec::new();
-    post_list.reserve(existing_posts.len() + 1000);
+    let mut post_list = PostLists::new();
 
     let mut subreddit_name = None;
 
@@ -338,15 +360,7 @@ async fn get_subreddit(
         }
     }
 
-    // Append post_list with existing posts that aren't in the current fetch
-    let existing_posts: Vec<PostInList> = existing_posts
-        .into_iter()
-        .filter(|x| !post_list.contains(x))
-        .collect();
-    post_list = post_list
-        .into_iter()
-        .chain(existing_posts.into_iter())
-        .collect();
+    post_list.append(existing_posts);
 
     if let Some(subreddit_name) = subreddit_name {
         // Add to processing queue

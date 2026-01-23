@@ -3,6 +3,7 @@ use mongodb::bson::doc;
 use mongodb::options::FindOptions;
 use serde::{Deserialize, Serialize};
 use serenity::all::{ChannelId, GuildId};
+use std::fmt::Display;
 
 use anyhow::Result;
 
@@ -57,7 +58,7 @@ pub async fn save_guild_config(mongodb: Client, config: GuildConfig) -> Result<(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Debug, Hash)]
 pub enum TextAllowLevel {
     /// Text includes link posts
     TextOnly,
@@ -68,6 +69,17 @@ pub enum TextAllowLevel {
 impl Default for TextAllowLevel {
     fn default() -> Self {
         TextAllowLevel::MediaOnly
+    }
+}
+
+impl Display for TextAllowLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let str = match self {
+            TextAllowLevel::Both => "both".to_string(),
+            TextAllowLevel::TextOnly => "text".to_string(),
+            TextAllowLevel::MediaOnly => "media".to_string(),
+        };
+        write!(f, "{}", str)
     }
 }
 

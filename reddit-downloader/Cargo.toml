@@ -76,6 +76,7 @@ lazy_static = "*"
 post_subscriber = { path = "../post-subscriber" }
 rslash_common = { path = "../rslash_common" }
 reddit-proxy = { path = "../reddit-proxy" }
+user-config-manager = { path = "../user-config-manager" }
 
 [patch.crates-io]
 protobuf-src = { git = "https://github.com/emarsden/rust-protobuf-native" }

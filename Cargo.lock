@@ -4077,6 +4077,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "truncrate",
+ "user-config-manager",
 ]
 
 [[package]]

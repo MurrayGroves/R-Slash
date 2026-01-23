@@ -509,6 +509,22 @@ impl From<&Post> for Vec<(String, String)> {
     }
 }
 
+impl Post {
+    pub fn get_text_level(&self) -> TextAllowLevel {
+        let has_media = !self.embed_urls.is_empty();
+
+        let has_text = self.text.is_some() || self.linked_url.is_some();
+
+        if has_media && has_text {
+            TextAllowLevel::Both
+        } else if has_media {
+            TextAllowLevel::MediaOnly
+        } else {
+            TextAllowLevel::TextOnly
+        }
+    }
+}
+
 pub async fn get_post_content_type(
     con: &mut MultiplexedConnection,
     post_id: &str,
