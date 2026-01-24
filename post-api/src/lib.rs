@@ -27,7 +27,7 @@ use serenity::builder::{
 use tokio::time::sleep;
 use tracing::{debug, error, error_span, info, instrument};
 use url::Url;
-use user_config_manager::get_channel_config;
+use user_config_manager::{TextAllowLevel, get_channel_config};
 
 /// Returns current milliseconds since the Epoch
 fn get_epoch_ms() -> u64 {
@@ -432,18 +432,22 @@ pub async fn get_subreddit<'a>(
     )
     .await?;
 
-    let posts: Vec<String> = redis
-        .lrange(format!("subreddit:{}:posts", &subreddit), 0, -1)
-        .await?;
-
     let text_allow_level = get_channel_config(mongodb, ChannelId::new(channel.get()))
         .await?
         .text_allowed
         .unwrap_or_default();
 
+    let posts: Vec<String> = redis
+        .lrange(
+            format!("subreddit:{}:posts:{}", &subreddit, text_allow_level),
+            0,
+            -1,
+        )
+        .await?;
+
     debug!("Text allow level is {:?}", text_allow_level);
 
-    // Find the first post that the channel has not seen before
+    // Find the first post that the channel has not seen before, or if all seen, the one seen longest ago
     let mut post_id: Option<String> = None;
     let mut minimum_post: Option<(String, u64)> = None;
     for post in posts.into_iter() {
@@ -451,23 +455,14 @@ pub async fn get_subreddit<'a>(
             let timestamp = *fetched_posts.get(&post).unwrap();
             if let Some(current_min) = &minimum_post {
                 if timestamp < current_min.1 {
-                    let content_type = get_post_content_type(redis, &post).await?;
-                    if text_allow_level.allows_for(content_type) {
-                        minimum_post = Some((post, timestamp));
-                    }
-                }
-            } else {
-                let content_type = get_post_content_type(redis, &post).await?;
-                if text_allow_level.allows_for(content_type) {
                     minimum_post = Some((post, timestamp));
                 }
+            } else {
+                minimum_post = Some((post, timestamp));
             }
         } else {
-            let content_type = get_post_content_type(redis, &post).await?;
-            if text_allow_level.allows_for(content_type) {
-                post_id = Some(post);
-                break;
-            }
+            post_id = Some(post);
+            break;
         }
     }
 
@@ -505,7 +500,11 @@ pub async fn get_subreddit<'a>(
             info!("Error was: {:?}, getting {:?}", e, post_id);
             error!("Error getting post by ID");
             redis
-                .lrem(format!("subreddit:{}:posts", &subreddit), 1, &post_id)
+                .lrem(
+                    format!("subreddit:{}:posts:{}", &subreddit, text_allow_level),
+                    1,
+                    &post_id,
+                )
                 .await?;
         }
 
@@ -650,10 +649,19 @@ pub async fn check_subreddit_valid(
     })
 }
 
+/// Queue a custom subreddit for downloading, returning when posts are available.
+///
+/// # Arguments
+///
+/// * `subreddit`:
+/// * `con`:
+/// * `bot`:
+/// * `text_allow_level`: Returns when posts are available for given text_allow_level
 pub async fn queue_subreddit(
     subreddit: &str,
     con: &mut MultiplexedConnection,
     bot: u64,
+    text_allow_level: TextAllowLevel,
 ) -> Result<(), Error> {
     let already_queued = list_contains(&subreddit, "custom_subreddits_queue", con).await?;
 
@@ -689,7 +697,10 @@ pub async fn queue_subreddit(
             }
 
             let posts: Vec<String> = match redis::cmd("LRANGE")
-                .arg(format!("subreddit:{}:posts", subreddit))
+                .arg(format!(
+                    "subreddit:{}:posts:{}",
+                    subreddit, text_allow_level
+                ))
                 .arg(0i64)
                 .arg(0i64)
                 .query_async(con)

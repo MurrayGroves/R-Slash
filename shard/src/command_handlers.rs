@@ -33,6 +33,7 @@ use crate::discord::ResponseTracker;
 use crate::{NAMESPACE, ShardState, capture_event};
 use post_api::*;
 use rslash_common::{SubredditStatus, error_if_no_premium, error_if_no_send_message_perm};
+use user_config_manager::get_channel_config;
 
 #[instrument(skip(command, ctx, tracker))]
 pub async fn get_subreddit_cmd<'a>(
@@ -248,26 +249,23 @@ pub async fn get_custom_subreddit<'a>(
     .await;
 
     let data = ctx.data::<ShardState>();
-    match data
+    if let SubredditStatus::Invalid(reason) = data
         .reddit_proxy
         .check_subreddit_valid(context::current(), subreddit.clone())
         .await??
     {
-        SubredditStatus::Valid => {}
-        SubredditStatus::Invalid(reason) => {
-            debug!("Subreddit response not 200: {}", reason);
-            return tracker
-                .send_response(CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new().embed(
-                        CreateEmbed::default()
-                            .title("Subreddit Inaccessible")
-                            .description(format!("r/{} is private or does not exist.", subreddit))
-                            .color(0xff0000)
-                            .to_owned(),
-                    ),
-                ))
-                .await;
-        }
+        debug!("Subreddit response not 200: {}", reason);
+        return tracker
+            .send_response(CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new().embed(
+                    CreateEmbed::default()
+                        .title("Subreddit Inaccessible")
+                        .description(format!("r/{} is private or does not exist.", subreddit))
+                        .color(0xff0000)
+                        .to_owned(),
+                ),
+            ))
+            .await;
     }
 
     tracker.defer().await?;
@@ -276,7 +274,15 @@ pub async fn get_custom_subreddit<'a>(
 
     let id = ctx.cache.current_user().id.get();
 
-    queue_subreddit(&subreddit, &mut con, id).await?;
+    let text_allow_level = get_channel_config(
+        &mut ctx.data::<ShardState>().mongodb.clone(),
+        command.channel_id.get().into(),
+    )
+    .await?
+    .text_allowed
+    .unwrap_or_default();
+
+    queue_subreddit(&subreddit, &mut con, id, text_allow_level).await?;
 
     get_subreddit_cmd(command, ctx, tracker).await
 }
