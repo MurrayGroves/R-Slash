@@ -110,7 +110,6 @@ pub async fn timer_loop(
             let autoposts = server.autoposts.read().await;
             if let Some(memory) = autoposts.queue.peek() {
                 let now = Instant::now();
-<<<<<<< ours
                 if memory.next() <= now {
                     debug!("Running {:?} behind", now - memory.next());
                     histogram!("autoposter_post_delay").record(now - memory.next());
@@ -118,41 +117,6 @@ pub async fn timer_loop(
 
                     // Used to ensure loop waits until task has popped from queue before continuing
                     let (tx, rx) = tokio::sync::oneshot::channel();
-||||||| ancestor
-                if memory.next_post <= now {
-                    debug!("Running {:?} behind", now - memory.next_post);
-                    histogram!("autoposter_post_delay").record(now - memory.next_post);
-
-                    // Get next autopost from queue, removing it from the queue
-                    drop(autoposts);
-                    let mut autoposts = server.autoposts.write().await;
-                    let autopost = match autoposts.queue.pop() {
-                        Some(x) => x,
-                        None => {
-                            continue;
-                        }
-                    };
-                    drop(autoposts);
-
-                    debug!("Posting autopost: {:?}", autopost);
-                    counter!("autoposter_attempted_posts").increment(1);
-
-                    let channel = autopost.channel.clone();
-
-                    let bot = autopost.bot.clone();
-
-                    let http = server.discords[&bot].clone();
-                    let autopost_clone = autopost.clone();
-                    let redis = server.redis.clone();
-=======
-                if memory.next() <= now {
-                    debug!("Running {:?} behind", now - memory.next());
-                    histogram!("autoposter_post_delay").record(now - memory.next());
-                    drop(autoposts);
-
-                    // Used to ensure loop waits until task has popped from queue before continuing
-                    let (tx, rx) = tokio::sync::oneshot::channel();
->>>>>>> theirs
                     let server_clone = server.clone();
                     // Spawn task to post the autopost
                     tokio::spawn(async move {
@@ -189,7 +153,6 @@ pub async fn timer_loop(
 
                         // Queue subreddit for downloading if it's a custom subreddit
                         if is_custom {
-<<<<<<< ours
                             if let Err(e) = async {
                                 let text_allow_level = get_channel_config(
                                     &mut server.db,
@@ -207,19 +170,6 @@ pub async fn timer_loop(
                                 )
                                 .await
                             }
-||||||| ancestor
-                            match queue_subreddit(
-                                &autopost_clone.subreddit,
-                                &mut redis.clone(),
-                                autopost_clone.bot,
-                            )
-=======
-                            match queue_subreddit(
-                                &autopost.subreddit,
-                                &mut server.redis,
-                                autopost.bot,
-                            )
->>>>>>> theirs
                             .await
                             {
                                 warn!("Error queueing subreddit: {:?}", e);
