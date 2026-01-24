@@ -410,6 +410,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "user-config-manager",
 ]
 
 [[package]]

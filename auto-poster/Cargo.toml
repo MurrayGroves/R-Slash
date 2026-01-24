@@ -53,6 +53,7 @@ metrics = "*"
 post_api = { path = "../post-api" }
 rslash_common = { path = "../rslash_common" }
 reddit-proxy = { path = "../reddit-proxy" }
+user-config-manager = { path = "../user-config-manager" }
 
 [lib]
 name = "auto_poster"
