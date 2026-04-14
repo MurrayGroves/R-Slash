@@ -784,6 +784,7 @@ async fn monitor_total_shards(
         } else {
             if !tokio::fs::metadata("/etc/probes/live").await.is_ok() {
                 debug!("Resurrected before being terminated by k8s!");
+                continue;
                 if !Path::new("/etc/probes").is_dir() {
                     fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
                 }
