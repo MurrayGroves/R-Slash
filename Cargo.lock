@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "discord-interface"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1242,7 +1242,8 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "serde_with 3.12.0",
+ "serde_with 1.14.0",
+ "tarpc",
  "timer",
  "tokio",
 ]
@@ -1257,6 +1258,7 @@ dependencies = [
  "chrono",
  "compile-time",
  "dashmap 6.1.0",
+ "discord-interface",
  "env_logger 0.11.8",
  "futures",
  "futures-util",

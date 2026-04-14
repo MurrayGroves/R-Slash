@@ -1,7 +1,7 @@
 [package]
 name = "discord-interface"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -23,6 +23,16 @@ k8s-openapi = { version = "*", features = ["v1_32"] }
 reqwest = { version = "0.12.9", features = ["json"] }
 
 
+tarpc = { version = "*", features = [
+    "serde-transport",
+    "tcp",
+    "serde-transport-bincode",
+] }
+
 [[bin]]
 name = "discord-interface"
 path = "src/main.rs"
+
+[lib]
+name = "discord_interface"
+path = "src/discord_interface.rs"
