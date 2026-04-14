@@ -1,18 +1,18 @@
-use anyhow::Error;
+use anyhow::{Error, bail};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::Level;
 
-use reqwest::{header, StatusCode};
+use reqwest::{StatusCode, header};
 use tokio::time::timeout;
 use tracing::{debug, info, trace, warn};
 
 use lazy_static::lazy_static;
+use metrics::{counter, histogram};
 use redis::AsyncTypedCommands;
 use reqwest::header::HeaderMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-use metrics::{counter, histogram};
 
 lazy_static! {
     static ref REDDIT_LIMITER: Limiter = Limiter::new(None, "reddit".to_string());
@@ -152,8 +152,11 @@ pub async fn get_reddit_access_token(
     let token = con.hget("reddit_tokens", token_name.clone()).await;
     let token = match token {
         Ok(Some(x)) => x,
-        _ => {
-            debug!("Requesting new access token, none exists");
+        Ok(None) => {
+            debug!(
+                "Requesting new access token, none exists for key {}",
+                token_name
+            );
             let token_results = request_reddit_access_token(
                 reddit_client,
                 reddit_secret,
@@ -174,6 +177,7 @@ pub async fn get_reddit_access_token(
 
             format!("{},{}", access_token, expires_at)
         }
+        Err(e) => bail!(e),
     };
 
     let expires_at: u64 = token.split(",").collect::<Vec<&str>>()[1].parse()?;
@@ -184,8 +188,8 @@ pub async fn get_reddit_access_token(
     if expires_at < get_epoch_ms()? {
         debug!("Requesting new access token, current one expired");
         let token_results = request_reddit_access_token(
-            reddit_client.clone(),
-            reddit_secret.clone(),
+            reddit_client,
+            reddit_secret,
             web_client,
             device_id.clone(),
         )
@@ -201,7 +205,7 @@ pub async fn get_reddit_access_token(
         .await?;
     }
 
-    debug!("Reddit Token: {}", access_token.replace("\"", ""));
+    trace!("Reddit Token: {}", access_token.replace("\"", ""));
     Ok(access_token)
 }
 
@@ -240,8 +244,7 @@ impl Limiter {
 
         trace!(
             "Updating rate limit headers for {}: {:?}",
-            self.name,
-            headers
+            self.name, headers
         );
 
         // If this limiter is using a per minute limit

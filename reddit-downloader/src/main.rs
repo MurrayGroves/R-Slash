@@ -498,7 +498,11 @@ async fn download_loop<'a>() -> Result<(), Error> {
             }
         }
 
-        match subscriber.watched_subreddits(context::current()).await? {
+        match subscriber
+            .watched_subreddits(context::current())
+            .await
+            .context("Requested watched subreddits from subscriber")?
+        {
             Ok(watched_subreddits) => {
                 for subreddit in watched_subreddits {
                     if !subreddits.contains_key(&subreddit) {

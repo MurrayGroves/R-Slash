@@ -1,7 +1,5 @@
 mod reddit_proxy;
 
-use std::{env, future};
-
 use crate::reddit_proxy::RedditProxyError::{RequestError, TextDecodeError, TokenError};
 use crate::reddit_proxy::{RedditProxy, RedditProxyError};
 use opentelemetry::global;
@@ -10,6 +8,8 @@ use opentelemetry_sdk::{logs, trace};
 use reqwest::RequestBuilder;
 use rslash_common::access_tokens::get_reddit_access_token;
 use rslash_common::{Limiter, SubredditStatus, initialise_observability, span_filter};
+use std::time::Duration;
+use std::{env, future};
 use tarpc::context::Context;
 use tarpc::server;
 use tarpc::server::Channel;
@@ -59,6 +59,7 @@ impl RedditProxy for RedditProxyServer {
         let start_time = Instant::now();
         debug!("Starting req for URL: {}", url);
         self.limiter.wait().await;
+        debug!("Finished waiting");
         counter!("redditproxy_sent_requests").increment(1);
         let resp = match self
             .attach_auth_token(self.web_client.get(&url))
@@ -72,7 +73,13 @@ impl RedditProxy for RedditProxyServer {
             }
         };
 
-        if let Err(e) = self.limiter.update_headers(resp.headers(), resp.status()).await {
+        debug!("Finished request");
+
+        if let Err(e) = self
+            .limiter
+            .update_headers(resp.headers(), resp.status())
+            .await
+        {
             warn!("{e} while updating rate limit from headers");
         };
 
@@ -95,21 +102,22 @@ impl RedditProxy for RedditProxyServer {
         subreddit: String,
     ) -> Result<SubredditStatus, RedditProxyError> {
         counter!("redditproxy_sent_requests").increment(1);
-        let res = match self
+        debug!("Received subreddit check request");
+
+        let client = self
             .attach_auth_token(
                 self.web_client
                     .head(format!("https://oauth.reddit.com/r/{}.json", subreddit)),
             )
-            .await?
-            .send()
-            .await
-        {
+            .await?;
+        let res = match client.timeout(Duration::from_secs(30)).send().await {
             Ok(x) => x,
             Err(e) => return Err(RequestError(e.to_string())),
         };
 
         debug!("Subreddit check response: {:?}", res);
-        Ok(if res.status() == 200 {
+        let status = res.status();
+        Ok(if status == 200 {
             SubredditStatus::Valid
         } else {
             SubredditStatus::Invalid(match res.text().await {
@@ -143,6 +151,7 @@ async fn main() {
         .expect("Can't connect to redis");
 
     println!("Connected to Redis");
+    info!("Starting up");
 
     let server = RedditProxyServer {
         limiter: Limiter::new(None, "reddit".to_string()),
@@ -175,6 +184,7 @@ async fn main() {
                 .execute(server.serve())
                 .for_each(|response| async move {
                     println!("Incoming connection");
+                    debug!("Incoming connection!");
                     spawn(response);
                 })
         })
