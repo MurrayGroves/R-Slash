@@ -90,6 +90,7 @@ pub struct ShardState {
     pub post_subscriber: post_subscriber::SubscriberClient,
     pub auto_poster: auto_poster::AutoPosterClient,
     pub reddit_proxy: reddit_proxy::RedditProxyClient,
+    discord_interface: discord_interface::DiscordInterfaceClient,
 }
 
 pub fn redis_sanitise(input: &str) -> String {
@@ -395,6 +396,21 @@ impl EventHandler for Handler {
                     data_about_bot.user.name,
                     data_about_bot.guilds.len()
                 );
+
+                if let Err(e) = ctx
+                    .data::<ShardState>()
+                    .discord_interface
+                    .finished_boot(
+                        tarpc::context::current(),
+                        data_about_bot.shard.unwrap().id.0 as usize,
+                    )
+                    .await
+                {
+                    error!(
+                        "Failed to notify discord interface that I'm finished: {:?}",
+                        e
+                    );
+                };
 
                 if !Path::new("/etc/probes").is_dir() {
                     match fs::create_dir("/etc/probes") {
@@ -968,6 +984,40 @@ fn main() {
 			println!("Connected to reddit proxy");
 
 
+            println!("Connecting to discord interface...");
+            let reconnect_opts = ReconnectOptions::new()
+                .with_exit_if_first_connect_fails(false)
+                .with_retries_generator(|| iter::repeat(Duration::from_secs(15)));
+            let tcp_stream = RetryingTcpStream::new(
+                StubbornTcpStream::connect_with_options(
+                    "discord-interface:50051",
+                    reconnect_opts,
+                )
+                    .await
+                    .expect("Failed to connect to discord-interface"),
+            );
+            let transport = Transport::from((tcp_stream, Bincode::default()));
+
+            let discord_interface =
+                discord_interface::DiscordInterfaceClient::new(tarpc::client::Config::default(), transport).spawn();
+
+            println!("Connected to discord interface");
+
+            let mut allowed = false;
+            while !allowed {
+                allowed = discord_interface.request_boot(tarpc::context::current(), shard_id as usize).await.unwrap_or_else(|e| {
+                    warn!("Failed to query discord interface, not launching: {:?}", e);
+                    false
+                });
+                if allowed {
+                    info!("Received go ahead to boot from discord interface")
+                } else {
+                    info!("Discord interface told us to wait, waiting...");
+                    sleep(Duration::from_secs(5)).await
+                }
+            }
+
+
 			let state = ShardState {
 				shard_id,
 				nsfw_subreddits,
@@ -983,7 +1033,8 @@ fn main() {
                         "Discord:RSlash:{} (by /u/murrax2)",
                         env!("CARGO_PKG_VERSION")
                     ))
-                    .build().unwrap()
+                    .build().unwrap(),
+                discord_interface
 			};
 
 			let mut client = Client::builder(Token::from_env("DISCORD_TOKEN").expect("Failed to load token from env"), GatewayIntents::GUILDS)

@@ -88,6 +88,7 @@ post_subscriber = { path = "../post-subscriber" }
 auto_poster = { path = "../auto-poster" }
 user-config-manager = { path = "../user-config-manager" }
 reddit-proxy = { path = "../reddit-proxy" }
+discord-interface = { path = "../discord-interface" }
 
 [[bin]]
 name = "discord-shard"
