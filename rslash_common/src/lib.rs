@@ -166,7 +166,7 @@ pub enum ResponseFallbackMethod {
 #[macro_export]
 macro_rules! span_filter {
     ($meta:expr, $cx:expr) => {
-        const TARGETS: [&str; 8] = [
+        const TARGETS: [&str; 9] = [
             "discord_shard",
             "post_api",
             "post_subscriber",
@@ -175,6 +175,7 @@ macro_rules! span_filter {
             "memberships",
             "posthog",
             "rslash_common",
+            "reddit_proxy",
         ];
         //const BAD_TARGETS: [&str;2] = ["runtime", "tokio"];
         const BAD_TARGETS: [&str; 4] = ["runtime", "hyper", "tokio", "h2"];
@@ -260,9 +261,9 @@ macro_rules! initialise_observability {
 			)
 			.build();
 
-		let tracer = opentelemetry::trace::TracerProvider::tracer(&tracing_provider, $service_name);
+		// let tracer = opentelemetry::trace::TracerProvider::tracer(&tracing_provider, $service_name);
 		global::set_tracer_provider(tracing_provider.clone());
-		let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+		// let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
 		let filter_otel = EnvFilter::new("trace")
 			.add_directive("hyper=off".parse().unwrap())
@@ -279,27 +280,28 @@ macro_rules! initialise_observability {
 			.add_directive("tungstenite=off".parse().unwrap())
 			.add_directive("reqwest=off".parse().unwrap());
 
-		let otel_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logging_provider).with_filter(filter_otel);
+		// let otel_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logging_provider).with_filter(filter_otel);
 
 		tracing_subscriber::Registry::default()
-			.with(telemetry.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-				span_filter!(meta, cx);
-			}))) // Tracing layer
+			// .with(telemetry.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+			// 	span_filter!(meta, cx);
+			// }))) // Tracing layer
 			.with(
 				tracing_subscriber::fmt::layer()
 					.compact()
 					.with_ansi(false)
-					.with_filter(tracing_subscriber::filter::LevelFilter::DEBUG)
-					.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-						span_filter!(meta, cx);
-					})),
+					.with_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+					// .with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+					// 	span_filter!(meta, cx);
+					// }))
+                ,
 			) // STDOUT Layer
-			.with(otel_layer.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-				if meta.level() <= &tracing::Level::INFO  {
-					return false;
-				}
-				span_filter!(meta, cx);
-			}))) // Logging Layer
+			// .with(otel_layer.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
+			// 	if meta.level() <= &tracing::Level::INFO  {
+			// 		return false;
+			// 	}
+			// 	span_filter!(meta, cx);
+			// }))) // Logging Layer
 			.with(sentry::integrations::tracing::layer()
 				.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
 					span_filter!(meta, cx);

@@ -9,7 +9,7 @@ use serenity::all::{ChannelId, CreateMessage};
 use std::{ops::Deref, sync::Arc, time::Duration};
 use tarpc::context::Context;
 use tokio::{select, time::Instant};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 use user_config_manager::get_channel_config;
 
 async fn delete_auto_post(server: &AutoPostServer, autopost: Arc<MemoryRef>) {
@@ -215,7 +215,7 @@ pub async fn timer_loop(
                         debug!("Sending message: {:?} for autopost {:?}", message, autopost);
                         let message_send_result =
                             channel.widen().send_message(&*http, message).await;
-                        debug!("Sent message");
+                        info!("Sent message");
 
                         // Handle any errors sending the message
                         if let Err(why) = message_send_result {
