@@ -62,9 +62,19 @@ struct AutoPostServer {
     waiting_until: Arc<RwLock<Instant>>,
     default_subs: Vec<String>,
     reddit_proxy: RedditProxyClient,
+    failed_req_counter: Arc<Mutex<usize>>,
 }
 
 impl AutoPostServer {
+    async fn clear_failed_req_counter(self) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let mut counter = self.failed_req_counter.lock().await;
+            debug!("Clearing failed request counter with {} requests", counter);
+            *counter = 0;
+        }
+    }
+
     #[instrument(skip(self))]
     pub async fn add_autopost(self, autopost: Arc<MemoryRef>) {
         info!("Adding autopost {:?}", autopost);
@@ -423,7 +433,10 @@ async fn main() {
         default_subs: subreddits_vec,
         waiting_until: Arc::new(RwLock::new(Instant::now())),
         reddit_proxy,
+        failed_req_counter: Arc::new(Mutex::new(0)),
     };
+
+    tokio::spawn(server.clone().clear_failed_req_counter());
 
     info!("Connecting to discords");
 

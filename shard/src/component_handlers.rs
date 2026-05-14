@@ -29,7 +29,12 @@ pub async fn unsubscribe<'a>(
         }
     };
 
-    let client = ctx.data::<ShardState>().post_subscriber.clone();
+    let data = ctx.data::<ShardState>();
+    let subscriber_maybe = data.post_subscriber.read().await;
+    let client = match subscriber_maybe.as_ref() {
+        Some(x) => x,
+        None => bail!("Subscription services currently offline."),
+    };
 
     let bot = match (&*NAMESPACE).as_str() {
         "r-slash" => Bot::RS,
@@ -88,7 +93,12 @@ pub async fn autopost_cancel<'a>(
     }
     .parse()?;
 
-    let client = ctx.data::<ShardState>().auto_poster.clone();
+    let data = ctx.data::<ShardState>();
+    let autoposter_maybe = data.auto_poster.read().await;
+    let client = match autoposter_maybe.as_ref() {
+        Some(x) => x,
+        None => bail!("Auto-poster services currently offline."),
+    };
 
     let autopost = match client
         .delete_autopost(context::current(), id, interaction.channel_id.get())

@@ -8,6 +8,7 @@ use rslash_common::SubredditStatus;
 use serenity::all::{ChannelId, CreateMessage};
 use std::{ops::Deref, sync::Arc, time::Duration};
 use tarpc::context::Context;
+use tokio::time::timeout;
 use tokio::{select, time::Instant};
 use tracing::{debug, error, info, warn};
 use user_config_manager::get_channel_config;
@@ -115,6 +116,16 @@ pub async fn timer_loop(
                     histogram!("autoposter_post_delay").record(now - memory.next());
                     drop(autoposts);
 
+                    let counter = server.failed_req_counter.lock().await;
+                    if *counter > 1000 {
+                        error!(
+                            "Too many failed requests, stopping autopost processing for 10 mins"
+                        );
+                        drop(counter);
+                        tokio::time::sleep(Duration::from_secs(600)).await;
+                        info!("Resuming processing.");
+                    }
+
                     // Used to ensure loop waits until task has popped from queue before continuing
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     let server_clone = server.clone();
@@ -213,9 +224,33 @@ pub async fn timer_loop(
                         };
 
                         debug!("Sending message: {:?} for autopost {:?}", message, autopost);
+<<<<<<< ours
+                        let message_send_result = match timeout(
+                            Duration::from_secs(30),
+                            channel.widen().send_message(&*http, message),
+                        )
+                        .await
+                        {
+                            Ok(x) => x,
+                            Err(_) => {
+                                error!("Timed out sending autopost!");
+                                counter!("autoposter_failed_messages").increment(1);
+                                counter!("autoposter_failed_message_timeouts").increment(1);
+                                let mut counter = server.failed_req_counter.lock().await;
+                                *counter += 1;
+                                return;
+                            }
+                        };
+                        info!("Sent message");
+||||||| ancestor
+                        let message_send_result =
+                            channel.widen().send_message(&*http, message).await;
+                        debug!("Sent message");
+=======
                         let message_send_result =
                             channel.widen().send_message(&*http, message).await;
                         info!("Sent message");
+>>>>>>> theirs
 
                         // Handle any errors sending the message
                         if let Err(why) = message_send_result {
@@ -227,10 +262,18 @@ pub async fn timer_loop(
                                         counter!("autoposter_missing_channel").increment(1);
                                         failed = true;
                                     }
+                                } else {
+                                    error!("Error sending message: {:?}", why);
+                                    counter!("autoposter_failed_messages").increment(1);
+                                    let mut counter = server.failed_req_counter.lock().await;
+                                    *counter += 1;
                                 }
                             } else {
-                                warn!("Error sending message: {:?}", why);
+                                error!("Error sending message: {:?}", why);
+                                counter!("autoposter_failed_messages").increment(1);
                                 counter!("autoposter_unknown_sending_error").increment(1);
+                                let mut counter = server.failed_req_counter.lock().await;
+                                *counter += 1;
                             }
                         } else {
                             counter!("autoposter_sent_messages").increment(1);

@@ -52,21 +52,34 @@ struct SubscriberServer<'a> {
     discord_rs: Arc<Http>,
     redis: redis::aio::MultiplexedConnection,
     queued_alerts: Arc<Mutex<VecDeque<PostAlert<'a>>>>,
+    failed_req_counter: Arc<Mutex<usize>>,
 }
 
 impl SubscriberServer<'_> {
     #[tracing::instrument(skip(self))]
     async fn watch_alerts(self) {
         let mut outer_interval = interval(tokio::time::Duration::from_millis(100));
-        let inner_duration = tokio::time::Duration::from_millis(1000 / 35); // Send alerts at max of 35 per second (Discord global rate limit is 50 reqs per second)
+        let inner_duration = tokio::time::Duration::from_millis(1000 / 20); // Send alerts at max of 20 per second (Discord global rate limit is 50 reqs per second)
         loop {
             outer_interval.tick().await;
+            debug!("Locking queued alerts.");
             let mut queued_alerts = self.queued_alerts.lock().await;
             let next_alert = match queued_alerts.pop_front() {
                 Some(x) => x,
                 None => continue,
             };
             drop(queued_alerts);
+            debug!("Received queued alert.");
+
+            let failed_reqs = self.failed_req_counter.lock().await;
+            if *failed_reqs > 1000 {
+                error!("Too many failed requests, stopping alert processing for 10 mins");
+                drop(failed_reqs);
+                tokio::time::sleep(Duration::from_secs(600)).await;
+                info!("Resuming alert processing");
+                continue;
+            }
+            drop(failed_reqs);
 
             counter!("subscriber_processed_alert_batches").increment(1);
 
@@ -81,6 +94,13 @@ impl SubscriberServer<'_> {
                     debug!("Waiting for {} seconds", inner_duration.as_secs_f64());
                     tokio::time::sleep(inner_duration - last_alert.elapsed()).await;
                 }
+
+                let failed_reqs = self.failed_req_counter.lock().await;
+                if *failed_reqs > 1000 {
+                    break;
+                }
+                drop(failed_reqs);
+
                 last_alert = Instant::now();
                 let channel: ChannelId = alert.channel.into();
                 let http = match alert.bot {
@@ -121,6 +141,10 @@ impl SubscriberServer<'_> {
                     Ok(resp) => resp,
                     Err(_) => {
                         error!("Timeout while sending message to channel");
+                        let mut counter = self.failed_req_counter.lock().await;
+                        *counter += 1;
+                        counter!("subscriber_failed_messages").increment(1);
+                        counter!("subscriber_failed_message_timeouts").increment(1);
                         continue;
                     }
                 };
@@ -139,38 +163,60 @@ impl SubscriberServer<'_> {
                         counter!("subscriber_sent_messages").increment(1);
                     }
                     Err(e) => {
-                        warn!("Failed to send message to channel {}: {:?}", channel, e);
-                        if let serenity::Error::Http(e) = e {
-                            if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
-                                if e.error.code.0 == 10003 {
-                                    debug!("Channel doesn't exist anymore, deleting subscription");
-                                    let mut subscriptions = self.subscriptions.write().await;
-                                    match subscriptions.by_channel.get_mut(&alert.channel) {
-                                        Some(x) => {
-                                            x.remove(&*alert);
-                                        }
-                                        None => {
-                                            warn!(
-                                                "Tried to delete subscription by channel that already didn't exist!"
-                                            );
-                                        }
-                                    };
-                                    match subscriptions.by_subreddit.get_mut(&alert.subreddit) {
-                                        Some(x) => {
-                                            x.remove(&*alert);
-                                        }
-                                        None => {
-                                            warn!(
-                                                "Tried to delete subscription by sub that already didn't exist!"
-                                            );
-                                        }
+                        let error_text = format!("Failed to send message: {:?}", e);
+                        if let serenity::Error::Http(e) = e
+                            && let serenity::http::HttpError::UnsuccessfulRequest(e) = e
+                        {
+                            if e.error.code.0 == 10003 {
+                                debug!("Channel doesn't exist anymore, deleting subscription");
+                                let mut subscriptions = self.subscriptions.write().await;
+                                match subscriptions.by_channel.get_mut(&alert.channel) {
+                                    Some(x) => {
+                                        x.remove(&*alert);
+                                    }
+                                    None => {
+                                        warn!(
+                                            "Tried to delete subscription by channel that already didn't exist!"
+                                        );
+                                    }
+                                };
+                                match subscriptions.by_subreddit.get_mut(&alert.subreddit) {
+                                    Some(x) => {
+                                        x.remove(&*alert);
+                                    }
+                                    None => {
+                                        warn!(
+                                            "Tried to delete subscription by sub that already didn't exist!"
+                                        );
                                     }
                                 }
+                            } else {
+                                error!("Failed to send message to channel: {:?}", e);
+                                let mut failed_reqs = self.failed_req_counter.lock().await;
+                                *failed_reqs += 1;
+                                counter!("subscriber_failed_messages").increment(1);
                             }
+                        } else {
+                            error!("{}", error_text);
+                            let mut failed_reqs = self.failed_req_counter.lock().await;
+                            *failed_reqs += 1;
+                            counter!("subscriber_failed_messages").increment(1);
                         }
                     }
                 }
             }
+        }
+    }
+
+    async fn clear_failed_req_counter(self) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            let mut failed_reqs = self.failed_req_counter.lock().await;
+            debug!(
+                "Clearing failed request counter of {} requests",
+                *failed_reqs
+            );
+            *failed_reqs = 0;
         }
     }
 }
@@ -433,9 +479,19 @@ impl EventHandler for Handler {}
 
 #[tokio::main]
 async fn main() {
-    debug!("Starting...");
+    println!("Starting...");
 
     initialise_observability!("post-subscriber");
+    info!("Starting!");
+
+    counter!("subscriber_test").increment(2);
+    counter!("subscriber_test").increment(2);
+    counter!("subscriber_test").increment(2);
+
+    let counter = counter!("subscriber_test2");
+
+    counter.increment(2);
+    counter.increment(2);
 
     let _guard = sentry::init((
         "https://d0d89bf871ce425c84eddf6f419dcc7e@o4504774745718784.ingest.us.sentry.io/4508247476600832",
@@ -448,6 +504,7 @@ async fn main() {
         },
     ));
 
+    info!("Connecting to Discord...");
     let token =
         Token::from_env("DISCORD_TOKEN_BB").expect("Expected DISCORD_TOKEN_BB in the environment");
     let intents = GatewayIntents::empty();
@@ -456,6 +513,7 @@ async fn main() {
         .await
         .expect("Err creating client");
     let http_bb = client_bb.http.clone();
+    info!("Connected for BB");
 
     let token =
         Token::from_env("DISCORD_TOKEN_RS").expect("Expected DISCORD_TOKEN_RS in the environment");
@@ -465,6 +523,8 @@ async fn main() {
         .await
         .expect("Err creating client");
     let http_rs = client_rs.http.clone();
+
+    info!("Created Discord clients");
 
     let mongo_url = env::var("MONGO_URL").expect("MONGO_URL not set");
     let mut client_options = ClientOptions::parse(mongo_url).await.unwrap();
@@ -544,9 +604,11 @@ async fn main() {
         discord_rs: http_rs,
         redis,
         queued_alerts: Arc::new(Mutex::new(VecDeque::new())),
+        failed_req_counter: Arc::new(Mutex::new(0)),
     };
 
     tokio::spawn(server.clone().watch_alerts());
+    tokio::spawn(server.clone().clear_failed_req_counter());
 
     let mut listener = tarpc::serde_transport::tcp::listen("0.0.0.0:50051", Bincode::default)
         .await
