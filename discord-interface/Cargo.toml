@@ -10,7 +10,8 @@ redis = { version = "*", features = ["aio", "tokio-comp", "connection-manager"] 
 tokio = { version = "*", features = ["rt-multi-thread", "full"] }
 env_logger = "0.11"
 log = "*"
-anyhow = "*"
+rootcause = "*"
+rootcause-backtrace = "*"
 futures = "*"
 serde_derive = "*"
 serde = "*"
@@ -23,12 +24,26 @@ k8s-openapi = { version = "*", features = ["v1_32"] }
 reqwest = { version = "0.12.9", features = ["json"] }
 
 
+<<<<<<< ours
 tarpc = { version = "*", features = [
     "serde-transport",
     "tcp",
     "serde-transport-bincode",
 ] }
 
+metrics = "*"
+metrics-exporter-prometheus = "0.18.3"
+rustls = "0.23.27"
+
+||||||| ancestor
+=======
+tarpc = { version = "*", features = [
+    "serde-transport",
+    "tcp",
+    "serde-transport-bincode",
+] }
+
+>>>>>>> theirs
 [[bin]]
 name = "discord-interface"
 path = "src/main.rs"

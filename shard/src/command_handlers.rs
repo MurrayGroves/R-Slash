@@ -384,7 +384,12 @@ pub async fn subscribe<'a>(
     let subreddit = options[0].value.clone();
     let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
 
-    let client = ctx.data::<ShardState>().post_subscriber.clone();
+    let data = ctx.data::<ShardState>();
+    let subscriber_maybe = data.post_subscriber.read().await;
+    let client = match subscriber_maybe.as_ref() {
+        Some(x) => x,
+        None => bail!("Subscription services currently offline."),
+    };
 
     let bot = match (&*NAMESPACE).as_str() {
         "r-slash" => Bot::RS,
@@ -473,7 +478,12 @@ pub async fn unsubscribe<'a>(
     debug!("Deadline: {:?}", context::current().deadline);
     debug!("Now: {:?}", SystemTime::now());
 
-    let client = ctx.data::<ShardState>().post_subscriber.clone();
+    let data = ctx.data::<ShardState>();
+    let subscriber_maybe = data.post_subscriber.read().await;
+    let client = match subscriber_maybe.as_ref() {
+        Some(x) => x,
+        None => bail!("Subscription services currently offline."),
+    };
 
     let subreddits = match client
         .list_subscriptions(context::current(), command.channel_id.get(), bot)
@@ -623,7 +633,12 @@ pub async fn autopost_stop<'a>(
         }
     }
 
-    let client = ctx.data::<ShardState>().auto_poster.clone();
+    let data = ctx.data::<ShardState>();
+    let autoposter_maybe = data.auto_poster.read().await;
+    let client = match autoposter_maybe.as_ref() {
+        Some(x) => x,
+        None => bail!("Auto-poster services currently offline."),
+    };
 
     let bot = ctx.http.application_id().unwrap().get();
 

@@ -22,11 +22,11 @@ use tracing_subscriber::{
 
 use rslash_common::{initialise_observability, rpc::RetryingTcpStream, span_filter};
 use std::collections::HashMap;
-use std::env;
 use std::fmt::Debug;
 use std::io::Write;
 use std::pin::Pin;
 use std::task::Poll;
+use std::{env, path};
 use std::{fs, iter};
 
 use serenity::builder::{CreateEmbed, CreateInteractionResponse, CreateInteractionResponseMessage};
@@ -79,7 +79,7 @@ lazy_static::lazy_static! {
 }
 
 /// Stores config values required for operation of the shard
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ShardState {
     pub shard_id: u16,
     pub nsfw_subreddits: Vec<String>,
@@ -87,8 +87,8 @@ pub struct ShardState {
     pub mongodb: mongodb::Client,
     pub posthog: posthog::Client,
     pub web_client: reqwest::Client,
-    pub post_subscriber: post_subscriber::SubscriberClient,
-    pub auto_poster: auto_poster::AutoPosterClient,
+    pub post_subscriber: RwLock<Option<post_subscriber::SubscriberClient>>,
+    pub auto_poster: RwLock<Option<auto_poster::AutoPosterClient>>,
     pub reddit_proxy: reddit_proxy::RedditProxyClient,
     discord_interface: discord_interface::DiscordInterfaceClient,
 }
@@ -533,7 +533,7 @@ impl EventHandler for Handler {
 								"Auto-post setup has been moved to the `/autopost start` command to reduce clutter on the post view\nand because only users with Manage Channels can setup auto-posts so it doesn't make much sense to show to everyone.".to_string()
 							).ephemeral(true)
 							)).await,
-                            "configure_channel" => feature_handlers::config::channel_config::configure_channel_component_handler(&ctx, &command, custom_id_data, tracker).await,
+							"configure_channel" => feature_handlers::config::channel_config::configure_channel_component_handler(&ctx, &command, custom_id_data, tracker).await,
 
 							_ => {
 								warn!("Unknown component command: {}", component_command);
@@ -800,6 +800,25 @@ async fn monitor_total_shards(
         } else {
             if !tokio::fs::metadata("/etc/probes/live").await.is_ok() {
                 debug!("Resurrected before being terminated by k8s!");
+<<<<<<< ours
+                continue;
+
+                // if !path::new("/etc/probes").is_dir() {
+                //     fs::create_dir("/etc/probes").expect("couldn't create /etc/probes directory");
+                // }
+                // let mut file =
+                //     file::create("/etc/probes/live").expect("unable to create /etc/probes/live");
+                // file.write_all(b"alive")
+                //     .expect("unable to write to /etc/probes/live");
+||||||| ancestor
+                if !Path::new("/etc/probes").is_dir() {
+                    fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
+                }
+                let mut file =
+                    File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
+                file.write_all(b"alive")
+                    .expect("Unable to write to /etc/probes/live");
+=======
                 continue;
                 if !Path::new("/etc/probes").is_dir() {
                     fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
@@ -808,6 +827,7 @@ async fn monitor_total_shards(
                     File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
                 file.write_all(b"alive")
                     .expect("Unable to write to /etc/probes/live");
+>>>>>>> theirs
             }
         }
 
@@ -819,6 +839,51 @@ async fn monitor_total_shards(
             let _ = fs::remove_file("/etc/probes/live");
         }
     }
+}
+
+async fn connect_post_subscriber(data: Arc<ShardState>) {
+    println!("Connecting to post subscriber...");
+    let reconnect_opts = ReconnectOptions::new()
+        .with_exit_if_first_connect_fails(false)
+        .with_retries_generator(|| iter::repeat(Duration::from_secs(30)));
+    let tcp_stream = RetryingTcpStream::new(
+        StubbornTcpStream::connect_with_options(
+            "post-subscriber.discord-bot-shared.svc.cluster.local:50051",
+            reconnect_opts,
+        )
+        .await
+        .expect("Failed to connect to post subscriber"),
+    );
+    let transport = Transport::from((tcp_stream, Bincode::default()));
+
+    let subscriber =
+        post_subscriber::SubscriberClient::new(tarpc::client::Config::default(), transport).spawn();
+
+    println!("Connected to post subscriber");
+
+    data.post_subscriber.write().await.replace(subscriber);
+}
+
+async fn connect_auto_poster(data: Arc<ShardState>) {
+    println!("Connecting to auto poster...");
+    let reconnect_opts = ReconnectOptions::new()
+        .with_exit_if_first_connect_fails(false)
+        .with_retries_generator(|| iter::repeat(Duration::from_secs(30)));
+    let tcp_stream = RetryingTcpStream::new(
+        StubbornTcpStream::connect_with_options(
+            "auto-poster.discord-bot-shared.svc.cluster.local:50051",
+            reconnect_opts,
+        )
+        .await
+        .expect("Failed to connect to autoposter"),
+    );
+    let transport = Transport::from((tcp_stream, Bincode::default()));
+
+    let auto_poster =
+        auto_poster::AutoPosterClient::new(tarpc::client::Config::default(), transport).spawn();
+
+    println!("Connected to auto poster");
+    data.auto_poster.write().await.replace(auto_poster);
 }
 
 fn main() {
@@ -833,6 +898,13 @@ fn main() {
         _ => "r-slash".into(),
     };
 
+    if !std::path::Path::new("/etc/probes").is_dir() {
+        fs::create_dir("/etc/probes").expect("couldn't create /etc/probes directory");
+    }
+    let mut file =
+        std::fs::File::create("/etc/probes/live").expect("unable to create /etc/probes/live");
+    file.write_all(b"alive")
+        .expect("unable to write to /etc/probes/live");
     let shard_id: String = env::var("HOSTNAME")
         .expect("HOSTNAME not set")
         .parse()
@@ -925,53 +997,48 @@ fn main() {
 
 			println!("Booting with {:?} total shards", total_shards);
 
-			println!("Connecting to post subscriber...");
+			println!("Connecting to discord interface...");
 			let reconnect_opts = ReconnectOptions::new()
 				.with_exit_if_first_connect_fails(false)
-				.with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
+				.with_retries_generator(|| iter::repeat(Duration::from_secs(15)));
 			let tcp_stream = RetryingTcpStream::new(
 				StubbornTcpStream::connect_with_options(
-					"post-subscriber.discord-bot-shared.svc.cluster.local:50051",
+					"discord-interface:50051",
 					reconnect_opts,
 				)
 					.await
-					.expect("Failed to connect to post subscriber"),
+					.expect("Failed to connect to discord-interface"),
 			);
 			let transport = Transport::from((tcp_stream, Bincode::default()));
 
-			let subscriber =
-				post_subscriber::SubscriberClient::new(tarpc::client::Config::default(), transport)
-					.spawn();
+			let discord_interface =
+				discord_interface::DiscordInterfaceClient::new(tarpc::client::Config::default(), transport).spawn();
 
-			println!("Connected to post subscriber");
+			println!("Connected to discord interface");
 
-			println!("Connecting to auto poster...");
-			let reconnect_opts = ReconnectOptions::new()
-				.with_exit_if_first_connect_fails(false)
-				.with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
-			let tcp_stream = RetryingTcpStream::new(
-				StubbornTcpStream::connect_with_options(
-					"auto-poster.discord-bot-shared.svc.cluster.local:50051",
-					reconnect_opts,
-				)
-					.await
-					.expect("Failed to connect to autoposter"),
-			);
-			let transport = Transport::from((tcp_stream, Bincode::default()));
+			let mut allowed = false;
+			while !allowed {
+				allowed = discord_interface.request_boot(tarpc::context::current(), shard_id as usize).await.unwrap_or_else(|e| {
+					warn!("Failed to query discord interface, not launching: {:?}", e);
+					false
+				});
+				if allowed {
+					info!("Received go ahead to boot from discord interface")
+				} else {
+					info!("Discord interface told us to wait, waiting...");
+					sleep(Duration::from_secs(5)).await
+				}
+			}
 
-			let auto_poster =
-				auto_poster::AutoPosterClient::new(tarpc::client::Config::default(), transport).spawn();
 
-			println!("Connected to auto poster");
 
 			println!("Connecting to reddit proxy...");
 			let reconnect_opts = ReconnectOptions::new()
 				.with_exit_if_first_connect_fails(false)
 				.with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
 			let tcp_stream = RetryingTcpStream::new(
-				StubbornTcpStream::connect_with_options(
+				StubbornTcpStream::connect(
 					"reddit-proxy.discord-bot-shared.svc.cluster.local:50051",
-					reconnect_opts,
 				)
 					.await
 					.expect("Failed to connect to reddit-proxy"),
@@ -1024,9 +1091,34 @@ fn main() {
 				redis: con,
 				mongodb: mongodb_client,
 				posthog,
-				post_subscriber: subscriber,
-				auto_poster,
+				post_subscriber: RwLock::new(None),
+				auto_poster: RwLock::new(None),
 				reddit_proxy,
+<<<<<<< ours
+				web_client: reqwest::Client::builder()
+					.redirect(reqwest::redirect::Policy::none())
+					.user_agent(format!(
+						"Discord:RSlash:{} (by /u/murrax2)",
+						env!("CARGO_PKG_VERSION")
+					))
+					.build().unwrap(),
+				discord_interface,
+            };
+
+            let state = Arc::new(state);
+
+            tokio::spawn(connect_post_subscriber(state.clone()));
+            tokio::spawn(connect_auto_poster(state.clone()));
+||||||| ancestor
+                web_client: reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .user_agent(format!(
+                        "Discord:RSlash:{} (by /u/murrax2)",
+                        env!("CARGO_PKG_VERSION")
+                    ))
+                    .build().unwrap()
+			};
+=======
                 web_client: reqwest::Client::builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .user_agent(format!(
@@ -1036,10 +1128,11 @@ fn main() {
                     .build().unwrap(),
                 discord_interface
 			};
+>>>>>>> theirs
 
 			let mut client = Client::builder(Token::from_env("DISCORD_TOKEN").expect("Failed to load token from env"), GatewayIntents::GUILDS)
 				.event_handler(Handler)
-				.data(Arc::new(state))
+				.data(state)
 				.await
 				.expect("Error creating client");
 
@@ -1058,14 +1151,14 @@ fn main() {
 					.await
 					.expect("Failed to start shard");
 
-                error!("Client thread exited unexpectedly!");
+				error!("Client thread exited unexpectedly!");
 			});
 
 			// If client thread exits, shard has crashed, so mark self as unhealthy.
 			match thread.await {
 				Ok(_) => {}
 				Err(_) => {
-                    error!("Client thread exited!");
+					error!("Client thread exited!");
 					fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
 				}
 			}

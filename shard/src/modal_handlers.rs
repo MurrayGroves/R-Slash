@@ -149,7 +149,12 @@ pub async fn autopost_create<'a>(
         }
     };
 
-    let autoposter = ctx.data::<ShardState>().auto_poster.clone();
+    let data = ctx.data::<ShardState>();
+    let autoposter_maybe = data.auto_poster.read().await;
+    let autoposter = match autoposter_maybe.as_ref() {
+        Some(x) => x,
+        None => bail!("Auto-poster services currently offline."),
+    };
 
     match autoposter
         .register_autopost(
