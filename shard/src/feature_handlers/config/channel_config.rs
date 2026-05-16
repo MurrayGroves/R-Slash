@@ -2,7 +2,7 @@ use crate::discord::ResponseTracker;
 use crate::{CreateEmbed, ShardState};
 use serenity::all::{
     ChannelId, CommandInteraction, ComponentInteraction, ComponentInteractionDataKind, Context,
-    CreateActionRow, CreateComponent, CreateSelectMenuKind, MessageFlags,
+    CreateActionRow, CreateComponent, CreateContainerComponent, CreateSelectMenuKind, MessageFlags,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -34,14 +34,14 @@ pub async fn configure_channel<'a>(
     .await?;
 
     let components = vec![CreateComponent::Container(CreateContainer::new(vec![
-        CreateComponent::TextDisplay(CreateTextDisplay::new(indoc! {"
+        CreateContainerComponent::TextDisplay(CreateTextDisplay::new(indoc! {"
 						# Text/Media Level
 						Which types of posts to send in this channel.
 						- Text Only - Send only posts containing exclusively text or links
 						- Media Only - Send only posts containing exclusively images/videos/gifs
 						- Both - Send posts containing any mix of media and text
 					"})),
-        CreateComponent::ActionRow(CreateActionRow::SelectMenu(
+        CreateContainerComponent::ActionRow(CreateActionRow::SelectMenu(
             CreateSelectMenu::new(
                 json!({
                     "command": "configure_channel",

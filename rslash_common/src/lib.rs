@@ -290,24 +290,11 @@ macro_rules! initialise_observability {
 				tracing_subscriber::fmt::layer()
 					.compact()
 					.with_ansi(false)
-<<<<<<< ours
 					.with_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
 					 // .with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
 					 // 	span_filter!(meta, cx);
 					 // }))
                 ,
-||||||| ancestor
-					.with_filter(tracing_subscriber::filter::LevelFilter::DEBUG)
-					.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-						span_filter!(meta, cx);
-					})),
-=======
-					.with_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
-					// .with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
-					// 	span_filter!(meta, cx);
-					// }))
-                ,
->>>>>>> theirs
 			) // STDOUT Layer
 			// .with(otel_layer.with_filter(tracing_subscriber::filter::DynFilterFn::new(|meta, cx| {
 			// 	if meta.level() <= &tracing::Level::INFO  {

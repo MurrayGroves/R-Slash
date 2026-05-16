@@ -224,7 +224,6 @@ pub async fn timer_loop(
                         };
 
                         debug!("Sending message: {:?} for autopost {:?}", message, autopost);
-<<<<<<< ours
                         let message_send_result = match timeout(
                             Duration::from_secs(30),
                             channel.widen().send_message(&*http, message),
@@ -242,15 +241,6 @@ pub async fn timer_loop(
                             }
                         };
                         info!("Sent message");
-||||||| ancestor
-                        let message_send_result =
-                            channel.widen().send_message(&*http, message).await;
-                        debug!("Sent message");
-=======
-                        let message_send_result =
-                            channel.widen().send_message(&*http, message).await;
-                        info!("Sent message");
->>>>>>> theirs
 
                         // Handle any errors sending the message
                         if let Err(why) = message_send_result {

@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use anyhow::{Result, bail};
 use log::{debug, warn};
 use memberships::get_user_tiers;
-use serenity::all::{ActionRowComponent, Context, CreateEmbed, ModalInteraction};
+use serenity::all::{
+    ActionRowComponent, Context, CreateEmbed, InputText, ModalComponent, ModalInteraction,
+};
 use serenity::builder::{CreateInteractionResponse, CreateInteractionResponseMessage};
 use tracing::instrument;
 
@@ -38,23 +40,14 @@ pub async fn autopost_create<'a>(
     let mut interval = String::new();
     let mut limit = None;
 
-    for row in &modal.data.components {
-        for comp in &row.components {
-            match comp {
-                ActionRowComponent::InputText(input) => {
-                    if input.custom_id == "delay" {
-                        interval = match input.value.clone() {
-                            Some(x) => x.to_string(),
-                            _ => "5s".to_string(),
-                        };
-                    } else if input.custom_id == "limit" {
-                        limit = match input.value.clone() {
-                            Some(x) => Some(x.to_string()),
-                            _ => Some("10".to_string()),
-                        };
-                    }
-                }
-                _ => {}
+    for comp in &modal.data.components {
+        if let ModalComponent::Label(x) = comp
+            && let serenity::all::LabelComponent::InputText(input) = &x.component
+        {
+            if input.custom_id == "delay" {
+                interval = input.value.to_string();
+            } else if input.custom_id == "limit" {
+                limit = Some(input.value.to_string());
             }
         }
     }
