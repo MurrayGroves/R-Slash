@@ -2,9 +2,9 @@ use log::{error, trace};
 use post_subscriber::Bot;
 use serde_json::json;
 use serenity::all::{
-    CommandDataOptionValue, CreateButton, CreateComponent, CreateInputText,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateModal, CreateSelectMenu,
-    CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
+    CommandDataOptionValue, CreateButton, CreateComponent, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateModal, CreateSelectMenu, CreateSelectMenuKind,
+    CreateSelectMenuOption, InputTextStyle,
 };
 use serenity::model::Colour;
 use std::borrow::Cow;
@@ -18,7 +18,10 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use serenity::builder::{CreateActionRow, CreateEmbed, CreateEmbedFooter};
+use serenity::builder::{
+    CreateActionRow, CreateEmbed, CreateEmbedFooter, CreateInputText, CreateLabel,
+    CreateModalComponent,
+};
 use serenity::prelude::*;
 
 use redis::{self};
@@ -579,20 +582,20 @@ async fn autopost_start<'a>(
     };
 
     let components = vec![
-        CreateActionRow::InputText(
-            CreateInputText::new(InputTextStyle::Short, "Delay", "delay")
-                .label("Delay e.g. 5s, 3m, 5h, 1d")
+        CreateModalComponent::Label(CreateLabel::input_text(
+            "Interval, e.g. 5s, 3m, 5h, 1d",
+            CreateInputText::new(InputTextStyle::Short, "delay")
                 .placeholder("5s")
                 .min_length(2)
                 .max_length(6),
-        ),
-        CreateActionRow::InputText(
-            CreateInputText::new(InputTextStyle::Short, "Limit", "limit")
-                .label("Times to post before stopping e.g. 10")
+        )),
+        CreateModalComponent::Label(CreateLabel::input_text(
+            "Times to post before stopping e.g. 10",
+            CreateInputText::new(InputTextStyle::Short, "limit")
                 .placeholder("Can be \"infinite\" if you have premium")
                 .min_length(1)
                 .max_length(max_length),
-        ),
+        )),
     ];
 
     tracker

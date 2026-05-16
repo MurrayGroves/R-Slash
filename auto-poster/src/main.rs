@@ -356,7 +356,7 @@ async fn main() {
 
         let intents = GatewayIntents::empty();
         let client = serenity::Client::builder(token, intents)
-            .event_handler(Handler)
+            .event_handler(Arc::new(Handler))
             .await
             .expect("Err creating client");
 

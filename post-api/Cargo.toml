@@ -23,7 +23,7 @@ tokio = { version = "*", features = [
     "time",
     "full",
 ] }
-reqwest = { version = "*", features = ["json", "rustls-tls", "cookies"] }
+reqwest = { version = "0.13", features = ["json", "rustls", "cookies"] }
 serenity = { git = "https://github.com/serenity-rs/serenity.git", branch = "next", default-features = false, features = [
     "cache",
     "gateway",

@@ -21,8 +21,9 @@ use serenity::all::{
     MessageFlags,
 };
 use serenity::builder::{
-    CreateComponent, CreateContainer, CreateInteractionResponse, CreateInteractionResponseMessage,
-    CreateMediaGalleryItem, CreateMessage, CreateTextDisplay, CreateUnfurledMediaItem,
+    CreateComponent, CreateContainer, CreateContainerComponent, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMediaGalleryItem, CreateMessage, CreateTextDisplay,
+    CreateUnfurledMediaItem,
 };
 use tokio::time::sleep;
 use tracing::{debug, error, error_span, info, instrument};
@@ -202,9 +203,9 @@ fn pretty_number(num: isize) -> String {
 
 impl PostInContext {
     fn get_components<'a>(self, include_buttons: bool) -> Vec<CreateComponent<'a>> {
-        let mut container = Vec::new();
-        container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
-            format!(
+        let mut container: Vec<CreateContainerComponent> = Vec::new();
+        container.push(CreateContainerComponent::TextDisplay(
+            CreateTextDisplay::new(format!(
                 indoc! {"
                     ## [{}]({})
                     by [u/{}](https://reddit.com/u/{}) in [r/{}](https://reddit.com/r/{})
@@ -215,20 +216,22 @@ impl PostInContext {
                 self.post.author,
                 self.subreddit,
                 self.subreddit
-            ),
-        )));
+            )),
+        ));
 
-        container.push(CreateComponent::Separator(CreateSeparator::new(true)));
+        container.push(CreateContainerComponent::Separator(CreateSeparator::new()));
 
         if !self.post.embed_urls.is_empty() && self.post.embed_urls.first().unwrap() != "" {
-            container.push(CreateComponent::MediaGallery(CreateMediaGallery::new(
-                self.post
-                    .embed_urls
-                    .into_iter()
-                    .take(10) // Media gallery can only show 10 items
-                    .map(|url| CreateMediaGalleryItem::new(CreateUnfurledMediaItem::new(url)))
-                    .collect::<Vec<_>>(),
-            )));
+            container.push(CreateContainerComponent::MediaGallery(
+                CreateMediaGallery::new(
+                    self.post
+                        .embed_urls
+                        .into_iter()
+                        .take(10) // Media gallery can only show 10 items
+                        .map(|url| CreateMediaGalleryItem::new(CreateUnfurledMediaItem::new(url)))
+                        .collect::<Vec<_>>(),
+                ),
+            ));
         }
 
         let mut text_chars = self.post.title.len() + self.post.author.len() + self.subreddit.len();
@@ -237,9 +240,13 @@ impl PostInContext {
             let title = html_escape::decode_html_entities(&title);
             if title != self.post.title {
                 // No point putting it twice
-                container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
-                    format!("### [{}]({})", title, self.post.linked_url.clone().unwrap()),
-                )));
+                container.push(CreateContainerComponent::TextDisplay(
+                    CreateTextDisplay::new(format!(
+                        "### [{}]({})",
+                        title,
+                        self.post.linked_url.clone().unwrap()
+                    )),
+                ));
                 text_chars += title.len();
             }
         }
@@ -251,49 +258,51 @@ impl PostInContext {
             };
             if let Ok(mut url) = Url::parse(&url) {
                 url.set_query(None);
-                container.push(CreateComponent::MediaGallery(CreateMediaGallery::new(
-                    vec![CreateMediaGalleryItem::new(CreateUnfurledMediaItem::new(
-                        url.as_str().to_string(),
-                    ))],
-                )))
+                container.push(CreateContainerComponent::MediaGallery(
+                    CreateMediaGallery::new(vec![CreateMediaGalleryItem::new(
+                        CreateUnfurledMediaItem::new(url.as_str().to_string()),
+                    )]),
+                ))
             }
         }
 
         if let Some(description) = self.post.linked_url_description {
             let description = html_escape::decode_html_entities(&description).to_string();
             text_chars += description.len();
-            container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
-                description,
-            )));
+            container.push(CreateContainerComponent::TextDisplay(
+                CreateTextDisplay::new(description),
+            ));
         }
 
         if let Some(url) = self.post.linked_url {
             if let Ok(url_obj) = Url::parse(&url)
                 && let Some(domain) = url_obj.domain()
             {
-                container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
-                    format!("-# [{}]({})", domain, url),
-                )))
+                container.push(CreateContainerComponent::TextDisplay(
+                    CreateTextDisplay::new(format!("-# [{}]({})", domain, url)),
+                ))
             } else {
                 debug!("Failed to parse URL: {:?}", url);
             }
         }
 
         if let Some(text) = self.post.text {
-            container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
-                text.as_str()
-                    .truncate_ellipse_with(3500 - text_chars, " ...")
-                    .to_string(),
-            ))); // Truncate to fit in Discord char limit
+            container.push(CreateContainerComponent::TextDisplay(
+                CreateTextDisplay::new(
+                    text.as_str()
+                        .truncate_ellipse_with(3500 - text_chars, " ...")
+                        .to_string(),
+                ),
+            )); // Truncate to fit in Discord char limit
         }
 
-        container.push(CreateComponent::TextDisplay(CreateTextDisplay::new(
-            format!(
+        container.push(CreateContainerComponent::TextDisplay(
+            CreateTextDisplay::new(format!(
                 "*Posted <t:{}:R>, currently has {} points*",
                 self.post.timestamp,
                 pretty_number(self.post.score)
-            ),
-        )));
+            )),
+        ));
 
         let mut components = vec![CreateComponent::Container(CreateContainer::new(container))];
 

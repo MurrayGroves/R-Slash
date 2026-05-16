@@ -5,7 +5,7 @@ use log::trace;
 use serde_json::json;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CreateAutocompleteResponse, CreateButton, CreateCommand,
-    FullEvent, GuildId, ReactionType,
+    FullEvent, GuildId, ReactionType, ShardRunnerMetadata,
 };
 use serenity::gateway::{ShardRunnerInfo, ShardRunnerMessage};
 use serenity::model::Colour;
@@ -433,7 +433,7 @@ impl EventHandler for Handler {
             FullEvent::ShardStageUpdate { event, .. } => {
                 debug!("Shard stage changed to {:?}", event.new);
                 let alive = match event.new {
-                    serenity::gateway::ConnectionStage::Connected => true,
+                    serenity::model::gateway::ConnectionStage::Connected => true,
                     _ => false,
                 };
 
@@ -763,7 +763,7 @@ impl EventHandler for Handler {
 }
 
 async fn monitor_total_shards(
-    runners: Arc<DashMap<ShardId, (ShardRunnerInfo, UnboundedSender<ShardRunnerMessage>)>>,
+    runners: Arc<DashMap<ShardId, ShardRunnerMetadata>>,
     total_shards: u16,
 ) {
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
@@ -800,7 +800,6 @@ async fn monitor_total_shards(
         } else {
             if !tokio::fs::metadata("/etc/probes/live").await.is_ok() {
                 debug!("Resurrected before being terminated by k8s!");
-<<<<<<< ours
                 continue;
 
                 // if !path::new("/etc/probes").is_dir() {
@@ -810,24 +809,6 @@ async fn monitor_total_shards(
                 //     file::create("/etc/probes/live").expect("unable to create /etc/probes/live");
                 // file.write_all(b"alive")
                 //     .expect("unable to write to /etc/probes/live");
-||||||| ancestor
-                if !Path::new("/etc/probes").is_dir() {
-                    fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
-                }
-                let mut file =
-                    File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
-                file.write_all(b"alive")
-                    .expect("Unable to write to /etc/probes/live");
-=======
-                continue;
-                if !Path::new("/etc/probes").is_dir() {
-                    fs::create_dir("/etc/probes").expect("Couldn't create /etc/probes directory");
-                }
-                let mut file =
-                    File::create("/etc/probes/live").expect("Unable to create /etc/probes/live");
-                file.write_all(b"alive")
-                    .expect("Unable to write to /etc/probes/live");
->>>>>>> theirs
             }
         }
 
@@ -1094,7 +1075,6 @@ fn main() {
 				post_subscriber: RwLock::new(None),
 				auto_poster: RwLock::new(None),
 				reddit_proxy,
-<<<<<<< ours
 				web_client: reqwest::Client::builder()
 					.redirect(reqwest::redirect::Policy::none())
 					.user_agent(format!(
@@ -1109,29 +1089,9 @@ fn main() {
 
             tokio::spawn(connect_post_subscriber(state.clone()));
             tokio::spawn(connect_auto_poster(state.clone()));
-||||||| ancestor
-                web_client: reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .user_agent(format!(
-                        "Discord:RSlash:{} (by /u/murrax2)",
-                        env!("CARGO_PKG_VERSION")
-                    ))
-                    .build().unwrap()
-			};
-=======
-                web_client: reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .user_agent(format!(
-                        "Discord:RSlash:{} (by /u/murrax2)",
-                        env!("CARGO_PKG_VERSION")
-                    ))
-                    .build().unwrap(),
-                discord_interface
-			};
->>>>>>> theirs
 
 			let mut client = Client::builder(Token::from_env("DISCORD_TOKEN").expect("Failed to load token from env"), GatewayIntents::GUILDS)
-				.event_handler(Handler)
+				.event_handler(Arc::new(Handler))
 				.data(state)
 				.await
 				.expect("Error creating client");

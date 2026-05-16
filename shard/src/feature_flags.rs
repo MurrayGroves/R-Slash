@@ -41,7 +41,7 @@ impl PartialEq<CommandOption> for &CommandOptionTemplate {
             return false;
         }
 
-        if self.required != other.required {
+        if self.required != other.required() {
             return false;
         }
 

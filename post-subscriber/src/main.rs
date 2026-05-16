@@ -509,7 +509,7 @@ async fn main() {
         Token::from_env("DISCORD_TOKEN_BB").expect("Expected DISCORD_TOKEN_BB in the environment");
     let intents = GatewayIntents::empty();
     let mut client_bb = serenity::Client::builder(token, intents)
-        .event_handler(Handler)
+        .event_handler(Arc::new(Handler))
         .await
         .expect("Err creating client");
     let http_bb = client_bb.http.clone();
@@ -519,7 +519,7 @@ async fn main() {
         Token::from_env("DISCORD_TOKEN_RS").expect("Expected DISCORD_TOKEN_RS in the environment");
     let intents = GatewayIntents::empty();
     let mut client_rs = serenity::Client::builder(token, intents)
-        .event_handler(Handler)
+        .event_handler(Arc::new(Handler))
         .await
         .expect("Err creating client");
     let http_rs = client_rs.http.clone();
