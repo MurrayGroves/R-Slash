@@ -402,6 +402,7 @@ async fn download_loop<'a>() -> Result<(), Error> {
         reddit_proxy::RedditProxyClient::new(tarpc::client::Config::default(), transport).spawn();
 
     println!("Connected to reddit proxy");
+    debug!("Test");
 
     let do_custom = env::var("DO_CUSTOM").expect("DO_CUSTOM not set");
 
@@ -436,6 +437,7 @@ async fn download_loop<'a>() -> Result<(), Error> {
     let web_client = reqwest::Client::builder().user_agent("R Slash").build()?;
 
     debug!("Starting subreddit loop");
+    println!("Starting loop");
     let mut subreddits: HashMap<String, SubredditState> = HashMap::new();
     if do_custom != "true".to_string() {
         let db = mongodb_client.database("config");
