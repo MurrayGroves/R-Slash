@@ -127,6 +127,37 @@ async fn get_namespace() -> String {
     return namespace;
 }
 
+async fn scale_down_shards(new_shard_count: u64) {
+    let namespace = get_namespace().await;
+
+    let client_k8s = kube::Client::try_default().await.unwrap();
+
+    let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> =
+        kube::Api::namespaced(client_k8s, &namespace);
+
+    let patch = serde_json::json!({
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+            "name": "discord-shards",
+            "namespace": namespace
+        },
+        "spec": {
+            "replicas": new_shard_count,
+        }
+    });
+
+    info!("Scaling shards down to {}", new_shard_count,);
+
+    let mut params = kube::api::PatchParams::apply("rslash-manager");
+    params.force = true;
+    let patch = Patch::Apply(&patch);
+    stateful_sets
+        .patch("discord-shards", &params, &patch)
+        .await
+        .expect("Failed to patch statefulset discord-shards");
+}
+
 async fn add_shards(num: u64, max_concurrency: u64) {
     let namespace = get_namespace().await;
 
@@ -323,7 +354,7 @@ async fn main() -> Result<(), Report> {
 
         debug!(
             "Gateway wants {} shards, {} at a time",
-            &total_shards, &max_concurrency
+            total_shards, max_concurrency
         );
 
         server.set_concurrency(max_concurrency as usize).await;
@@ -331,10 +362,10 @@ async fn main() -> Result<(), Report> {
             .await
             .expect("Failed to set total shards");
 
-        if &total_shards > &current_shards {
+        if total_shards > current_shards {
             info!(
                 "Gateway wants {:?} shards, but we only have {:?}",
-                &total_shards, &current_shards
+                total_shards, current_shards
             );
 
             let manual_sharding: String = con
@@ -349,6 +380,8 @@ async fn main() -> Result<(), Report> {
             }
             info!("Booting new shards");
             add_shards(total_shards - current_shards, max_concurrency).await;
+        } else if total_shards < current_shards {
+            scale_down_shards(total_shards).await;
         }
         sleep(Duration::from_secs(60 * 15)).await;
     }
