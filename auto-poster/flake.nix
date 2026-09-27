@@ -40,7 +40,7 @@
 
               nativeBuildInputs = [ pkgs.pkg-config ];
               buildInputs = [ pkgs.openssl ];
-
+              RUSTFLAGS = "-Clinker-features=-lld -Clink-self-contained=-linker"; # i dont know exactly what is going on here https://github.com/rust-lang/rust/issues/162781
             };
             docker = pkgs.dockerTools.buildLayeredImage {
               name = "auto-poster";
