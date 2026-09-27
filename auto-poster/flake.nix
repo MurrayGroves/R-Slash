@@ -37,12 +37,14 @@
               # for now we simply:
               src = ../.; # build the _entire_ repo with crane (so that it knows about the other crates)
               cargoExtraArgs = "-p auto_poster"; # but only actually build this one with cargo
+
+              nativeBuildInputs = [ pkgs.pkg-config ];
+              buildInputs = [ pkgs.openssl ];
+
             };
             docker = pkgs.dockerTools.buildLayeredImage {
               name = "auto-poster";
               tag = "latest";
-              nativeBuildInputs = [ pkgs.pkg-config ];
-              buildInputs = [ pkgs.openssl ];
               config.Entrypoint = [ "${default}/bin/auto_poster" ];
             };
           };
