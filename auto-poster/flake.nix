@@ -41,6 +41,8 @@
             docker = pkgs.dockerTools.buildLayeredImage {
               name = "auto-poster";
               tag = "latest";
+              nativeBuildInputs = [ pkgs.pkg-config ];
+              buildInputs = [ pkgs.openssl ];
               config.Entrypoint = [ "${default}/bin/auto_poster" ];
             };
           };
