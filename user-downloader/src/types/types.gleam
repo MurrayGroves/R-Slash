@@ -5,7 +5,6 @@ import gleam/list
 import gleam/option.{type Option}
 import gleam/result.{try}
 import gleam/string
-import processing/embedding
 import valkyrie
 
 pub type Post {
@@ -138,7 +137,10 @@ pub type ContentType {
   Both
 }
 
-pub fn content_allowed(allow_level: ContentType, post_type: ContentType) -> Bool {
+pub fn content_allowed(
+  allow_level: ContentType,
+  post_type: ContentType,
+) -> Bool {
   case allow_level {
     Both -> True
     _ -> allow_level == post_type
@@ -153,7 +155,7 @@ pub type PostProcessingError {
   InvalidMIMEType
   /// Shouldn't happen unless Reddit messes up
   MediaItemMissingMimeType
-  OpenGraphAnalysisError(embedding.OpenGraphAnalysisError)
+  OpenGraphAnalysisError(OpenGraphAnalysisError)
 }
 
 pub type LinkEmbed {
@@ -164,14 +166,7 @@ pub type LinkEmbed {
   )
 }
 
-pub type Post {
-  Post(
-    id: String,
-    author: String,
-    title: String,
-    reddit_url: String,
-    embed_urls: List(String),
-    timestamp: Int,
-    score: Int,
-  )
+pub type OpenGraphAnalysisError {
+  RequestError
+  ParseError
 }

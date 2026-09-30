@@ -107,13 +107,8 @@ pub fn get_post_media(
   }
 }
 
-pub type OpenGraphAnalysisError {
-  RequestError
-  ParseError
-}
-
 pub fn get_link_embed(
   post: types.RedditPostResponse,
-) -> Result(LinkEmbed, OpenGraphAnalysisError) {
+) -> Result(LinkEmbed, types.PostProcessingError) {
   todo
 }
