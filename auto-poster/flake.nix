@@ -30,7 +30,7 @@
           rec {
             default = craneLib.buildPackage {
               # this setup is a little bit scuffed, in an ideal world we would have the flake build the entire cargo project, but that presents a few problems that it's not my job to fix
-              # the main one I encountered is that using normal `makeRustPlatform` had some issues because the monorepo has 3 different versions of the `serenity` lib at once, which 
+              # the main one I encountered is that using normal `makeRustPlatform` had some issues because the monorepo has 3 different versions of the `serenity` lib at once, which
               # was causing conflicts. The workaround, in lieu of actually fixing the inconsistency seems to be to use the `cargoHash` option rather than `cargoLock`, but
               # I don't like that becuase it means _any_ changes to any part of the monorepo's dependencies would require a change to the flake. In the longer term,
               # if nixifying the whole project is the goal, this would be better
@@ -40,11 +40,12 @@
 
               nativeBuildInputs = [ pkgs.pkg-config ];
               buildInputs = [ pkgs.openssl ];
-              RUSTFLAGS = "-Clinker-features=-lld -Clink-self-contained=-linker"; # i dont know exactly what is going on here https://github.com/rust-lang/rust/issues/162781
+              RUSTFLAGS = "-Clinker-features=-lld -Clink-self-contained=-linker -C force-frame-pointers=yes"; # i dont know exactly what is going on here https://github.com/rust-lang/rust/issues/162781
             };
             docker = pkgs.dockerTools.buildLayeredImage {
-              name = "auto-poster";
+              name = "registry.murraygrov.es/auto-poster";
               tag = "latest";
+              contents = pkgs.cacert;
               config.Entrypoint = [ "${default}/bin/auto_poster" ];
             };
           };
