@@ -115,31 +115,15 @@ impl PostInList {
 }
 
 impl FromRedisValue for PostInList {
-    fn from_redis_value(v: &Value) -> RedisResult<Self> {
+    fn from_redis_value(v: Value) -> Result<Self, redis::ParsingError> {
         match v {
             Value::SimpleString(x) => Ok(PostInList::Existing(x.clone().replace('"', ""))),
             Value::BulkString(x) => Ok(PostInList::Existing(
-                String::from_utf8_lossy(x).to_string().replace('"', ""),
+                String::from_utf8_lossy(x.as_slice())
+                    .to_string()
+                    .replace('"', ""),
             )),
-            _ => Err(redis::RedisError::from((
-                redis::ErrorKind::ParseError,
-                "redis value not supported",
-                format!("Redis value was: {:?}", v),
-            ))),
-        }
-    }
-
-    fn from_owned_redis_value(v: Value) -> RedisResult<Self> {
-        match v {
-            Value::SimpleString(x) => Ok(PostInList::Existing(x.clone().replace('"', ""))),
-            Value::BulkString(x) => Ok(PostInList::Existing(
-                String::from_utf8_lossy(&x).to_string().replace('"', ""),
-            )),
-            _ => Err(redis::RedisError::from((
-                redis::ErrorKind::ParseError,
-                "redis value not supported",
-                format!("Redis value was: {:?}", v),
-            ))),
+            _ => Err(redis::ParsingError::from("redis value not supported")),
         }
     }
 }
@@ -166,7 +150,7 @@ enum SubredditExists {
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-#[tracing::instrument(skip(con, reddit_proxy, downloaders_client, subscriber,))]
+#[tracing::instrument(skip(con, reddit_proxy, downloaders_client, subscriber, chunk_clear_script,))]
 async fn get_subreddit(
     subreddit: String,
     con: &mut redis::aio::MultiplexedConnection,
@@ -176,6 +160,7 @@ async fn get_subreddit(
     pages: Option<u8>,
     downloaders_client: downloaders::client::Client,
     subscriber: SubscriberClient,
+    chunk_clear_script: &redis::Script,
 ) -> Result<(SubredditExists, Option<String>), Error> {
     trace!("Fetching subreddit: {}, after: {:?}", subreddit, after);
 
@@ -348,6 +333,7 @@ async fn get_subreddit(
                 &mut existing_posts,
                 &mut post_list,
                 &subreddit,
+                chunk_clear_script,
             )
             .await
             {
@@ -435,6 +421,21 @@ async fn download_loop<'a>() -> Result<(), Error> {
     .await?;
 
     let web_client = reqwest::Client::builder().user_agent("R Slash").build()?;
+
+    let chunk_clear_script = redis::Script::new(
+        r"
+        -- KEYS[1] = subreddit:{sid}:chunks  (members are bare channel ids)
+        local prefix = string.match(KEYS[1], '^(subreddit:[^:]+:)chunks')
+        if not prefix then
+            return redis.error_reply('registry key does not match expected shape')
+        end
+        for _, cid in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+            redis.call('UNLINK', string.format('%schannels:%s:chunk', prefix, cid))
+        end
+        redis.call('DEL', KEYS[1])
+        return nil
+        ",
+    );
 
     debug!("Starting subreddit loop");
     println!("Starting loop");
@@ -600,6 +601,7 @@ async fn download_loop<'a>() -> Result<(), Error> {
                 Some(1),
                 downloaders_client.clone(),
                 subscriber.clone(),
+                &chunk_clear_script,
             )
             .await
             {

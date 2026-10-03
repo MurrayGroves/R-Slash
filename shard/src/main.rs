@@ -91,6 +91,7 @@ pub struct ShardState {
     pub auto_poster: RwLock<Option<auto_poster::AutoPosterClient>>,
     pub reddit_proxy: reddit_proxy::RedditProxyClient,
     discord_interface: discord_interface::DiscordInterfaceClient,
+    pub clear_channel_chunks_script: redis::Script,
 }
 
 pub fn redis_sanitise(input: &str) -> String {
@@ -1083,6 +1084,20 @@ fn main() {
 					))
 					.build().unwrap(),
 				discord_interface,
+				clear_channel_chunks_script: redis::Script::new(r"
+				-- KEYS[1] = channel:{cid}:chunks   (members: bare subreddit ids)
+				local cid = string.match(KEYS[1], '^channel:(.+):chunks$')
+				if not cid then
+                    return redis.error_reply('registry key does not match expected shape')
+				end
+				for _, sid in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+                    redis.call('UNLINK', string.format('subreddit:%s:channels:%s:chunk', sid, cid))
+                    -- hygiene: drop the cid from that subreddit's registry too
+                    redis.call('SREM', string.format('subreddit:%s:chunks', sid), cid)
+				end
+				redis.call('DEL', KEYS[1])
+				return nil
+				")
             };
 
             let state = Arc::new(state);

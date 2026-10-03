@@ -121,6 +121,15 @@ pub async fn configure_channel_component_handler<'a>(
 
     tracker.send_acknowledge().await?;
 
+    // Clear chunks for channel, since they're no longer valid if text allow level changed
+    let mut redis = ctx.data::<ShardState>().redis.clone();
+    let _: () = ctx
+        .data::<ShardState>()
+        .clear_channel_chunks_script
+        .key(format!("channel:{}:chunks", interaction.channel_id.get()))
+        .invoke_async(&mut redis)
+        .await?;
+
     ctx.data::<ShardState>()
         .posthog
         .capture(

@@ -487,6 +487,8 @@ async fn generate_chunk(
         .lpush(&key, chunk)
         .expire(key, 3600 * 24) // 24 hour expiry - no point being longer, downloader will probably clear before then anyway
         .sadd(format!("subreddit:{}:chunks", subreddit), channel.get())
+        .sadd(format!("channel:{}:chunks", channel.get()), subreddit)
+        .expire(format!("channel:{}:chunks", channel.get()), 3600 * 48) // 48 hour expiry - must be longer than chunk expiry so no chunks get missed in text config changes.
         .exec_async(redis)
         .await?;
     Ok(num_fetched_posts)

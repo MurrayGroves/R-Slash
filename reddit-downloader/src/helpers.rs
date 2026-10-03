@@ -154,6 +154,7 @@ pub async fn process_post_metadata(
     existing_posts: &mut PostLists,
     post_list: &mut PostLists,
     subreddit: &str,
+    chunk_clear_script: &redis::Script,
 ) -> Result<(), Error> {
     // Create a new transaction as an independent continuation
     let ctx = sentry::TransactionContext::continue_from_span(
@@ -429,19 +430,30 @@ pub async fn process_post_metadata(
             }
         };
 
-        push_post_to_redis(con, existing_posts, post_list, subreddit, post_object).await?;
+        push_post_to_redis(
+            con,
+            existing_posts,
+            post_list,
+            subreddit,
+            post_object,
+            chunk_clear_script,
+        )
+        .await?;
     }
 
     transaction.finish();
     Ok(())
 }
 
+/// Push post to Redis, updating lists.
+/// Invalidates chunks for subreddit.
 pub async fn push_post_to_redis(
     redis: &mut redis::aio::MultiplexedConnection,
     existing_posts: &mut PostLists,
     new_posts: &mut PostLists,
     subreddit: &str,
     post: NewPost,
+    chunk_clear_script: &redis::Script,
 ) -> Result<(), Error> {
     let all_new_posts = new_posts.get_mut(TextAllowLevel::Both);
     all_new_posts.push(post.clone().into());
@@ -488,7 +500,15 @@ pub async fn push_post_to_redis(
         }
     }
 
-    Ok(pipe.query_async::<()>(redis).await?)
+    pipe.exec_async(redis).await?;
+
+    // Clear chunks for this subreddit.
+    let _: () = chunk_clear_script
+        .key(format!("subreddit:{}:chunks", subreddit))
+        .invoke_async(redis)
+        .await?;
+
+    Ok(())
 }
 
 /// List of posts by text allow level

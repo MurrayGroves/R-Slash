@@ -2,7 +2,7 @@
 set -e
 source ../secrets.env
 
-nix build
+nix build .#packages.x86_64-linux.docker
 docker load < result
 docker push registry.murraygrov.es/auto-poster
 
