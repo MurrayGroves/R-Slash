@@ -830,9 +830,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
-version = "4.6.7"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1367,7 +1367,7 @@ dependencies = [
  "log",
  "metrics",
  "metrics-exporter-prometheus",
- "redis 1.2.1",
+ "redis 0.32.7",
  "reqwest 0.12.28",
  "rootcause",
  "rootcause-backtrace",
@@ -1413,7 +1413,7 @@ dependencies = [
  "pretty_env_logger",
  "rand 0.10.1",
  "reddit-proxy",
- "redis 0.32.7",
+ "redis 1.7.1",
  "reqwest 0.12.28",
  "rslash_common",
  "rustls 0.23.40",
@@ -3444,6 +3444,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4040,13 +4050,14 @@ dependencies = [
  "futures-util",
  "html-escape",
  "indoc",
+ "itertools",
  "lazy_static",
  "log",
  "metrics",
  "mongodb 3.6.0",
  "pretty_env_logger",
  "rand 0.10.1",
- "redis 0.32.7",
+ "redis 1.7.1",
  "reqwest 0.13.3",
  "rslash_common",
  "sentry 0.29.3",
@@ -4617,7 +4628,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "itoa",
- "num-bigint",
+ "num-bigint 0.4.6",
  "percent-encoding",
  "pin-project-lite",
  "ryu",
@@ -4630,9 +4641,9 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "1.2.1"
+version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72d32a1ac9123f0d84fda64bfc02a271d9868483162dd2d9099b5c362ece064c"
+checksum = "ed5b98ae99461e02895c3a96a25dbe4d852a3d5e5b815d31d5d9e4b5344d99e9"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -4644,7 +4655,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "itoa",
- "num-bigint",
+ "num-bigint 0.5.1",
  "percent-encoding",
  "pin-project-lite",
  "ryu",
@@ -4921,7 +4932,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "mongodb 2.8.2",
- "redis 1.2.1",
+ "redis 0.32.7",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4945,7 +4956,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk 0.26.0",
  "posthog",
- "redis 0.32.7",
+ "redis 1.7.1",
  "reqwest 0.13.3",
  "sentry 0.48.2",
  "serde",

@@ -313,7 +313,7 @@ pub async fn info<'a>(
         .await?;
     let mut guild_count = 0;
     for (_, count) in guild_counts {
-        guild_count += from_redis_value::<u64>(&count)?;
+        guild_count += from_redis_value::<u64>(count)?;
     }
 
     let id = ctx.cache.current_user().id.get();

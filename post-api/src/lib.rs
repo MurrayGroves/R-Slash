@@ -1,11 +1,11 @@
-#![feature(round_char_boundary)]
+#![feature(iter_collect_into)]
 
-use chrono::format::parse;
+use itertools::Itertools;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Error, bail, ensure};
+use anyhow::{Error, anyhow, bail, ensure};
 use async_recursion::async_recursion;
 use ellipse::Ellipse;
 use indoc::indoc;
@@ -13,7 +13,7 @@ use metrics::counter;
 use redis::aio::MultiplexedConnection;
 use redis::{AsyncTypedCommands, from_redis_value};
 use rslash_common::access_tokens::get_reddit_access_token;
-use rslash_common::{Post, SubredditStatus, get_post_content_type};
+use rslash_common::{Post, SubredditStatus};
 use serde_json::json;
 use serenity::all::{
     ButtonStyle, ChannelId, CreateActionRow, CreateButton, CreateEmbed,
@@ -145,7 +145,9 @@ pub async fn get_post_at_search_index(
         .query_async(con)
         .await?;
 
-    Ok(from_redis_value::<String>(&results[1])?)
+    Ok(from_redis_value::<String>(
+        results.into_iter().nth(1).unwrap(),
+    )?)
 }
 
 // Returns the post ID at the given index in the list
@@ -424,6 +426,85 @@ pub async fn get_post_by_id<'a>(
     })
 }
 
+/// Generate a chunk of sendable posts.
+/// Returns number of posts in the chunk.
+async fn generate_chunk(
+    subreddit: &str,
+    redis: &mut MultiplexedConnection,
+    mongodb: &mut mongodb::Client,
+    channel: GenericChannelId,
+) -> Result<usize, Error> {
+    let channel_seen_posts: HashMap<String, u64> = redis::AsyncCommands::hgetall(
+        redis,
+        format!("subreddit:{}:channels:{}:posts", &subreddit, channel),
+    )
+    .await?;
+
+    let channel_text_allow_level = get_channel_config(mongodb, ChannelId::new(channel.get()))
+        .await?
+        .text_allowed
+        .unwrap_or_default();
+
+    // All posts for subreddit
+    let subreddit_all_posts: Vec<String> = redis
+        .lrange(
+            format!(
+                "subreddit:{}:posts:{}",
+                &subreddit, channel_text_allow_level
+            ),
+            0,
+            -1,
+        )
+        .await?;
+
+    debug!("Text allow level is {:?}", channel_text_allow_level);
+
+    const CHUNK_SIZE: usize = 100;
+    let mut chunk: Vec<String> = Vec::with_capacity(CHUNK_SIZE);
+
+    let unseen_posts = subreddit_all_posts
+        .into_iter()
+        .filter(|post| !channel_seen_posts.contains_key(post))
+        .take(CHUNK_SIZE);
+
+    chunk.extend(unseen_posts);
+
+    // Fill chunk up to CHUNK_SIZE with seen posts, longest seen ago first.
+    let num_posts_to_reuse = CHUNK_SIZE - chunk.len();
+    let least_recently_seen_posts = channel_seen_posts
+        .into_iter()
+        .sorted_by(|x, y| x.1.cmp(&y.1))
+        .map(|x| x.0)
+        .take(num_posts_to_reuse);
+
+    chunk.extend(least_recently_seen_posts);
+
+    let key = format!("subreddit:{}:channels:{}:chunk", subreddit, channel);
+
+    let num_fetched_posts = chunk.len();
+    redis::pipe()
+        .del(&key)
+        .lpush(&key, chunk)
+        .expire(key, 3600 * 24) // 24 hour expiry - no point being longer, downloader will probably clear before then anyway
+        .sadd(format!("subreddit:{}:chunks", subreddit), channel.get())
+        .exec_async(redis)
+        .await?;
+    Ok(num_fetched_posts)
+}
+
+async fn pop_post_from_chunk(
+    redis: &mut MultiplexedConnection,
+    subreddit: &str,
+    channel: GenericChannelId,
+) -> Result<Option<String>, Error> {
+    Ok(redis
+        .lpop(
+            format!("subreddit:{}:channels:{}:chunk", subreddit, channel),
+            None,
+        )
+        .await?)
+}
+
 #[instrument(skip(redis, mongodb))]
 #[async_recursion]
 pub async fn get_subreddit<'a>(
@@ -435,60 +516,20 @@ pub async fn get_subreddit<'a>(
 ) -> Result<PostInContext, Error> {
     let subreddit = subreddit.to_lowercase();
 
-    let fetched_posts: HashMap<String, u64> = redis::AsyncCommands::hgetall(
-        redis,
-        format!("subreddit:{}:channels:{}:posts", &subreddit, channel),
-    )
-    .await?;
+    let post_id = pop_post_from_chunk(redis, &subreddit, channel).await?;
 
-    let text_allow_level = get_channel_config(mongodb, ChannelId::new(channel.get()))
-        .await?
-        .text_allowed
-        .unwrap_or_default();
-
-    let posts: Vec<String> = redis
-        .lrange(
-            format!("subreddit:{}:posts:{}", &subreddit, text_allow_level),
-            0,
-            -1,
-        )
-        .await?;
-
-    debug!("Text allow level is {:?}", text_allow_level);
-
-    // Find the first post that the channel has not seen before, or if all seen, the one seen longest ago
-    let mut post_id: Option<String> = None;
-    let mut minimum_post: Option<(String, u64)> = None;
-    for post in posts.into_iter() {
-        if fetched_posts.contains_key(&post) {
-            let timestamp = *fetched_posts.get(&post).unwrap();
-            if let Some(current_min) = &minimum_post {
-                if timestamp < current_min.1 {
-                    minimum_post = Some((post, timestamp));
-                }
-            } else {
-                minimum_post = Some((post, timestamp));
-            }
+    let post_id = if let Some(post_id) = post_id {
+        post_id
+    } else {
+        if generate_chunk(&subreddit, redis, mongodb, channel).await? == 0 {
+            bail!(PostApiError::NoPostsFound { subreddit })
         } else {
-            post_id = Some(post);
-            break;
+            pop_post_from_chunk(redis, &subreddit, channel)
+                .await?
+                .ok_or(anyhow!(
+                    "No post found in chunk despite being told there would be one."
+                ))?
         }
-    }
-
-    // If all posts have been seen, find the post that the channel saw longest ago
-    if post_id.is_none() {
-        debug!("Channel has seen all posts, using the oldest post");
-        match minimum_post {
-            Some((post, _)) => {
-                post_id = Some(post.to_string());
-            }
-            None => {}
-        };
-    }
-
-    let post_id = match post_id {
-        Some(id) => id,
-        None => bail!(PostApiError::NoPostsFound { subreddit }),
     };
 
     redis
@@ -508,9 +549,17 @@ pub async fn get_subreddit<'a>(
             let _ = span.enter();
             info!("Error was: {:?}, getting {:?}", e, post_id);
             error!("Error getting post by ID");
+            let channel_text_allow_level =
+                get_channel_config(mongodb, ChannelId::new(channel.get()))
+                    .await?
+                    .text_allowed
+                    .unwrap_or_default();
             redis
                 .lrem(
-                    format!("subreddit:{}:posts:{}", &subreddit, text_allow_level),
+                    format!(
+                        "subreddit:{}:posts:{}",
+                        &subreddit, channel_text_allow_level
+                    ),
                     1,
                     &post_id,
                 )

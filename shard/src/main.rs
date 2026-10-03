@@ -649,20 +649,20 @@ impl EventHandler for Handler {
                                 continue;
                             }
 
-                            if let Ok(x) = String::from_redis_value(&result) {
+                            if let Ok(x) = String::from_redis_value(result.clone()) {
                                 if x.starts_with("custom_sub") {
                                     continue;
                                 }
                             }
 
-                            let result: Vec<redis::Value> = match result.into_sequence() {
-                                Ok(x) => x,
+                            let result: redis::Value = match result.into_sequence() {
+                                Ok(x) => x.into_iter().nth(1).unwrap(),
                                 Err(e) => {
                                     error!("Error getting autocomplete result: {:?}", e);
                                     continue;
                                 }
                             };
-                            let name = match String::from_redis_value(&result[1]) {
+                            let name = match String::from_redis_value(result) {
                                 Ok(x) => x,
                                 Err(e) => {
                                     error!("Error getting autocomplete result: {:?}", e);

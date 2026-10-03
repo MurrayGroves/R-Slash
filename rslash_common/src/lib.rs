@@ -3,8 +3,8 @@ mod guards;
 pub mod rpc;
 
 pub use access_tokens::Limiter;
+use redis::FromRedisValue;
 use redis::aio::MultiplexedConnection;
-use redis::{FromRedisValue, RedisError};
 use user_config_manager::TextAllowLevel;
 
 use std::collections::HashMap;
@@ -343,42 +343,32 @@ pub struct Post {
 }
 
 impl FromRedisValue for Post {
-    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
+    fn from_redis_value(v: redis::Value) -> Result<Self, redis::ParsingError> {
         let post: HashMap<String, String> = redis::from_redis_value(v)?;
 
         if post.is_empty() {
-            return Err(RedisError::from((
-                redis::ErrorKind::ParseError,
-                "Post data is empty",
-            )));
+            return Err(redis::ParsingError::from("Post data is empty"));
         }
 
-        let id = post.get("id").ok_or(RedisError::from((
-            redis::ErrorKind::ParseError,
-            "id missing",
-        )))?;
+        let id = post
+            .get("id")
+            .ok_or(redis::ParsingError::from("id missing"))?;
 
-        let author = post.get("author").ok_or(RedisError::from((
-            redis::ErrorKind::ParseError,
-            "author missing",
-        )))?;
+        let author = post
+            .get("author")
+            .ok_or(redis::ParsingError::from("author missing"))?;
 
-        let title = post.get("title").ok_or(RedisError::from((
-            redis::ErrorKind::ParseError,
-            "title missing",
-        )))?;
+        let title = post
+            .get("title")
+            .ok_or(redis::ParsingError::from("title missing"))?;
 
-        let url = post.get("url").ok_or(RedisError::from((
-            redis::ErrorKind::ParseError,
-            "url missing",
-        )))?;
+        let url = post
+            .get("url")
+            .ok_or(redis::ParsingError::from("url missing"))?;
 
         let embed_urls: Vec<String> = post
             .get("embed_url")
-            .ok_or(RedisError::from((
-                redis::ErrorKind::ParseError,
-                "embed_url missing",
-            )))?
+            .ok_or(redis::ParsingError::from("embed_url missing"))?
             .split(",")
             .into_iter()
             .filter(|x| !x.is_empty())
@@ -393,29 +383,18 @@ impl FromRedisValue for Post {
         let timestamp = post
             .get("timestamp")
             .map(|s| {
-                s.parse::<u64>().map_err(|_| {
-                    RedisError::from((
-                        redis::ErrorKind::ParseError,
-                        "timestamp must be a valid u64",
-                    ))
-                })
+                s.parse::<u64>()
+                    .map_err(|_| redis::ParsingError::from("timestamp must be a valid u64"))
             })
-            .ok_or(RedisError::from((
-                redis::ErrorKind::ParseError,
-                "timestamp missing",
-            )))??;
+            .ok_or(redis::ParsingError::from("timestamp missing"))??;
 
         let score = post
             .get("score")
             .map(|s| {
-                s.parse::<isize>().map_err(|_| {
-                    RedisError::from((redis::ErrorKind::ParseError, "score must be a valid isize"))
-                })
+                s.parse::<isize>()
+                    .map_err(|_| redis::ParsingError::from("score must be a valid isize"))
             })
-            .ok_or(RedisError::from((
-                redis::ErrorKind::ParseError,
-                "score missing",
-            )))??;
+            .ok_or(redis::ParsingError::from("score missing"))??;
 
         Ok(Post {
             id: id.to_string(),
