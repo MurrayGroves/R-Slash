@@ -475,27 +475,12 @@ pub async fn push_post_to_redis(
 
     pipe.atomic()
         .del(format!("subreddit:{}:posts:both", subreddit))
-        .rpush::<String, Vec<&String>>(format!("subreddit:{}:posts:both", subreddit), post_keys);
+        .rpush::<String, &Vec<&String>>(format!("subreddit:{}:posts:both", subreddit), &post_keys);
 
     match post.post.get_text_level() {
         TextAllowLevel::Both => {}
         level => {
             let key = format!("subreddit:{}:posts:{}", subreddit, level);
-            let all_new_posts = new_posts.get_mut(TextAllowLevel::Both);
-            all_new_posts.push(post.clone().into());
-
-            let post_keys = all_new_posts
-                .iter()
-                .chain(existing_posts.get(level))
-                .filter(|post| {
-                    if let PostInList::New(post) = post {
-                        post.embeddability != NeedsProcessing
-                    } else {
-                        true
-                    }
-                })
-                .map(|post| post.key())
-                .collect();
             pipe.del(&key).rpush::<String, Vec<&String>>(key, post_keys);
         }
     }

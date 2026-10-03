@@ -943,6 +943,8 @@ fn main() {
 				.expect("Can't connect to redis");
 			println!("Connected to redis");
 
+			con.set_response_timeout(Duration::from_secs(10));
+
 			let posthog_key: String = env::var("POSTHOG_API_KEY")
 				.expect("POSTHOG_API_KEY not set")
 				.parse()
