@@ -10,11 +10,10 @@ use rslash_common::Post;
 use sentry::TransactionOrSpan;
 use serde_json::Value::Null;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 use std::time::Duration;
 use tarpc::context;
 use tl::ParserOptions;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use truncrate::TruncateToBoundary;
 use user_config_manager::TextAllowLevel;
 
@@ -154,7 +153,6 @@ pub async fn process_post_metadata(
     existing_posts: &mut PostLists,
     post_list: &mut PostLists,
     subreddit: &str,
-    chunk_clear_script: &redis::Script,
 ) -> Result<(), Error> {
     // Create a new transaction as an independent continuation
     let ctx = sentry::TransactionContext::continue_from_span(
@@ -191,8 +189,6 @@ pub async fn process_post_metadata(
     }
 
     let existing_allow_level = existing_posts.get_post_type(PostInList::Existing(key.clone()));
-
-    let exists = existing_allow_level.is_some();
 
     // If the post has been removed by a moderator, remove it from the DB and skip it
     if post.get("removed_by_category").unwrap_or(&Null) != &Null
@@ -430,69 +426,10 @@ pub async fn process_post_metadata(
             }
         };
 
-        push_post_to_redis(
-            con,
-            existing_posts,
-            post_list,
-            subreddit,
-            post_object,
-            chunk_clear_script,
-        )
-        .await?;
+        post_list.add_post(post_object);
     }
 
     transaction.finish();
-    Ok(())
-}
-
-/// Push post to Redis, updating lists.
-/// Invalidates chunks for subreddit.
-pub async fn push_post_to_redis(
-    redis: &mut redis::aio::MultiplexedConnection,
-    existing_posts: &mut PostLists,
-    new_posts: &mut PostLists,
-    subreddit: &str,
-    post: NewPost,
-    chunk_clear_script: &redis::Script,
-) -> Result<(), Error> {
-    let all_new_posts = new_posts.get_mut(TextAllowLevel::Both);
-    all_new_posts.push(post.clone().into());
-
-    let post_keys = all_new_posts
-        .iter()
-        .chain(existing_posts.get(TextAllowLevel::Both))
-        .filter(|post| {
-            if let PostInList::New(post) = post {
-                post.embeddability != NeedsProcessing
-            } else {
-                true
-            }
-        })
-        .map(|post| post.key())
-        .collect();
-
-    let mut pipe = redis::pipe();
-
-    pipe.atomic()
-        .del(format!("subreddit:{}:posts:both", subreddit))
-        .rpush::<String, &Vec<&String>>(format!("subreddit:{}:posts:both", subreddit), &post_keys);
-
-    match post.post.get_text_level() {
-        TextAllowLevel::Both => {}
-        level => {
-            let key = format!("subreddit:{}:posts:{}", subreddit, level);
-            pipe.del(&key).rpush::<String, Vec<&String>>(key, post_keys);
-        }
-    }
-
-    pipe.exec_async(redis).await?;
-
-    // Clear chunks for this subreddit.
-    let _: () = chunk_clear_script
-        .key(format!("subreddit:{}:chunks", subreddit))
-        .invoke_async(redis)
-        .await?;
-
     Ok(())
 }
 
@@ -545,5 +482,75 @@ impl PostLists {
             media_only: Vec::with_capacity(1000),
             text_only: Vec::with_capacity(1000),
         }
+    }
+
+    /// Add a post to the internal lists.
+    pub fn add_post(&mut self, post: NewPost) {
+        let text_allow_level = post.post.get_text_level();
+        if text_allow_level != TextAllowLevel::Both {
+            self.get_mut(text_allow_level).push(post.clone().into());
+        }
+        self.get_mut(TextAllowLevel::Both).push(post.into())
+    }
+
+    fn add_allow_level_to_pipe(
+        &self,
+        subreddit: &str,
+        existing_posts: &Self,
+        pipe: &mut redis::Pipeline,
+        text_allow_level: TextAllowLevel,
+    ) {
+        let post_keys: Vec<&String> = self
+            .get(text_allow_level)
+            .iter()
+            .chain(existing_posts.get(text_allow_level))
+            .map(|post| post.key())
+            .collect();
+
+        if post_keys.len() == 0 {
+            info!("r/{} has no posts of level {}", subreddit, text_allow_level);
+            return;
+        }
+
+        let key = format!("subreddit:{}:posts:{}", subreddit, text_allow_level);
+
+        pipe.del(&key).rpush(key, post_keys);
+    }
+
+    /// Update Redis to contain this ordering of posts.
+    pub async fn push_to_redis(
+        &self,
+        redis: &mut redis::aio::MultiplexedConnection,
+        subreddit: &str,
+        chunk_clear_script: &redis::Script,
+        existing_posts: &Self,
+    ) -> Result<(), Error> {
+        let mut pipe = redis::pipe();
+
+        pipe.atomic();
+
+        self.add_allow_level_to_pipe(subreddit, existing_posts, &mut pipe, TextAllowLevel::Both);
+        self.add_allow_level_to_pipe(
+            subreddit,
+            existing_posts,
+            &mut pipe,
+            TextAllowLevel::MediaOnly,
+        );
+        self.add_allow_level_to_pipe(
+            subreddit,
+            existing_posts,
+            &mut pipe,
+            TextAllowLevel::TextOnly,
+        );
+
+        pipe.exec_async(redis).await?;
+
+        // Clear chunks for this subreddit.
+        let _: () = chunk_clear_script
+            .key(format!("subreddit:{}:chunks", subreddit))
+            .invoke_async(redis)
+            .await?;
+
+        Ok(())
     }
 }

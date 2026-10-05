@@ -108,11 +108,12 @@ pub struct Client {
     redgifs: Option<redgifs::Client>,
     path: String,
     process_lock: Arc<Mutex<()>>,
-    requests: Arc<Mutex<VecDeque<(String, PostLists)>>>,
+    requests: Arc<Mutex<VecDeque<(String, PostLists, PostLists)>>>,
     redis: redis::aio::MultiplexedConnection,
     subscriber_client: SubscriberClient,
     /// The time the current subreddit started processing, and which subreddit that is.
     subreddit_started_at: Arc<Mutex<Option<(String, Instant)>>>,
+    chunk_clear_script: redis::Script,
 }
 
 impl Client {
@@ -125,6 +126,7 @@ impl Client {
         imgur_client_id: Option<String>,
         redis: redis::aio::MultiplexedConnection,
         subscriber_client: SubscriberClient,
+        chunk_clear_script: redis::Script,
     ) -> Result<Self> {
         let new = Self {
             imgur: match imgur_client_id {
@@ -153,6 +155,7 @@ impl Client {
             redis,
             subscriber_client,
             subreddit_started_at: Arc::new(Mutex::new(None)),
+            chunk_clear_script,
         };
 
         let new_clone = new.clone();
@@ -175,11 +178,12 @@ impl Client {
         Ok(new)
     }
 
-    #[tracing::instrument(skip(self, posts))]
+    #[tracing::instrument(skip(self, posts, existing_posts))]
     async fn process_subreddit_posts(
         &mut self,
         subreddit: String,
         mut posts: PostLists,
+        existing_posts: PostLists,
     ) -> Result<()> {
         debug!("Processing media for subreddit: {}", subreddit);
 
@@ -310,12 +314,21 @@ impl Client {
 
         debug!("Finished media for subreddit: {}", subreddit);
 
+        posts
+            .push_to_redis(
+                &mut self.redis,
+                &subreddit,
+                &self.chunk_clear_script,
+                &existing_posts,
+            )
+            .await?;
+
         Ok(())
     }
 
     async fn process_queue(mut self) -> Result<()> {
         loop {
-            let (subreddit, posts) = {
+            let (subreddit, posts, existing_posts) = {
                 let mut interval = tokio::time::interval(Duration::from_millis(100));
                 loop {
                     interval.tick().await;
@@ -329,7 +342,7 @@ impl Client {
                     .ok_or(anyhow!("Failed to pop request"))?
             };
 
-            self.process_subreddit_posts(subreddit.clone(), posts)
+            self.process_subreddit_posts(subreddit.clone(), posts, existing_posts)
                 .await?;
         }
     }
@@ -586,9 +599,9 @@ impl Client {
     pub async fn is_finished(&self, subreddit: &str) -> bool {
         let subreddit = subreddit.to_lowercase();
         if let Some(started_at) = self.subreddit_started_at.lock().await.as_ref() {
-            if started_at.1.elapsed() > Duration::from_secs(600) {
+            if started_at.1.elapsed() > Duration::from_secs(3600) {
                 error!(
-                    "Some subreddit has been processing for over 10 minutes, has been {:?} seconds",
+                    "Some subreddit has been processing for over 60 minutes, has been {:?} seconds",
                     started_at.1.elapsed().as_secs()
                 );
                 panic!("Subreddit processing timed out")
@@ -618,6 +631,7 @@ impl Client {
         &self,
         subreddit: &str,
         posts: PostLists,
+        existing_posts: PostLists,
     ) -> Result<()> {
         let subreddit = subreddit.to_lowercase();
         debug!("Adding subreddit to process queue: {}", subreddit);
@@ -627,10 +641,10 @@ impl Client {
             "Requests queue: {:?}",
             requests
                 .iter()
-                .map(|(sub, _)| sub)
+                .map(|(sub, _, _)| sub)
                 .collect::<Vec<&String>>()
         );
-        requests.push_back((subreddit.to_string(), posts));
+        requests.push_back((subreddit.to_string(), posts, existing_posts));
         Ok(())
     }
 }

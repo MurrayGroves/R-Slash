@@ -150,7 +150,7 @@ enum SubredditExists {
 /// The Reddit access token as a [String](String)
 /// ## device_id
 /// None if a default subreddit, otherwise is the user's ID.
-#[tracing::instrument(skip(con, reddit_proxy, downloaders_client, subscriber, chunk_clear_script,))]
+#[tracing::instrument(skip(con, reddit_proxy, downloaders_client, subscriber,))]
 async fn get_subreddit(
     subreddit: String,
     con: &mut redis::aio::MultiplexedConnection,
@@ -160,7 +160,6 @@ async fn get_subreddit(
     pages: Option<u8>,
     downloaders_client: downloaders::client::Client,
     subscriber: SubscriberClient,
-    chunk_clear_script: &redis::Script,
 ) -> Result<(SubredditExists, Option<String>), Error> {
     trace!("Fetching subreddit: {}, after: {:?}", subreddit, after);
 
@@ -333,7 +332,6 @@ async fn get_subreddit(
                 &mut existing_posts,
                 &mut post_list,
                 &subreddit,
-                chunk_clear_script,
             )
             .await
             {
@@ -346,12 +344,10 @@ async fn get_subreddit(
         }
     }
 
-    post_list.append(existing_posts);
-
     if let Some(subreddit_name) = subreddit_name {
         // Add to processing queue
         downloaders_client
-            .queue_subreddit_for_processing(&subreddit_name, post_list)
+            .queue_subreddit_for_processing(&subreddit_name, post_list, existing_posts)
             .await?;
     }
 
@@ -370,6 +366,7 @@ async fn download_loop<'a>() -> Result<(), Error> {
         .await
         .expect("Can't connect to redis");
 
+    con.set_response_timeout(Duration::from_secs(10));
     println!("Connecting to reddit proxy...");
     let reconnect_opts = ReconnectOptions::new()
         .with_exit_if_first_connect_fails(false)
@@ -412,16 +409,6 @@ async fn download_loop<'a>() -> Result<(), Error> {
 
     let subscriber = SubscriberClient::new(client::Config::default(), transport).spawn();
 
-    let downloaders_client = downloaders::client::Client::new(
-        "/data/media".to_string(),
-        Some(imgur_client_id),
-        con.clone(),
-        subscriber.clone(),
-    )
-    .await?;
-
-    let web_client = reqwest::Client::builder().user_agent("R Slash").build()?;
-
     let chunk_clear_script = redis::Script::new(
         r"
         -- KEYS[1] = subreddit:{sid}:chunks  (members are bare channel ids)
@@ -436,6 +423,17 @@ async fn download_loop<'a>() -> Result<(), Error> {
         return nil
         ",
     );
+
+    let downloaders_client = downloaders::client::Client::new(
+        "/data/media".to_string(),
+        Some(imgur_client_id),
+        con.clone(),
+        subscriber.clone(),
+        chunk_clear_script,
+    )
+    .await?;
+
+    let web_client = reqwest::Client::builder().user_agent("R Slash").build()?;
 
     debug!("Starting subreddit loop");
     println!("Starting loop");
@@ -601,7 +599,6 @@ async fn download_loop<'a>() -> Result<(), Error> {
                 Some(1),
                 downloaders_client.clone(),
                 subscriber.clone(),
-                &chunk_clear_script,
             )
             .await
             {
