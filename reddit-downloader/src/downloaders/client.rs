@@ -109,11 +109,12 @@ pub struct Client {
     path: String,
     process_lock: Arc<Mutex<()>>,
     requests: Arc<Mutex<VecDeque<(String, PostLists, PostLists)>>>,
-    redis: redis::aio::MultiplexedConnection,
+    pub redis: redis::aio::MultiplexedConnection,
     subscriber_client: SubscriberClient,
     /// The time the current subreddit started processing, and which subreddit that is.
     subreddit_started_at: Arc<Mutex<Option<(String, Instant)>>>,
     chunk_clear_script: redis::Script,
+    pub score_update_script: redis::Script,
 }
 
 impl Client {
@@ -127,6 +128,7 @@ impl Client {
         redis: redis::aio::MultiplexedConnection,
         subscriber_client: SubscriberClient,
         chunk_clear_script: redis::Script,
+        score_update_script: redis::Script,
     ) -> Result<Self> {
         let new = Self {
             imgur: match imgur_client_id {
@@ -156,6 +158,7 @@ impl Client {
             subscriber_client,
             subreddit_started_at: Arc::new(Mutex::new(None)),
             chunk_clear_script,
+            score_update_script
         };
 
         let new_clone = new.clone();

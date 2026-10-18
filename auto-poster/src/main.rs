@@ -275,12 +275,7 @@ struct Handler;
 #[async_trait]
 impl EventHandler for Handler {}
 
-#[tokio::main]
-async fn main() {
-    debug!("Starting...");
-
-    initialise_observability!("auto-poster");
-
+fn main() {
     let _guard = sentry::init(("https://07bd85d599d280093efda1eb9bd65a3c@o4504774745718784.ingest.us.sentry.io/4507850989436928", sentry::ClientOptions {
 		release: sentry::release_name!(),
 		traces_sample_rate: 0.2,
@@ -288,6 +283,18 @@ async fn main() {
 		server_name: None,
 		..Default::default()
 	}));
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async_main());
+}
+
+async fn async_main() {
+    debug!("Starting...");
+
+    initialise_observability!("auto-poster");
 
     let mongo_url = env::var("MONGO_URL").expect("MONGO_URL not set");
     let mut client_options = ClientOptions::parse(mongo_url).await.unwrap();
@@ -337,6 +344,7 @@ async fn main() {
         .get_multiplexed_async_connection()
         .await
         .expect("Can't connect to redis");
+    redis.set_response_timeout(Duration::from_secs(10));
 
     let bots = HashMap::from([
         (282921751141285888, "r-slash"),

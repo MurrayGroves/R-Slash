@@ -158,7 +158,7 @@ async fn get_subreddit(
     reddit_proxy: &RedditProxyClient,
     mut after: Option<String>,
     pages: Option<u8>,
-    downloaders_client: downloaders::client::Client,
+    downloaders_client: &mut downloaders::client::Client,
     subscriber: SubscriberClient,
 ) -> Result<(SubredditExists, Option<String>), Error> {
     trace!("Fetching subreddit: {}, after: {:?}", subreddit, after);
@@ -332,6 +332,7 @@ async fn get_subreddit(
                 &mut existing_posts,
                 &mut post_list,
                 &subreddit,
+                downloaders_client
             )
             .await
             {
@@ -424,12 +425,26 @@ async fn download_loop<'a>() -> Result<(), Error> {
         ",
     );
 
-    let downloaders_client = downloaders::client::Client::new(
+    let score_update_script = redis::Script::new(
+        r"
+        -- KEYS[1] = subreddit
+        -- KEYS[2] = post
+        -- VALS[1] = score
+        local key = string.format('subreddit:%s:post:%s', KEYS[1], KEYS[2])
+        current_score = redis.call('HGET', key, 'score')
+        if abs((VALS[1] - current_score) / VALS[1]) > 0.1 then
+            redis.call('HSET', key, 'score', VALS[1])
+        end
+        "
+    );
+
+    let mut downloaders_client = downloaders::client::Client::new(
         "/data/media".to_string(),
         Some(imgur_client_id),
         con.clone(),
         subscriber.clone(),
         chunk_clear_script,
+        score_update_script
     )
     .await?;
 
@@ -597,7 +612,7 @@ async fn download_loop<'a>() -> Result<(), Error> {
                 &reddit_proxy,
                 fetched_up_to.clone(),
                 Some(1),
-                downloaders_client.clone(),
+                &mut downloaders_client,
                 subscriber.clone(),
             )
             .await

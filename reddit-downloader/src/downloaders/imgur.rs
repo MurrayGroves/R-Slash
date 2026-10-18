@@ -131,6 +131,12 @@ impl Client {
     /// Download a single image from a url, and return the path to the image, or URL if no conversion is needed
     #[instrument(skip(self))]
     pub async fn request(&self, mut url: &str, filename: &str) -> Result<String, Error> {
+        if self.limiter.check_wait().await {
+            bail!(
+                "Imgur rate limit hit, it's usually very long when hit, so we'll error for now, and hopefully the post will get processed again in the future."
+            )
+        }
+
         if url.ends_with("/") {
             url = &url[..url.len() - 1];
         }

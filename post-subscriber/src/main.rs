@@ -2,6 +2,7 @@ use futures::{Future, StreamExt};
 use mongodb::bson::doc;
 use mongodb::options::ClientOptions;
 use redis::AsyncTypedCommands;
+use rustls::server;
 use serde_json::json;
 use serenity::all::{ChannelId, CreateMessage, GatewayIntents, GuildId, Http, Token};
 use serenity::{all::EventHandler, async_trait};
@@ -19,10 +20,7 @@ use futures::future;
 use metrics::{counter, gauge, histogram};
 use post_subscriber::{Bot, Subscriber, Subscription};
 use rslash_common::{get_post_content_type, initialise_observability, span_filter};
-use tarpc::{
-    server::{self, Channel},
-    tokio_serde::formats::Bincode,
-};
+use tarpc::{server::Channel, tokio_serde::formats::Bincode};
 
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
@@ -37,6 +35,7 @@ struct Subscriptions {
     by_channel: HashMap<u64, HashSet<Arc<Subscription>>>,
 }
 
+#[derive(Clone)]
 struct PostAlert<'a> {
     message: CreateMessage<'a>,
     subscriptions: Vec<Arc<Subscription>>,
@@ -59,7 +58,7 @@ impl SubscriberServer<'_> {
     #[tracing::instrument(skip(self))]
     async fn watch_alerts(self) {
         let mut outer_interval = interval(tokio::time::Duration::from_millis(100));
-        let inner_duration = tokio::time::Duration::from_millis(1000 / 20); // Send alerts at max of 20 per second (Discord global rate limit is 50 reqs per second)
+        let mut inner_interval = interval(tokio::time::Duration::from_millis(1000 / 20)); // Send alerts at max of 20 per second (Discord global rate limit is 50 reqs per second)
         loop {
             outer_interval.tick().await;
             debug!("Locking queued alerts.");
@@ -83,17 +82,8 @@ impl SubscriberServer<'_> {
 
             counter!("subscriber_processed_alert_batches").increment(1);
 
-            let mut last_alert = Instant::now() - inner_duration;
             for alert in next_alert.subscriptions {
-                // Ensure we don't send more than 35 messages per second
-                if last_alert.elapsed() < inner_duration {
-                    debug!(
-                        "Waiting to send next alert, last alert was sent {} seconds ago",
-                        last_alert.elapsed().as_secs()
-                    );
-                    debug!("Waiting for {} seconds", inner_duration.as_secs_f64());
-                    tokio::time::sleep(inner_duration - last_alert.elapsed()).await;
-                }
+                inner_interval.tick().await;
 
                 let failed_reqs = self.failed_req_counter.lock().await;
                 if *failed_reqs > 1000 {
@@ -101,12 +91,7 @@ impl SubscriberServer<'_> {
                 }
                 drop(failed_reqs);
 
-                last_alert = Instant::now();
                 let channel: ChannelId = alert.channel.into();
-                let http = match alert.bot {
-                    Bot::BB => &self.discord_bb,
-                    Bot::RS => &self.discord_rs,
-                };
                 debug!(
                     "Sending alert for {} to channel {}",
                     alert.subreddit, channel
@@ -130,28 +115,36 @@ impl SubscriberServer<'_> {
                     continue;
                 }
 
+                let server = self.clone();
+                let msg = next_alert.message.clone();
+                let next_alert_clone = next_alert.clone();
+                tokio::spawn(async move {
+                    let http = match alert.bot {
+                        Bot::BB => &server.discord_bb,
+                        Bot::RS => &server.discord_rs,
+                    };
                 let response = match timeout(
                     Duration::from_secs(30),
                     channel
                         .widen()
-                        .send_message(http, next_alert.message.clone()),
+                        .send_message(http, msg),
                 )
                 .await
                 {
                     Ok(resp) => resp,
                     Err(_) => {
                         error!("Timeout while sending message to channel");
-                        let mut counter = self.failed_req_counter.lock().await;
+                        let mut counter = server.failed_req_counter.lock().await;
                         *counter += 1;
                         counter!("subscriber_failed_messages").increment(1);
                         counter!("subscriber_failed_message_timeouts").increment(1);
-                        continue;
+                        return;
                     }
                 };
 
                 match response {
                     Ok(_) => {
-                        let elapsed = next_alert.timestamp.elapsed();
+                        let elapsed = next_alert_clone.timestamp.elapsed();
                         debug!(
                             "Sent {} to channel {}, was added {} seconds ago",
                             alert.subreddit,
@@ -169,7 +162,7 @@ impl SubscriberServer<'_> {
                         {
                             if e.error.code.0 == 10003 {
                                 debug!("Channel doesn't exist anymore, deleting subscription");
-                                let mut subscriptions = self.subscriptions.write().await;
+                                let mut subscriptions = server.subscriptions.write().await;
                                 match subscriptions.by_channel.get_mut(&alert.channel) {
                                     Some(x) => {
                                         x.remove(&*alert);
@@ -192,18 +185,21 @@ impl SubscriberServer<'_> {
                                 }
                             } else {
                                 error!("Failed to send message to channel: {:?}", e);
-                                let mut failed_reqs = self.failed_req_counter.lock().await;
+                                let mut failed_reqs = server.failed_req_counter.lock().await;
                                 *failed_reqs += 1;
                                 counter!("subscriber_failed_messages").increment(1);
                             }
                         } else {
                             error!("{}", error_text);
-                            let mut failed_reqs = self.failed_req_counter.lock().await;
+                            let mut failed_reqs = server.failed_req_counter.lock().await;
                             *failed_reqs += 1;
                             counter!("subscriber_failed_messages").increment(1);
                         }
                     }
                 }
+
+
+            }).await;
             }
         }
     }
@@ -618,7 +614,7 @@ async fn main() {
         listener
             // Ignore accept errors.
             .filter_map(|r| future::ready(r.ok()))
-            .map(server::BaseChannel::with_defaults)
+            .map(tarpc::server::BaseChannel::with_defaults)
             // serve is generated by the service attribute. It takes as input any type implementing
             // the generated SubscriberServer trait.
             .map(move |channel| {

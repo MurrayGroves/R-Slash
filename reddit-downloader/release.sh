@@ -1,12 +1,13 @@
+#!/bin/sh
 set -e
 source ../secrets.env
 
-RUSTFLAGS="--cfg tokio_unstable" cargo build --release
-docker build -f Dockerfile -t registry.murraygrov.es/reddit-downloader --network=host ../target/release
+nix build .#packages.x86_64-linux.docker
+docker load < result
 docker push registry.murraygrov.es/reddit-downloader
 
-sentry-cli --auth-token ${SENTRY_TOKEN} upload-dif --org r-slash --project downloader ../target/release/
-
+docker build -f Dockerfile -t registry.murraygrov.es/discord-shard:dev --network=host build/
+docker push registry.murraygrov.es/discord-shard:dev
 ssh -4 mediaserver@home.murraygrov.es "kubectl -n discord-bot-shared rollout restart deployment/reddit-downloader"
 sleep 1
 ssh -4 mediaserver@home.murraygrov.es "kubectl rollout -n discord-bot-shared status deployment reddit-downloader"

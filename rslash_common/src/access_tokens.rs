@@ -331,4 +331,17 @@ impl Limiter {
             debug!("Finished waiting for rate limit on {}", self.name);
         }
     }
+
+    pub async fn check_wait(&self) -> bool {
+        let state = match timeout(Duration::from_secs(300), self.state.lock()).await {
+            Ok(state) => state,
+            Err(_) => {
+                panic!("Failed to acquire lock on rate limit state within 5 minutes");
+            }
+        };
+        if state.remaining < 3 && state.reset > chrono::Utc::now().timestamp() {
+            return true;
+        }
+        return false;
+    }
 }

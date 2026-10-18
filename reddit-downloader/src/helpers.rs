@@ -1,5 +1,5 @@
 use crate::helpers::Embeddability::{Embeddable, NeedsProcessing, NotEmbeddable, TextOnly};
-use crate::{NewPost, PostInList};
+use crate::{NewPost, PostInList, downloaders};
 use anyhow::{Context, Error, anyhow};
 use log::error;
 use metrics::counter;
@@ -153,6 +153,7 @@ pub async fn process_post_metadata(
     existing_posts: &mut PostLists,
     post_list: &mut PostLists,
     subreddit: &str,
+    client: &mut downloaders::client::Client,
 ) -> Result<(), Error> {
     // Create a new transaction as an independent continuation
     let ctx = sentry::TransactionContext::continue_from_span(
@@ -271,18 +272,9 @@ pub async fn process_post_metadata(
     if let Some(level) = existing_allow_level {
         trace!("Post already exists in DB");
         counter!("downloader_posts_updated").increment(1);
+
         // Update post's score with new score
-        match con
-            .hset(&key, "score", post["score"].as_i64().unwrap_or(0))
-            .await
-        {
-            Ok(_) => {}
-            Err(x) => {
-                let txt = format!("Failed to update score in redis: {}", x);
-                warn!("{}", txt);
-                sentry::capture_message(&txt, sentry::Level::Warning);
-            }
-        };
+        let _:() = client.score_update_script.invoke_async(&mut client.redis).await?;
 
         // Move post from existing list to list of posts still in front pages
         let post = key.into();

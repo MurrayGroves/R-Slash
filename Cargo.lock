@@ -4088,7 +4088,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk 0.26.0",
  "post_api",
- "redis 0.32.7",
+ "redis 1.7.1",
  "rslash_common",
  "rustls 0.23.40",
  "sentry 0.48.2",

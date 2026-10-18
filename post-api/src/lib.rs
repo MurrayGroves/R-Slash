@@ -500,7 +500,7 @@ async fn pop_post_from_chunk(
     channel: GenericChannelId,
 ) -> Result<Option<String>, Error> {
     Ok(redis
-        .lpop(
+        .rpop(
             format!("subreddit:{}:channels:{}:chunk", subreddit, channel),
             None,
         )
