@@ -1,16 +1,30 @@
-use std::{collections::HashSet, hash::Hash, hash::Hasher};
+use std::{
+    collections::HashSet,
+    hash::{Hash, Hasher},
+};
 
 use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize};
+use serenity::all::GenericChannelId;
 
 #[tarpc::service]
 pub trait Subscriber {
-    async fn register_subscription(subreddit: String, channel: u64, bot: Bot)
-    -> Result<(), String>;
+    async fn register_subscription(
+        subreddit: String,
+        channel: GenericChannelId,
+        bot: Bot,
+    ) -> Result<(), String>;
 
-    async fn delete_subscription(subreddit: String, channel: u64, bot: Bot) -> Result<(), String>;
+    async fn delete_subscription(
+        subreddit: String,
+        channel: GenericChannelId,
+        bot: Bot,
+    ) -> Result<(), String>;
 
-    async fn list_subscriptions(channel: u64, bot: Bot) -> Result<Vec<Subscription>, String>;
+    async fn list_subscriptions(
+        channel: GenericChannelId,
+        bot: Bot,
+    ) -> Result<Vec<Subscription>, String>;
 
     async fn notify(subreddit: String, post_id: String) -> Result<(), String>;
 
@@ -24,7 +38,7 @@ pub trait Subscriber {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub subreddit: String,
-    pub channel: u64,
+    pub channel: GenericChannelId,
     pub bot: Bot,
     pub added_at: i64,
 }

@@ -1,10 +1,11 @@
 use futures::{Future, StreamExt};
 use mongodb::bson::doc;
 use mongodb::options::ClientOptions;
+use post_api::PostInContext;
 use redis::AsyncTypedCommands;
-use rustls::server;
-use serde_json::json;
-use serenity::all::{ChannelId, CreateMessage, GatewayIntents, GuildId, Http, Token};
+use serenity::all::{
+    ChannelId, CreateMessage, GatewayIntents, GenericChannelId, GuildId, Http, Token,
+};
 use serenity::{all::EventHandler, async_trait};
 
 use log::{debug, error, info, warn};
@@ -12,8 +13,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::{Instant, interval, timeout};
+use tokio::time::{Instant, Interval, interval, timeout};
 use user_config_manager::{TextAllowLevel, get_channel_config};
 
 use futures::future;
@@ -22,6 +24,7 @@ use post_subscriber::{Bot, Subscriber, Subscription};
 use rslash_common::{get_post_content_type, initialise_observability, span_filter};
 use tarpc::{server::Channel, tokio_serde::formats::Bincode};
 
+use anyhow::anyhow;
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{logs, trace};
@@ -30,33 +33,38 @@ use tracing_subscriber::{
     EnvFilter, Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
 };
 
+use crate::message_sender::MessageSender;
+
+mod message_sender;
+
 struct Subscriptions {
     by_subreddit: HashMap<String, HashSet<Arc<Subscription>>>,
-    by_channel: HashMap<u64, HashSet<Arc<Subscription>>>,
+    by_channel: HashMap<GenericChannelId, HashSet<Arc<Subscription>>>,
 }
 
 #[derive(Clone)]
-struct PostAlert<'a> {
-    message: CreateMessage<'a>,
+struct PostAlert {
+    post: PostInContext,
     subscriptions: Vec<Arc<Subscription>>,
     timestamp: Instant,
     text_level: TextAllowLevel,
 }
 
-#[derive(Clone)]
-struct SubscriberServer<'a> {
-    db: mongodb::Client,
+static MESSAGE_SENDER_COUNT: usize = 5;
+
+struct SubscriptionManager {
     subscriptions: Arc<RwLock<Subscriptions>>,
-    discord_bb: Arc<Http>,
-    discord_rs: Arc<Http>,
-    redis: redis::aio::MultiplexedConnection,
-    queued_alerts: Arc<Mutex<VecDeque<PostAlert<'a>>>>,
+    queued_alerts: Arc<Mutex<VecDeque<PostAlert>>>,
     failed_req_counter: Arc<Mutex<usize>>,
+    message_sender_commands:
+        [tokio::sync::mpsc::Sender<message_sender::Command>; MESSAGE_SENDER_COUNT],
+    message_sender_deletion_requests:
+        [tokio::sync::mpsc::Receiver<Arc<Subscription>>; MESSAGE_SENDER_COUNT],
 }
 
-impl SubscriberServer<'_> {
+impl SubscriptionManager {
     #[tracing::instrument(skip(self))]
-    async fn watch_alerts(self) {
+    async fn watch_alerts(mut self) {
         let mut outer_interval = interval(tokio::time::Duration::from_millis(100));
         let mut inner_interval = interval(tokio::time::Duration::from_millis(1000 / 20)); // Send alerts at max of 20 per second (Discord global rate limit is 50 reqs per second)
         loop {
@@ -82,7 +90,19 @@ impl SubscriberServer<'_> {
 
             counter!("subscriber_processed_alert_batches").increment(1);
 
-            for alert in next_alert.subscriptions {
+            for channel in &self.message_sender_commands {
+                channel
+                    .send(message_sender::Command::SetAlert(message_sender::Alert {
+                        post: next_alert.post.clone(),
+                        timestamp: next_alert.timestamp,
+                        text_allow_level: next_alert.text_level,
+                    }))
+                    .await
+                    .expect("Message sender's channel was closed, couldn't send to it.");
+            }
+
+            let mut sender_idx = 0;
+            for alert in &next_alert.subscriptions {
                 inner_interval.tick().await;
 
                 let failed_reqs = self.failed_req_counter.lock().await;
@@ -91,139 +111,56 @@ impl SubscriberServer<'_> {
                 }
                 drop(failed_reqs);
 
-                let channel: ChannelId = alert.channel.into();
-                debug!(
-                    "Sending alert for {} to channel {}",
-                    alert.subreddit, channel
-                );
+                self.message_sender_commands[sender_idx]
+                    .send(message_sender::Command::SendToSubcription(alert.clone()))
+                    .await
+                    .expect("Message sender's channel was closed, couldn't send to it.");
+                sender_idx = (sender_idx + 1) % MESSAGE_SENDER_COUNT;
+            }
 
-                let text_allow_level = match get_channel_config(&mut self.db.clone(), channel).await
-                {
-                    Ok(x) => x.text_allowed.unwrap_or_default(),
-                    Err(e) => {
-                        info!("Error getting channel config: {:?}", e);
-                        error!("Error getting channel config");
-                        continue;
-                    }
-                };
-
-                if !text_allow_level.allows_for(next_alert.text_level) {
-                    debug!(
-                        "Post with {:?} doesn't match text allow level of {:?}",
-                        next_alert.text_level, text_allow_level
-                    );
-                    continue;
-                }
-
-                let server = self.clone();
-                let msg = next_alert.message.clone();
-                let next_alert_clone = next_alert.clone();
-                tokio::spawn(async move {
-                    let http = match alert.bot {
-                        Bot::BB => &server.discord_bb,
-                        Bot::RS => &server.discord_rs,
+            for deletion_channel in &mut self.message_sender_deletion_requests {
+                while let Ok(subscription) = deletion_channel.try_recv() {
+                    debug!("Channel doesn't exist anymore, deleting subscription");
+                    let mut subscriptions = self.subscriptions.write().await;
+                    match subscriptions.by_channel.get_mut(&subscription.channel) {
+                        Some(x) => {
+                            x.remove(&*subscription);
+                        }
+                        None => {
+                            warn!(
+                                "Tried to delete subscription by channel that already didn't exist!"
+                            );
+                        }
                     };
-                let response = match timeout(
-                    Duration::from_secs(30),
-                    channel
-                        .widen()
-                        .send_message(http, msg),
-                )
-                .await
-                {
-                    Ok(resp) => resp,
-                    Err(_) => {
-                        error!("Timeout while sending message to channel");
-                        let mut counter = server.failed_req_counter.lock().await;
-                        *counter += 1;
-                        counter!("subscriber_failed_messages").increment(1);
-                        counter!("subscriber_failed_message_timeouts").increment(1);
-                        return;
-                    }
-                };
-
-                match response {
-                    Ok(_) => {
-                        let elapsed = next_alert_clone.timestamp.elapsed();
-                        debug!(
-                            "Sent {} to channel {}, was added {} seconds ago",
-                            alert.subreddit,
-                            channel,
-                            elapsed.as_secs()
-                        );
-                        histogram!("subscriber_notification_latency")
-                            .record(elapsed.as_millis() as f64);
-                        counter!("subscriber_sent_messages").increment(1);
-                    }
-                    Err(e) => {
-                        let error_text = format!("Failed to send message: {:?}", e);
-                        if let serenity::Error::Http(e) = e
-                            && let serenity::http::HttpError::UnsuccessfulRequest(e) = e
-                        {
-                            if e.error.code.0 == 10003 {
-                                debug!("Channel doesn't exist anymore, deleting subscription");
-                                let mut subscriptions = server.subscriptions.write().await;
-                                match subscriptions.by_channel.get_mut(&alert.channel) {
-                                    Some(x) => {
-                                        x.remove(&*alert);
-                                    }
-                                    None => {
-                                        warn!(
-                                            "Tried to delete subscription by channel that already didn't exist!"
-                                        );
-                                    }
-                                };
-                                match subscriptions.by_subreddit.get_mut(&alert.subreddit) {
-                                    Some(x) => {
-                                        x.remove(&*alert);
-                                    }
-                                    None => {
-                                        warn!(
-                                            "Tried to delete subscription by sub that already didn't exist!"
-                                        );
-                                    }
-                                }
-                            } else {
-                                error!("Failed to send message to channel: {:?}", e);
-                                let mut failed_reqs = server.failed_req_counter.lock().await;
-                                *failed_reqs += 1;
-                                counter!("subscriber_failed_messages").increment(1);
-                            }
-                        } else {
-                            error!("{}", error_text);
-                            let mut failed_reqs = server.failed_req_counter.lock().await;
-                            *failed_reqs += 1;
-                            counter!("subscriber_failed_messages").increment(1);
+                    match subscriptions.by_subreddit.get_mut(&subscription.subreddit) {
+                        Some(x) => {
+                            x.remove(&*subscription);
+                        }
+                        None => {
+                            warn!("Tried to delete subscription by sub that already didn't exist!");
                         }
                     }
                 }
-
-
-            }).await;
             }
-        }
-    }
-
-    async fn clear_failed_req_counter(self) {
-        loop {
-            tokio::time::sleep(Duration::from_secs(600)).await;
-            let mut failed_reqs = self.failed_req_counter.lock().await;
-            debug!(
-                "Clearing failed request counter of {} requests",
-                *failed_reqs
-            );
-            *failed_reqs = 0;
         }
     }
 }
 
-impl Subscriber for SubscriberServer<'_> {
+#[derive(Clone)]
+struct SubscriberServer {
+    subscriptions: Arc<RwLock<Subscriptions>>,
+    queued_alerts: Arc<Mutex<VecDeque<PostAlert>>>,
+    db: mongodb::Client,
+    redis: redis::aio::MultiplexedConnection,
+}
+
+impl Subscriber for SubscriberServer {
     #[tracing::instrument(skip(self))]
     async fn register_subscription(
         self,
         _: Context,
         subreddit: String,
-        channel: u64,
+        channel: GenericChannelId,
         bot: Bot,
     ) -> Result<(), String> {
         info!(
@@ -238,7 +175,7 @@ impl Subscriber for SubscriberServer<'_> {
 
         let subscription = Subscription {
             subreddit: subreddit.clone(),
-            channel,
+            channel: GenericChannelId::from(channel),
             bot,
             added_at: chrono::Utc::now().timestamp(),
         };
@@ -277,7 +214,7 @@ impl Subscriber for SubscriberServer<'_> {
         self,
         _: Context,
         subreddit: String,
-        channel: u64,
+        channel: GenericChannelId,
         bot: Bot,
     ) -> Result<(), String> {
         info!(
@@ -292,7 +229,7 @@ impl Subscriber for SubscriberServer<'_> {
 
         let filter = doc! {
             "subreddit": &subreddit,
-            "channel": channel as i64,
+            "channel": channel.get() as i64,
             "bot": bot.clone(),
         };
 
@@ -331,7 +268,7 @@ impl Subscriber for SubscriberServer<'_> {
     async fn list_subscriptions(
         self,
         _: Context,
-        channel: u64,
+        channel: GenericChannelId,
         bot: Bot,
     ) -> Result<Vec<Subscription>, String> {
         info!("Listing subscriptions for channel {}", channel);
@@ -408,7 +345,7 @@ impl Subscriber for SubscriberServer<'_> {
         };
 
         let alert = PostAlert {
-            message: post.buttonless_message(),
+            post,
             subscriptions: filtered.into_iter().map(|x| (*x).clone()).collect(),
             timestamp: Instant::now(),
             text_level: text_allow_level,
@@ -593,18 +530,72 @@ async fn main() {
         .map(|x| x as u16)
         .expect("total_shards_r-slash not set in Redis");
 
+    /// Splits an array of channel pairs into arrays of senders and receivers.
+    fn unzip_channels<T, const N: usize>(
+        pairs: [(Sender<T>, Receiver<T>); N],
+    ) -> ([Sender<T>; N], [Receiver<T>; N]) {
+        let senders = core::array::from_fn(|i| pairs[i].0.clone());
+        (senders, pairs.map(|(_, receiver)| receiver))
+    }
+
+    let (command_senders, command_receivers) = unzip_channels(core::array::from_fn(|_| {
+        tokio::sync::mpsc::channel::<message_sender::Command>(4096)
+    }));
+    let (deletion_request_senders, deletion_request_receivers) =
+        unzip_channels(core::array::from_fn(|_| {
+            tokio::sync::mpsc::channel::<Arc<Subscription>>(4096)
+        }));
+
+    let failed_req_counter = Arc::new(Mutex::new(0));
+
+    for (channel, deletion_request_channel) in
+        command_receivers.into_iter().zip(deletion_request_senders)
+    {
+        tokio::spawn(
+            MessageSender {
+                mongodb: mongodb_client.clone(),
+                discord_bb: http_bb.clone(),
+                discord_rs: http_rs.clone(),
+                failed_req_counter: failed_req_counter.clone(),
+                interval: interval(Duration::from_millis(500)),
+                channel,
+                message: None,
+                alert_timestamp: Instant::now(),
+                deletion_request_channel,
+                text_allow_level: TextAllowLevel::Both,
+            }
+            .sender_loop(),
+        );
+    }
+
+    let queued_alerts = Arc::new(Mutex::new(VecDeque::new()));
+    let manager = SubscriptionManager {
+        subscriptions: subscriptions.clone(),
+        queued_alerts: queued_alerts.clone(),
+        failed_req_counter: failed_req_counter.clone(),
+        message_sender_commands: command_senders,
+        message_sender_deletion_requests: deletion_request_receivers,
+    };
+
     let server = SubscriberServer {
         db: mongodb_client,
         subscriptions,
-        discord_bb: http_bb,
-        discord_rs: http_rs,
         redis,
-        queued_alerts: Arc::new(Mutex::new(VecDeque::new())),
-        failed_req_counter: Arc::new(Mutex::new(0)),
+        queued_alerts,
     };
 
-    tokio::spawn(server.clone().watch_alerts());
-    tokio::spawn(server.clone().clear_failed_req_counter());
+    tokio::spawn(manager.watch_alerts());
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            let mut failed_reqs = failed_req_counter.lock().await;
+            debug!(
+                "Clearing failed request counter of {} requests",
+                *failed_reqs
+            );
+            *failed_reqs = 0;
+        }
+    });
 
     let mut listener = tarpc::serde_transport::tcp::listen("0.0.0.0:50051", Bincode::default)
         .await

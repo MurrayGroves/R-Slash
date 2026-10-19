@@ -2,7 +2,7 @@ use mongodb::Client;
 use mongodb::bson::doc;
 use mongodb::options::FindOptions;
 use serde::{Deserialize, Serialize};
-use serenity::all::{ChannelId, GuildId};
+use serenity::all::{ChannelId, GenericChannelId, GuildId};
 use std::fmt::Display;
 
 use anyhow::Result;
@@ -97,12 +97,12 @@ impl TextAllowLevel {
 
 #[derive(Serialize, Deserialize)]
 pub struct ChannelConfig {
-    pub channel_id: ChannelId,
+    pub channel_id: GenericChannelId,
     pub text_allowed: Option<TextAllowLevel>,
 }
 
 impl ChannelConfig {
-    fn default(channel_id: ChannelId) -> Self {
+    fn default(channel_id: GenericChannelId) -> Self {
         ChannelConfig {
             channel_id,
             text_allowed: None,
@@ -113,7 +113,7 @@ impl ChannelConfig {
 /// Retrieve a channel config from MongoDB
 pub async fn get_channel_config(
     mongodb: &mut Client,
-    channel_id: ChannelId,
+    channel_id: GenericChannelId,
 ) -> Result<ChannelConfig> {
     let collection = mongodb
         .database("config")

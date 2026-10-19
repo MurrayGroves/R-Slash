@@ -187,7 +187,7 @@ pub async fn get_post_at_list_index(
 }
 
 /// Represents a fetched Reddit post including some context about how it was fetched
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PostInContext {
     pub subreddit: String,
     /// The search term that was used to fetch this post, if any
@@ -440,7 +440,7 @@ async fn generate_chunk(
     )
     .await?;
 
-    let channel_text_allow_level = get_channel_config(mongodb, ChannelId::new(channel.get()))
+    let channel_text_allow_level = get_channel_config(mongodb, channel)
         .await?
         .text_allowed
         .unwrap_or_default();
@@ -551,11 +551,10 @@ pub async fn get_subreddit<'a>(
             let _ = span.enter();
             info!("Error was: {:?}, getting {:?}", e, post_id);
             error!("Error getting post by ID");
-            let channel_text_allow_level =
-                get_channel_config(mongodb, ChannelId::new(channel.get()))
-                    .await?
-                    .text_allowed
-                    .unwrap_or_default();
+            let channel_text_allow_level = get_channel_config(mongodb, channel)
+                .await?
+                .text_allowed
+                .unwrap_or_default();
             redis
                 .lrem(
                     format!(
