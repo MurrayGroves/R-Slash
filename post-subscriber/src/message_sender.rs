@@ -57,6 +57,11 @@ impl<'a> MessageSender<'a> {
     }
 
     async fn send_message(&mut self, subscription: Arc<Subscription>) {
+        let mut counter = *self.failed_req_counter.lock().await;
+        while counter > 1000 {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            counter = *self.failed_req_counter.lock().await;
+        }
         let text_allow_level =
             match get_channel_config(&mut self.mongodb.clone(), subscription.channel).await {
                 Ok(x) => x.text_allowed.unwrap_or_default(),
@@ -116,7 +121,10 @@ impl<'a> MessageSender<'a> {
                 if let serenity::Error::Http(e) = e
                     && let serenity::http::HttpError::UnsuccessfulRequest(e) = e
                 {
-                    if e.error.code.0 == 10003 {
+                    if e.error.code.0 == 10003 || e.error.code.0 == 50001 || e.error.code.0 == 50013{
+                        let mut failed_reqs = self.failed_req_counter.lock().await;
+                        *failed_reqs += 1;
+                        drop(failed_reqs);
                         debug!("Channel doesn't exist anymore, marking subscription for deletion.");
                         self.deletion_request_channel
                             .send(subscription)

@@ -1,8 +1,8 @@
 set -e
 source ../secrets.env
 
-cargo build --release
-docker build -t registry.murraygrov.es/post-subscriber -f Dockerfile --network=host ../target/release
+nix build .#packages.x86_64-linux.docker
+docker load < result
 docker push registry.murraygrov.es/post-subscriber
 
 sentry-cli --auth-token ${SENTRY_TOKEN} upload-dif --org r-slash --project post-subscriber ../target/release/
