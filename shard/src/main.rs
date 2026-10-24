@@ -1,18 +1,15 @@
 #![deny(elided_lifetimes_in_paths)]
 
-use futures::FutureExt;
 use log::trace;
 use serde_json::json;
 use serenity::all::{
-    AutocompleteChoice, ChannelId, CreateAutocompleteResponse, CreateButton, CreateCommand,
-    FullEvent, GuildId, ReactionType, ShardRunnerMetadata,
+    AutocompleteChoice, ChannelId, ConnectionStage, CreateAutocompleteResponse, CreateButton,
+    CreateCommand, FullEvent, GuildId, ReactionType, ShardRunnerMetadata,
 };
-use serenity::gateway::{ShardRunnerInfo, ShardRunnerMessage};
 use serenity::model::Colour;
 use stubborn_io::{ReconnectOptions, StubbornTcpStream};
 use tarpc::serde_transport::Transport;
 use tarpc::tokio_serde::formats::Bincode;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::instrument;
 use tracing::{debug, error, info, warn};
 
@@ -24,8 +21,6 @@ use rslash_common::{initialise_observability, rpc::RetryingTcpStream, span_filte
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::Write;
-use std::pin::Pin;
-use std::task::Poll;
 use std::{env, path};
 use std::{fs, iter};
 
@@ -51,11 +46,10 @@ use serenity::model::application::{CommandInteraction, Interaction};
 
 use anyhow::anyhow;
 use dashmap::DashMap;
-use futures::channel::mpsc::UnboundedSender;
 use metrics::{counter, gauge};
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{logs, trace};
+use opentelemetry_sdk::logs;
 use sentry_anyhow::capture_anyhow;
 
 mod command_handlers;
@@ -766,6 +760,8 @@ impl EventHandler for Handler {
 async fn monitor_total_shards(
     runners: Arc<DashMap<ShardId, ShardRunnerMetadata>>,
     total_shards: u16,
+    // This is used to prevent the monitor killing the shard when the problem was due to invalid auth
+    disable_restart: Arc<RwLock<bool>>,
 ) {
     let db_client = redis::Client::open("redis://redis.discord-bot-shared/").unwrap();
     let mut con = db_client
@@ -782,8 +778,9 @@ async fn monitor_total_shards(
         .parse()
         .expect("unable to convert shard_id to u16");
 
+    let mut alive_last_check = true;
     loop {
-        let _ = sleep(Duration::from_secs(60)).await;
+        sleep(Duration::from_secs(60)).await;
 
         let db_total_shards: u16 = con
             .get_int(format!("total_shards_{}", &*NAMESPACE))
@@ -792,26 +789,28 @@ async fn monitor_total_shards(
             .map(|x| x as u16)
             .expect("Failed to parse total shards as u16, or it wasn't in Redis");
 
-        if !runners.contains_key(&ShardId(shard_id)) {
-            debug!(
-                "Shard {} not found, marking self for termination.",
-                shard_id
-            );
-            let _ = fs::remove_file("/etc/probes/live");
+        let alive = if let Some(runner) = runners.get(&ShardId(shard_id)) {
+            runner.info.read().stage == ConnectionStage::Connected
         } else {
-            if !tokio::fs::metadata("/etc/probes/live").await.is_ok() {
-                debug!("Resurrected before being terminated by k8s!");
-                continue;
+            debug!("Runner for shard {} not found", shard_id);
+            false
+        };
 
-                // if !path::new("/etc/probes").is_dir() {
-                //     fs::create_dir("/etc/probes").expect("couldn't create /etc/probes directory");
-                // }
-                // let mut file =
-                //     file::create("/etc/probes/live").expect("unable to create /etc/probes/live");
-                // file.write_all(b"alive")
-                //     .expect("unable to write to /etc/probes/live");
-            }
+        if !alive && !alive_last_check && !*disable_restart.read().await {
+            let _ = fs::remove_file("/etc/probes/live");
         }
+
+        if alive {
+            if !path::Path::new("/etc/probes").is_dir() {
+                fs::create_dir("/etc/probes").expect("couldn't create /etc/probes directory");
+            }
+            let mut file = std::fs::File::create("/etc/probes/live")
+                .expect("unable to create /etc/probes/live");
+            file.write_all(b"alive")
+                .expect("unable to write to /etc/probes/live");
+        }
+
+        alive_last_check = alive;
 
         if db_total_shards != total_shards {
             debug!(
@@ -981,48 +980,14 @@ fn main() {
 
 			println!("Booting with {:?} total shards", total_shards);
 
-			println!("Connecting to discord interface...");
-			let reconnect_opts = ReconnectOptions::new()
-				.with_exit_if_first_connect_fails(false)
-				.with_retries_generator(|| iter::repeat(Duration::from_secs(15)));
-			let tcp_stream = RetryingTcpStream::new(
-				StubbornTcpStream::connect_with_options(
-					"discord-interface:50051",
-					reconnect_opts,
-				)
-					.await
-					.expect("Failed to connect to discord-interface"),
-			);
-			let transport = Transport::from((tcp_stream, Bincode::default()));
-
-			let discord_interface =
-				discord_interface::DiscordInterfaceClient::new(tarpc::client::Config::default(), transport).spawn();
-
-			println!("Connected to discord interface");
-
-			let mut allowed = false;
-			while !allowed {
-				allowed = discord_interface.request_boot(tarpc::context::current(), shard_id as usize).await.unwrap_or_else(|e| {
-					warn!("Failed to query discord interface, not launching: {:?}", e);
-					false
-				});
-				if allowed {
-					info!("Received go ahead to boot from discord interface")
-				} else {
-					info!("Discord interface told us to wait, waiting...");
-					sleep(Duration::from_secs(30)).await
-				}
-			}
-
-
-
 			println!("Connecting to reddit proxy...");
 			let reconnect_opts = ReconnectOptions::new()
 				.with_exit_if_first_connect_fails(false)
 				.with_retries_generator(|| iter::repeat(Duration::from_secs(1)));
 			let tcp_stream = RetryingTcpStream::new(
-				StubbornTcpStream::connect(
+				StubbornTcpStream::connect_with_options(
 					"reddit-proxy.discord-bot-shared.svc.cluster.local:50051",
+					reconnect_opts
 				)
 					.await
 					.expect("Failed to connect to reddit-proxy"),
@@ -1033,7 +998,6 @@ fn main() {
 				reddit_proxy::RedditProxyClient::new(tarpc::client::Config::default(), transport).spawn();
 
 			println!("Connected to reddit proxy");
-
 
             println!("Connecting to discord interface...");
             let reconnect_opts = ReconnectOptions::new()
@@ -1067,7 +1031,6 @@ fn main() {
                     sleep(Duration::from_secs(5)).await
                 }
             }
-
 
 			let state = ShardState {
 				shard_id,
@@ -1116,9 +1079,11 @@ fn main() {
 			println!("Created client");
 
 			let runners = client.shard_manager.runners.clone();
+			let disable_restart = Arc::new(RwLock::new(false));
+			let disable_restart_clone = disable_restart.clone();
 			tokio::spawn(async move {
 				println!("Spawning shard monitor thread");
-				monitor_total_shards(runners, total_shards).await;
+				monitor_total_shards(runners, total_shards, disable_restart_clone).await;
 			});
 
 			let thread = tokio::spawn(async move {
@@ -1133,6 +1098,7 @@ fn main() {
                             GatewayError::InvalidAuthentication => {
                                 loop { // Sleep forever to prevent startup loops banning us from the API
                                     error!("Shard has invalid token!");
+                                    *disable_restart.write().await = true;
                                     std::thread::sleep(Duration::from_secs(3600));
                                 }
                             },

@@ -40,7 +40,6 @@ redis = { version = "1.7", features = [
 rand = { version = "*", features = ["alloc"] }
 mongodb = "3"
 serde_derive = "1.0"
-pretty_env_logger = "*"
 anyhow = { version = "*", features = ["backtrace"] }
 sentry = { version = "0.29.3", features = [
     "tracing",
