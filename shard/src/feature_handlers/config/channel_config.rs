@@ -29,7 +29,7 @@ pub async fn configure_channel<'a>(
 
     let channel_config = get_channel_config(
         &mut ctx.data::<ShardState>().mongodb.clone(),
-        ChannelId::new(command.channel_id.get()),
+        command.channel_id,
     )
     .await?;
 
@@ -102,8 +102,7 @@ pub async fn configure_channel_component_handler<'a>(
 
     let mut mongodb = ctx.data::<ShardState>().mongodb.clone();
 
-    let mut config =
-        get_channel_config(&mut mongodb, ChannelId::new(interaction.channel_id.get())).await?;
+    let mut config = get_channel_config(&mut mongodb, interaction.channel_id).await?;
 
     match field {
         "text_allow_level" => {

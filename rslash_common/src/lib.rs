@@ -243,7 +243,7 @@ macro_rules! initialise_observability {
         let trace_exporter = opentelemetry_otlp::SpanExporterBuilder::Tonic(opentelemetry_otlp::TonicExporterBuilder::default().with_endpoint("http://100.67.30.19:4317"))
             .build_span_exporter().expect("Failed to create trace exporter");
 
-        let tracing_provider = trace::TracerProvider::builder()
+        let tracing_provider = opentelemetry_sdk::trace::TracerProvider::builder()
             .with_batch_exporter(trace_exporter, opentelemetry_sdk::runtime::Tokio)
 			.with_config(opentelemetry_sdk::trace::Config::default().with_resource(
                 opentelemetry_sdk::Resource::new(vec![opentelemetry::KeyValue::new("service.name", $service_name)$(,opentelemetry::KeyValue::new($key, $value.to_string()))*] )

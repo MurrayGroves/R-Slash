@@ -12,8 +12,9 @@ use rootcause::hooks::Hooks;
 use rootcause::prelude::{Report, ResultExt};
 use rootcause_backtrace::BacktraceCollector;
 use std::convert::TryInto;
-use std::ops::Index;
+use std::ops::{Add, Index};
 use std::sync::Arc;
+use std::time::SystemTime;
 use std::{cmp, future};
 use std::{env, fs, io::Write, thread};
 use tarpc::context::Context;
@@ -22,12 +23,42 @@ use tarpc::server::Channel;
 use tarpc::tokio_serde::formats::Bincode;
 use tokio::spawn;
 use tokio::sync::Mutex;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, Interval, interval, sleep};
+
+#[derive(Debug)]
+struct SessionStartLimit {
+    total: u64,
+    remaining: u64,
+    reset_after: SystemTime,
+    max_concurrency: usize,
+}
+
+impl SessionStartLimit {
+    fn get_and_update_remaining(&mut self) -> u64 {
+        if SystemTime::now() > self.reset_after {
+            self.remaining = self.total;
+        }
+
+        self.remaining
+    }
+}
+
+impl Default for SessionStartLimit {
+    fn default() -> Self {
+        Self {
+            total: Default::default(),
+            remaining: Default::default(),
+            reset_after: SystemTime::now(),
+            max_concurrency: Default::default(),
+        }
+    }
+}
 
 struct ServerState {
-    max_concurrency: usize,
+    session_start_limit: SessionStartLimit,
     current_bucket: Option<usize>,
     starting_shards: Vec<usize>,
+    last_bucket_start: Instant,
 }
 
 #[derive(Clone)]
@@ -35,27 +66,37 @@ struct Server {
     state: Arc<Mutex<ServerState>>,
 }
 
-impl Server {
-    async fn set_concurrency(&self, max_concurrency: usize) {
-        let mut state = self.state.lock().await;
-        state.max_concurrency = max_concurrency;
-    }
-}
-
 impl DiscordInterface for Server {
     async fn request_boot(self, context: Context, shard_id: usize) -> bool {
         let mut state = self.state.lock().await;
-        if state.max_concurrency == 0 {
+
+        if state.session_start_limit.get_and_update_remaining() < 5 {
             counter!("discordinterface_rejected_boot_requests").increment(1);
+            error!("Shard wanted to boot but we're out of session starts");
             return false;
         }
-        let shard_bucket = shard_id / state.max_concurrency;
+
+        if state.starting_shards.contains(&shard_id) {
+            error!("Shard requested to boot which was already booting!");
+            debug!(
+                "Shard {} was allowed to boot because it was already booting",
+                shard_id
+            );
+            return true;
+        }
+
+        if state.session_start_limit.max_concurrency == 0 {
+            counter!("discordinterface_rejected_boot_requests").increment(1);
+            error!("max_concurrency is zero!");
+            return false;
+        }
+        let shard_bucket = shard_id / state.session_start_limit.max_concurrency;
 
         let allowed = if let Some(bucket) = state.current_bucket {
             debug!(
                 "Current bucket is {}-{}",
-                state.max_concurrency * bucket,
-                state.max_concurrency * (bucket + 1)
+                state.session_start_limit.max_concurrency * bucket,
+                state.session_start_limit.max_concurrency * (bucket + 1)
             );
             if bucket == shard_bucket {
                 debug!("Shard {} in current bucket {}", shard_id, bucket);
@@ -66,6 +107,12 @@ impl DiscordInterface for Server {
             }
         } else {
             debug!("No bucket active, setting {}", shard_bucket);
+            // Ensure we only boot a bucket every 5 seconds
+            if state.last_bucket_start.elapsed().as_secs() < 5 {
+                info!("Shard not allowed to boot because less than 5 secs since last bucket start");
+                return false;
+            }
+            state.last_bucket_start = Instant::now();
             state.current_bucket = Some(shard_bucket);
             state.starting_shards.push(shard_id);
             true
@@ -74,23 +121,19 @@ impl DiscordInterface for Server {
         let state = self.state.clone();
         if allowed {
             tokio::spawn(async move {
-                sleep(Duration::from_secs(30)).await;
-                debug!("Checking shard {} has finished", shard_id);
+                sleep(Duration::from_secs(90)).await;
                 let mut state = state.lock().await;
                 let index = state.starting_shards.iter().position(|x| *x == shard_id);
 
                 if let Some(index) = index {
-                    warn!(
-                        "Shard {} hadn't finished booting! Force removing...",
-                        shard_id
-                    );
-                    state.starting_shards.remove(index);
-                    if state.starting_shards.len() == 0 {
-                        state.current_bucket = None;
-                    }
+                    warn!("Shard {} hasn't finished booting!", shard_id);
+                    // state.starting_shards.remove(index);
+                    // if state.starting_shards.len() == 0 {
+                    //     state.current_bucket = None;
+                    // }
                     counter!("discordinterface_timedout_boots").increment(1);
                 } else {
-                    debug!("Shard {} already finished booting, no problems", shard_id);
+                    trace!("Shard {} already finished booting, no problems", shard_id);
                     counter!("discordinterface_successful_boots").increment(1);
                 }
             });
@@ -127,7 +170,7 @@ async fn get_namespace() -> String {
     return namespace;
 }
 
-async fn scale_down_shards(new_shard_count: u64) {
+async fn scale_down_shards(new_shard_count: usize) {
     let namespace = get_namespace().await;
 
     let client_k8s = kube::Client::try_default().await.unwrap();
@@ -158,7 +201,7 @@ async fn scale_down_shards(new_shard_count: u64) {
         .expect("Failed to patch statefulset discord-shards");
 }
 
-async fn add_shards(num: u64, max_concurrency: u64) {
+async fn add_shards(num: usize, max_concurrency: usize) {
     let namespace = get_namespace().await;
 
     let mut desired_shards = num;
@@ -180,7 +223,7 @@ async fn add_shards(num: u64, max_concurrency: u64) {
             .get("discord-shards")
             .await
             .expect("Failed to get statefulset discord-shards");
-        let current_shards: u64 = shards_set.status.unwrap().replicas.try_into().unwrap();
+        let current_shards: usize = shards_set.status.unwrap().replicas.try_into().unwrap();
 
         let patch = serde_json::json!({
             "apiVersion": "apps/v1",
@@ -216,7 +259,7 @@ async fn add_shards(num: u64, max_concurrency: u64) {
                 .get("discord-shards")
                 .await
                 .expect("Failed to get statefulset discord-shards");
-            let ready_shards: u64 = shards_set
+            let ready_shards: usize = shards_set
                 .status
                 .unwrap()
                 .available_replicas
@@ -243,9 +286,11 @@ async fn get_redis_connection() -> redis::aio::MultiplexedConnection {
 
 async fn query_gateway(
     web_client: &reqwest::Client,
+    limiter: &mut rslash_common::Limiter,
     token: &str,
 ) -> Result<serde_json::Value, Report> {
     loop {
+        limiter.wait().await;
         let res = web_client
             .get("https://discord.com/api/v10/gateway/bot")
             .header("Authorization", format!("Bot {}", token))
@@ -253,18 +298,19 @@ async fn query_gateway(
             .await
             .context("Failed to make request to gateway")?;
 
-        let headers = format!("{:?}", res.headers());
+        if let Err(e) = limiter.update_headers(res.headers(), res.status()).await {
+            error!("Error updating limiter: {:?}", e)
+        }
 
+        let headers = format!("{:?}", res.headers());
         let text = res
             .text()
             .await
             .context("Failed to parse gateway response as text")?;
 
-        if text == "error code: 1015" {
+        if text == "error code: 1015\n" {
             // Hit by Cloudflare rate limit
-            warn!("Hit by Cloudflare rate limit, sleeping for 15 minutes");
-            info!("Headers: {:?}", headers);
-            sleep(Duration::from_mins(15)).await;
+            error!("Hit by Cloudflare rate limit!");
         } else {
             return Ok(serde_json::from_str(&text)
                 .context("Failed to parse gateway response as JSON")
@@ -275,9 +321,7 @@ async fn query_gateway(
 
 #[tokio::main]
 async fn main() -> Result<(), Report> {
-    env_logger::builder()
-        .format(|buf, record| writeln!(buf, "{}: {}", record.level(), record.args()))
-        .init();
+    env_logger::builder().init();
 
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -300,9 +344,10 @@ async fn main() -> Result<(), Report> {
 
     let server = Server {
         state: Arc::new(Mutex::new(ServerState {
-            max_concurrency: 0,
             current_bucket: None,
             starting_shards: Vec::new(),
+            session_start_limit: SessionStartLimit::default(),
+            last_bucket_start: Instant::now(),
         })),
     };
 
@@ -334,6 +379,7 @@ async fn main() -> Result<(), Report> {
     );
 
     let mut con = get_redis_connection().await;
+    let mut limiter = rslash_common::Limiter::new(None, "Discord".to_string());
     loop {
         let client_k8s = kube::Client::try_default().await?;
         let stateful_sets: kube::Api<k8s_openapi::api::apps::v1::StatefulSet> =
@@ -342,22 +388,35 @@ async fn main() -> Result<(), Report> {
             .get("discord-shards")
             .await
             .expect("Failed to get statefulset discord-shards");
-        let current_shards = shards_set.status.unwrap().replicas as u64;
+        let current_shards = shards_set.status.unwrap().replicas as usize;
 
-        let json = query_gateway(&client_web, &token).await?;
-        let total_shards: u64 = serde_json::from_value::<u64>(json["shards"].clone())
-            .expect("Gateway response not u64");
+        let mut json = query_gateway(&client_web, &mut limiter, &token).await?;
+        let total_shards: usize = serde_json::from_value::<usize>(json["shards"].clone())
+            .expect("Gateway response not usize");
 
-        let max_concurrency = *&json["session_start_limit"]["max_concurrency"]
-            .as_u64()
-            .unwrap();
+        let session_start_limit = json["session_start_limit"].take();
+        let session_start_limit = SessionStartLimit {
+            total: session_start_limit["total"].as_u64().unwrap(),
+            remaining: session_start_limit["remaining"].as_u64().unwrap(),
+            reset_after: SystemTime::now()
+                + Duration::from_millis(session_start_limit["reset_after"].as_u64().unwrap()),
+            max_concurrency: session_start_limit["max_concurrency"].as_u64().unwrap() as usize,
+        };
 
         debug!(
-            "Gateway wants {} shards, {} at a time",
-            total_shards, max_concurrency
+            "Got new session start limit {:?}, reset in {:?}",
+            session_start_limit,
+            session_start_limit
+                .reset_after
+                .duration_since(SystemTime::now())
         );
 
-        server.set_concurrency(max_concurrency as usize).await;
+        let max_concurrency = session_start_limit.max_concurrency;
+
+        let mut state = server.state.lock().await;
+        state.session_start_limit = session_start_limit;
+        drop(state);
+
         con.set(format!("total_shards_{}", namespace), total_shards)
             .await
             .expect("Failed to set total shards");

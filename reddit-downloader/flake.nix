@@ -49,6 +49,9 @@
               tag = "latest";
               contents = [ pkgs.cacert pkgs.ffmpeg pkgs.wget pkgs.gifsicle ];
               config.Entrypoint = [ "${default}/bin/reddit-downloader" ];
+              config.Env = [
+                "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              ];
             };
           };
 

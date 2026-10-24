@@ -3,8 +3,9 @@ use mongodb::bson::doc;
 use mongodb::options::ClientOptions;
 use post_api::PostInContext;
 use redis::AsyncTypedCommands;
+use serenity::Error;
 use serenity::all::{
-    ChannelId, CreateMessage, GatewayIntents, GenericChannelId, GuildId, Http, Token,
+    ChannelId, CreateMessage, GatewayError, GatewayIntents, GenericChannelId, GuildId, Http, Token,
 };
 use serenity::{all::EventHandler, async_trait};
 
@@ -16,6 +17,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{Instant, Interval, interval, timeout};
+use tracing::trace;
 use user_config_manager::{TextAllowLevel, get_channel_config};
 
 use futures::future;
@@ -27,7 +29,7 @@ use tarpc::{server::Channel, tokio_serde::formats::Bincode};
 use anyhow::anyhow;
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{logs, trace};
+use opentelemetry_sdk::logs;
 use tarpc::context::Context;
 use tracing_subscriber::{
     EnvFilter, Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
@@ -69,7 +71,7 @@ impl SubscriptionManager {
         let mut inner_interval = interval(tokio::time::Duration::from_millis(1000 / 20)); // Send alerts at max of 20 per second (Discord global rate limit is 50 reqs per second)
         loop {
             outer_interval.tick().await;
-            debug!("Locking queued alerts.");
+            trace!("Locking queued alerts.");
             let mut queued_alerts = self.queued_alerts.lock().await;
             let next_alert = match queued_alerts.pop_front() {
                 Some(x) => x,
@@ -117,6 +119,8 @@ impl SubscriptionManager {
                     .expect("Message sender's channel was closed, couldn't send to it.");
                 sender_idx = (sender_idx + 1) % MESSAGE_SENDER_COUNT;
             }
+
+            debug!("Transferred posts to senders");
 
             for deletion_channel in &mut self.message_sender_deletion_requests {
                 while let Ok(subscription) = deletion_channel.try_recv() {
@@ -329,7 +333,7 @@ impl Subscriber for SubscriberServer {
         };
 
         debug!("Got post {:?}", post);
-        debug!("Filtered subscriptions {:?}", filtered);
+        debug!("Num subscriptions: {:?}", filtered.len());
 
         let text_allow_level = match get_post_content_type(
             &mut self.redis.clone(),
@@ -350,6 +354,7 @@ impl Subscriber for SubscriberServer {
             timestamp: Instant::now(),
             text_level: text_allow_level,
         };
+        drop(subscriptions);
 
         let mut queued_alerts = self.queued_alerts.lock().await;
         queued_alerts.push_back(alert);
@@ -441,10 +446,34 @@ async fn main() {
     let token =
         Token::from_env("DISCORD_TOKEN_BB").expect("Expected DISCORD_TOKEN_BB in the environment");
     let intents = GatewayIntents::empty();
-    let mut client_bb = serenity::Client::builder(token, intents)
+    let mut client_bb = match serenity::Client::builder(token, intents)
         .event_handler(Arc::new(Handler))
         .await
-        .expect("Err creating client");
+    {
+        Ok(x) => x,
+        Err(e) => match e {
+            serenity::Error::Gateway(error) => {
+                match error {
+                    GatewayError::InvalidAuthentication => {
+                        loop {
+                            // Sleep forever to prevent startup loops banning us from the API
+                            error!("Shard has invalid token!");
+                            std::thread::sleep(Duration::from_secs(3600));
+                        }
+                    }
+                    _ => {
+                        error!("Error running shard: {:?}", error);
+                        panic!("Error running shard: {:?}", error);
+                    }
+                }
+            }
+            _ => {
+                error!("Error running shard: {:?}", e);
+                panic!("Error running shard: {:?}", e)
+            }
+        },
+    };
+
     let http_bb = client_bb.http.clone();
     info!("Connected for BB");
 
@@ -563,6 +592,7 @@ async fn main() {
                 alert_timestamp: Instant::now(),
                 deletion_request_channel,
                 text_allow_level: TextAllowLevel::Both,
+                post: None,
             }
             .sender_loop(),
         );

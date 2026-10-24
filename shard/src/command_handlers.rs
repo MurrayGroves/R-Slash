@@ -403,7 +403,7 @@ pub async fn subscribe<'a>(
         .register_subscription(
             context::current(),
             subreddit.clone(),
-            command.channel_id.get(),
+            command.channel_id,
             bot,
         )
         .await
@@ -488,7 +488,7 @@ pub async fn unsubscribe<'a>(
     };
 
     let subreddits = match client
-        .list_subscriptions(context::current(), command.channel_id.get(), bot)
+        .list_subscriptions(context::current(), command.channel_id, bot)
         .await?
     {
         Ok(x) => x,

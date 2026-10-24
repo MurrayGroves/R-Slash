@@ -1,4 +1,4 @@
-use anyhow::{Error, bail};
+use anyhow::{Context, Error, bail};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -256,44 +256,55 @@ impl Limiter {
                 state.remaining = per_minute;
                 state.reset = chrono::Utc::now().timestamp() + 60;
             }
+        }
 
-            if let Some(remaining) = headers.get("Retry-After") {
-                state.reset =
-                    chrono::Utc::now().timestamp() + remaining.to_str()?.parse::<i64>()?;
-                state.remaining = 0;
-            }
-        } else {
-            if let Some(remaining) = headers.get("X-RateLimit-UserRemaining") {
-                state.remaining = remaining.to_str()?.parse()?;
-            } else if let Some(reset) = headers.get("X-RateLimit-UserReset") {
-                state.reset = reset.to_str()?.parse()?;
-            } else {
-                if status == StatusCode::TOO_MANY_REQUESTS
-                    || status == StatusCode::FORBIDDEN
-                    || status == StatusCode::UNAUTHORIZED
-                {
-                    // Wait 10 minutes if we hit the rate limit, and they didn't tell us when to try again
-                    warn!(
-                        "We hit the rate limit for {} with status {} waiting 10 mins as a pre-caution with headers: {:?}",
-                        self.name, status, headers
-                    );
-                    state.reset = chrono::Utc::now().timestamp() + 600;
-                    state.remaining = 0;
-                }
-
-                if let Some(remaining) = headers.get("x-ratelimit-remaining") {
-                    state.remaining = remaining
-                        .to_str()?
-                        .split(".")
-                        .nth(0)
-                        .ok_or(Error::msg("Failed to parse rate limit"))?
-                        .parse()?;
-                }
-                if let Some(reset) = headers.get("x-ratelimit-reset") {
-                    state.reset =
-                        chrono::Utc::now().timestamp() + reset.to_str()?.parse::<i64>()?;
-                }
-            }
+        let mut updated_reset = false;
+        if let Some(remaining) = headers.get("Retry-After") {
+            state.reset = chrono::Utc::now().timestamp() + remaining.to_str()?.parse::<i64>()?;
+            state.remaining = 0;
+            updated_reset = true;
+        }
+        if let Some(remaining) = headers.get("X-RateLimit-UserRemaining") {
+            state.remaining = remaining
+                .to_str()?
+                .parse::<f64>()
+                .context(format!("Parsing {:?}", remaining))? as u64;
+        }
+        if let Some(reset) = headers.get("X-RateLimit-UserReset") {
+            state.reset = reset
+                .to_str()?
+                .parse()
+                .context(format!("Parsing {:?}", reset))?;
+            updated_reset = true;
+        }
+        if let Some(remaining) = headers.get("x-ratelimit-remaining") {
+            state.remaining = remaining
+                .to_str()?
+                .split(".")
+                .nth(0)
+                .ok_or(Error::msg("Failed to parse rate limit"))?
+                .parse()?;
+        }
+        if let Some(reset) = headers.get("x-ratelimit-reset") {
+            state.reset = chrono::Utc::now().timestamp()
+                + reset
+                    .to_str()?
+                    .parse::<f64>()
+                    .context(format!("Parsing {:?}", reset))? as i64;
+            updated_reset = true;
+        }
+        if (status == StatusCode::TOO_MANY_REQUESTS
+            || status == StatusCode::FORBIDDEN
+            || status == StatusCode::UNAUTHORIZED)
+            && !updated_reset
+        {
+            // Wait 10 minutes if we hit the rate limit, and they didn't tell us when to try again
+            warn!(
+                "We hit the rate limit for {} with status {} waiting 10 mins as a pre-caution with headers: {:?}",
+                self.name, status, headers
+            );
+            state.reset = chrono::Utc::now().timestamp() + 600;
+            state.remaining = 0;
         }
 
         Ok(())

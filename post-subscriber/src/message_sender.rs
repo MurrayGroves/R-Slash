@@ -1,10 +1,11 @@
+use post_api::PostInContext;
 use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::Mutex,
     time::{Instant, timeout},
 };
 
-use serenity::all::Http;
+use serenity::all::{Http, JsonErrorCode};
 
 use post_subscriber::{Bot, Subscription};
 
@@ -34,6 +35,7 @@ pub(crate) struct MessageSender<'a> {
     pub(crate) text_allow_level: TextAllowLevel,
     pub(crate) alert_timestamp: Instant,
     pub(crate) deletion_request_channel: tokio::sync::mpsc::Sender<Arc<Subscription>>,
+    pub(crate) post: Option<PostInContext>,
 }
 
 impl<'a> MessageSender<'a> {
@@ -47,6 +49,7 @@ impl<'a> MessageSender<'a> {
 
             match command {
                 Command::SetAlert(alert) => {
+                    self.post = Some(alert.post.clone());
                     self.message = Some(alert.post.buttonless_message());
                     self.alert_timestamp = alert.timestamp;
                     self.text_allow_level = alert.text_allow_level;
@@ -121,15 +124,28 @@ impl<'a> MessageSender<'a> {
                 if let serenity::Error::Http(e) = e
                     && let serenity::http::HttpError::UnsuccessfulRequest(e) = e
                 {
-                    if e.error.code.0 == 10003 || e.error.code.0 == 50001 || e.error.code.0 == 50013{
-                        let mut failed_reqs = self.failed_req_counter.lock().await;
-                        *failed_reqs += 1;
-                        drop(failed_reqs);
-                        debug!("Channel doesn't exist anymore, marking subscription for deletion.");
+                    if e.error.code == JsonErrorCode::UnknownChannel
+                        || e.error.code == JsonErrorCode::CannotSendMessagesToUser
+                        || e.error.code == JsonErrorCode::LackPermissionsForAction
+                        || e.error.code == JsonErrorCode::MissingAccess
+                        || e.error.code
+                            == JsonErrorCode::CannotSendMessagesToUserDueToHavingNoMutualGuilds
+                    {
+                        // Unknown channel, not allowed to message user, no permissions
+                        debug!(
+                            "Channel doesn't exist anymore, marking subscription for deletion. Channel: {:?} for post {:?} in {:?}, with error {:?}",
+                            subscription.channel,
+                            self.post.as_ref().map(|x| &x.post.id),
+                            self.post.as_ref().map(|x| &x.subreddit),
+                            e
+                        );
                         self.deletion_request_channel
                             .send(subscription)
                             .await
                             .expect("Couldn't send deletion request because channel was closed");
+                    } else if e.error.code == JsonErrorCode::InvalidAuthToken {
+                        error!("TOKEN INVALID! for bot {:?}", subscription.bot);
+                        panic!("TOKEN INVALID");
                     } else {
                         error!("Failed to send message to channel: {:?}", e);
                         let mut failed_reqs = self.failed_req_counter.lock().await;

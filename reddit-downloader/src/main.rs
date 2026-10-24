@@ -332,7 +332,7 @@ async fn get_subreddit(
                 &mut existing_posts,
                 &mut post_list,
                 &subreddit,
-                downloaders_client
+                downloaders_client,
             )
             .await
             {
@@ -429,13 +429,13 @@ async fn download_loop<'a>() -> Result<(), Error> {
         r"
         -- KEYS[1] = subreddit
         -- KEYS[2] = post
-        -- VALS[1] = score
+        -- ARGV[1] = score
         local key = string.format('subreddit:%s:post:%s', KEYS[1], KEYS[2])
-        current_score = redis.call('HGET', key, 'score')
-        if abs((VALS[1] - current_score) / VALS[1]) > 0.1 then
-            redis.call('HSET', key, 'score', VALS[1])
+        local current_score = redis.call('HGET', key, 'score')
+        if math.abs((ARGV[1] - current_score) / ARGV[1]) > 0.1 then
+            redis.call('HSET', key, 'score', ARGV[1])
         end
-        "
+        ",
     );
 
     let mut downloaders_client = downloaders::client::Client::new(
@@ -444,7 +444,7 @@ async fn download_loop<'a>() -> Result<(), Error> {
         con.clone(),
         subscriber.clone(),
         chunk_clear_script,
-        score_update_script
+        score_update_script,
     )
     .await?;
 

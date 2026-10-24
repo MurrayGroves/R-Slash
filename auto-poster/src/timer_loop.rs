@@ -5,7 +5,7 @@ use mongodb::bson::doc;
 use post_api::{optional_post_to_message, queue_subreddit, PostApiError};
 use reddit_proxy::RedditProxyClient;
 use rslash_common::SubredditStatus;
-use serenity::all::{ChannelId, CreateMessage};
+use serenity::all::{ChannelId, CreateMessage, JsonErrorCode};
 use std::{ops::Deref, sync::Arc, time::Duration};
 use tarpc::context::Context;
 use tokio::time::timeout;
@@ -165,13 +165,11 @@ pub async fn timer_loop(
                         // Queue subreddit for downloading if it's a custom subreddit
                         if is_custom {
                             if let Err(e) = async {
-                                let text_allow_level = get_channel_config(
-                                    &mut server.db,
-                                    ChannelId::new(channel.get()),
-                                )
-                                .await?
-                                .text_allowed
-                                .unwrap_or_default();
+                                let text_allow_level =
+                                    get_channel_config(&mut server.db, channel.widen())
+                                        .await?
+                                        .text_allowed
+                                        .unwrap_or_default();
 
                                 queue_subreddit(
                                     &autopost.subreddit,
@@ -240,33 +238,42 @@ pub async fn timer_loop(
                                 return;
                             }
                         };
-                        info!("Sent message");
 
                         // Handle any errors sending the message
                         if let Err(why) = message_send_result {
+                            info!("Sent message with failure");
+                            let mut counter = server.failed_req_counter.lock().await;
+                            *counter += 1;
+                            drop(counter);
                             // If we failed because we don't have permission to send to the channel, delete the autopost
                             if let serenity::Error::Http(e) = &why {
                                 if let serenity::http::HttpError::UnsuccessfulRequest(e) = e {
-                                    // Unknown channel (we got removed from server)
-                                    if e.error.code.0 == 10003 {
+                                    if e.error.code == JsonErrorCode::UnknownChannel
+                                        || e.error.code == JsonErrorCode::CannotSendMessagesToUser
+                                        || e.error.code == JsonErrorCode::LackPermissionsForAction
+                                        || e.error.code == JsonErrorCode::MissingAccess
+                                        || e.error.code
+                                            == JsonErrorCode::CannotSendMessagesToUserDueToHavingNoMutualGuilds
+                                    {
                                         counter!("autoposter_missing_channel").increment(1);
                                         failed = true;
+                                        debug!("Failed with missing channel");
+                                    } else if e.error.code == JsonErrorCode::InvalidAuthToken {
+                                        error!("TOKEN INVALID for bot {:?}", bot);
+                                        panic!("TOKEN INVALID");
                                     }
                                 } else {
                                     error!("Error sending message: {:?}", why);
-                                    counter!("autoposter_failed_messages").increment(1);
-                                    let mut counter = server.failed_req_counter.lock().await;
-                                    *counter += 1;
                                 }
+                                counter!("autoposter_failed_messages").increment(1);
                             } else {
                                 error!("Error sending message: {:?}", why);
                                 counter!("autoposter_failed_messages").increment(1);
                                 counter!("autoposter_unknown_sending_error").increment(1);
-                                let mut counter = server.failed_req_counter.lock().await;
-                                *counter += 1;
                             }
                         } else {
                             counter!("autoposter_sent_messages").increment(1);
+                            info!("Sent message successfully");
                         }
 
                         // If we succeeded in sending the message, or it failed due to a temporary error

@@ -48,13 +48,16 @@
             docker = pkgs.dockerTools.buildLayeredImage {
               name = "registry.murraygrov.es/discord-shard";
               tag = "latest";
-              contents = [ pkgs.cacert pkgs.ffmpeg pkgs.wget pkgs.gifsicle ];
+              contents = [ pkgs.cacert pkgs.ffmpeg pkgs.wget pkgs.gifsicle pkgs.busybox ];
               config.Entrypoint = [ "${default}/bin/discord-shard" ];
+              config.Env = [
+                "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              ];
             };
             docker-dev = pkgs.dockerTools.buildLayeredImage {
               name = "registry.murraygrov.es/discord-shard";
               tag = "dev";
-              contents = [ pkgs.cacert pkgs.ffmpeg pkgs.wget pkgs.gifsicle ];
+              contents = [ pkgs.cacert pkgs.ffmpeg pkgs.wget pkgs.gifsicle pkgs.busybox ];
               config.Entrypoint = [ "${default}/bin/discord-shard" ];
               config.Env = [
                 "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"

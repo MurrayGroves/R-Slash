@@ -7,7 +7,7 @@ use mongodb::options::ClientOptions;
 use redis::AsyncTypedCommands;
 use rslash_common::rpc::RetryingTcpStream;
 use rslash_common::{span_filter, Post};
-use serenity::all::{ChannelId, GatewayIntents, Http};
+use serenity::all::{ChannelId, GatewayError, GatewayIntents, Http};
 use serenity::{all::EventHandler, async_trait};
 use stubborn_io::{ReconnectOptions, StubbornTcpStream};
 use tarpc::Transport;
@@ -363,10 +363,33 @@ async fn async_main() {
             ));
 
         let intents = GatewayIntents::empty();
-        let client = serenity::Client::builder(token, intents)
+        let client = match serenity::Client::builder(token, intents)
             .event_handler(Arc::new(Handler))
             .await
-            .expect("Err creating client");
+        {
+            Ok(x) => x,
+            Err(e) => match e {
+                serenity::Error::Gateway(error) => {
+                    match error {
+                        GatewayError::InvalidAuthentication => {
+                            loop {
+                                // Sleep forever to prevent startup loops banning us from the API
+                                error!("Shard has invalid token!");
+                                std::thread::sleep(Duration::from_secs(3600));
+                            }
+                        }
+                        _ => {
+                            error!("Error running shard: {:?}", error);
+                            panic!("Error running shard: {:?}", error);
+                        }
+                    }
+                }
+                _ => {
+                    error!("Error running shard: {:?}", e);
+                    panic!("Error running shard: {:?}", e)
+                }
+            },
+        };
 
         discord_https.insert(bot.clone(), client.http.clone());
         discord_clients.insert(bot.clone(), client);

@@ -274,7 +274,32 @@ pub async fn process_post_metadata(
         counter!("downloader_posts_updated").increment(1);
 
         // Update post's score with new score
-        let _:() = client.score_update_script.invoke_async(&mut client.redis).await?;
+        match client
+            .score_update_script
+            .key(subreddit)
+            .key(
+                post["id"]
+                    .as_str()
+                    .ok_or(anyhow!("Couldn't parse ID as str"))?,
+            )
+            .arg(
+                post["score"]
+                    .as_i64()
+                    .ok_or(anyhow!("Couldn't parse score as i64"))?,
+            )
+            .invoke_async(&mut client.redis)
+            .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                debug!(
+                    "Error with post id {} and score {}",
+                    post["id"].as_str().unwrap(),
+                    post["score"].as_i64().unwrap()
+                );
+                error!("Failed to update post score, {:?}", e)
+            }
+        };
 
         // Move post from existing list to list of posts still in front pages
         let post = key.into();

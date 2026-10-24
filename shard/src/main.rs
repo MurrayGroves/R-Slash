@@ -260,7 +260,7 @@ impl EventHandler for Handler {
     async fn dispatch(&self, ctx: &Context, event: &FullEvent) {
         match event {
             FullEvent::GuildCreate { guild, is_new, .. } => {
-                debug!("Guild create event fired");
+                trace!("Guild create event fired");
                 gauge!("discordshard_guild_count").set(ctx.cache.guild_count() as f64);
                 let mut con = ctx.data::<ShardState>().redis.clone();
                 con.hset(
@@ -1010,7 +1010,7 @@ fn main() {
 					info!("Received go ahead to boot from discord interface")
 				} else {
 					info!("Discord interface told us to wait, waiting...");
-					sleep(Duration::from_secs(5)).await
+					sleep(Duration::from_secs(30)).await
 				}
 			}
 
@@ -1123,10 +1123,24 @@ fn main() {
 
 			let thread = tokio::spawn(async move {
 				println!("Spawning client thread");
-				client
+				match client
 					.start_shard(shard_id, total_shards)
 					.await
-					.expect("Failed to start shard");
+				{
+                    Ok(_) => {},
+                    Err(e) => match e {
+                        SerenityError::Gateway(error) => match error {
+                            GatewayError::InvalidAuthentication => {
+                                loop { // Sleep forever to prevent startup loops banning us from the API
+                                    error!("Shard has invalid token!");
+                                    std::thread::sleep(Duration::from_secs(3600));
+                                }
+                            },
+                            _ => error!("Error running shard: {:?}", error),
+                        },
+                        _ => error!("Error running shard: {:?}", e),
+                    },
+                }
 
 				error!("Client thread exited unexpectedly!");
 			});

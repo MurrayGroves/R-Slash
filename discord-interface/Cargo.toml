@@ -33,6 +33,8 @@ metrics = "*"
 metrics-exporter-prometheus = "0.18.3"
 rustls = "0.23.27"
 
+rslash_common = { path = "../rslash_common" }
+
 [[bin]]
 name = "discord-interface"
 path = "src/main.rs"

@@ -47,6 +47,9 @@
               tag = "latest";
               contents = pkgs.cacert;
               config.Entrypoint = [ "${default}/bin/auto_poster" ];
+              config.Env = [
+                "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              ];
             };
           };
 

@@ -46,7 +46,7 @@ pub async fn unsubscribe<'a>(
         .delete_subscription(
             context::current(),
             subreddit.clone(),
-            interaction.channel_id.get(),
+            interaction.channel_id,
             bot,
         )
         .await?
