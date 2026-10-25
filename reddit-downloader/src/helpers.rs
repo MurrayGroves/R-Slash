@@ -29,9 +29,11 @@ fn extract_i_reddit_url(metadata: &Value) -> Result<String, Error> {
         .and_then(Value::as_str)
         .ok_or(anyhow!("Media item does not have an id"))?;
 
-    // Reddit API returns the non-existent mime-type "image/jpg" when it should be "image/jpeg" !!!
+    // Reddit API (used to?) returns the non-existent mime-type "image/jpg" when it should be "image/jpeg" !!!
     let ext = if mime == "image/jpg" {
         "jpg"
+    } else if mime == "image/jpeg" {
+        "jpeg" // They use .jpeg instead of .jpg
     } else {
         mime2ext(mime).ok_or(anyhow!("Unsupported mime type: {}", mime))?
     };
@@ -51,7 +53,7 @@ pub fn extract_raw_embed_urls_from_post(post: Map<String, Value>) -> Result<Vec<
             .and_then(Value::as_object)
             .ok_or_else(|| {
                 debug!("Post Object: {:?}", post);
-                error!("Post is gallery but media_metadata is not an object");
+                error!("Post is gallery but media_metadata is not an object"); // Happens when gallery is deleted, but post is still up.
                 anyhow!("Post is gallery but media_metadata is not an object")
             })?
             .into_iter()

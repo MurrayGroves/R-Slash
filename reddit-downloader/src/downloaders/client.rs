@@ -9,7 +9,6 @@ use base64::Engine;
 use metrics::counter;
 use post_subscriber::SubscriberClient;
 use redis::AsyncCommands;
-use reqwest::StatusCode;
 use rslash_common::Limiter;
 use sentry::integrations::anyhow::capture_anyhow;
 use serde_json::Value;
@@ -158,7 +157,7 @@ impl Client {
             subscriber_client,
             subreddit_started_at: Arc::new(Mutex::new(None)),
             chunk_clear_script,
-            score_update_script
+            score_update_script,
         };
 
         let new_clone = new.clone();
