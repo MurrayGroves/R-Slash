@@ -363,17 +363,6 @@ impl EventHandler for Handler {
                 .await;
             }
 
-            FullEvent::Resume { event, .. } => {
-                info!(
-                    "Shard resumed connection: {:?}, restarting self to be safe. Since this causes issues sometimes.",
-                    event
-                );
-
-                if Path::new("/etc/probes/live").exists() {
-                    fs::remove_file("/etc/probes/live").expect("Unable to remove /etc/probes/live");
-                }
-            }
-
             FullEvent::Ready { data_about_bot, .. } => {
                 capture_event(
                     ctx.data(),
@@ -782,12 +771,18 @@ async fn monitor_total_shards(
     loop {
         sleep(Duration::from_secs(60)).await;
 
-        let db_total_shards: u16 = con
-            .get_int(format!("total_shards_{}", &*NAMESPACE))
-            .await
-            .expect("Failed to get total shards from Redis")
-            .map(|x| x as u16)
-            .expect("Failed to parse total shards as u16, or it wasn't in Redis");
+        let key = format!("total_shards_{}", &*NAMESPACE);
+        let db_total_shards: u16 = match con.get_int(&key).await {
+            Ok(Some(total_shards)) => total_shards as u16,
+            Ok(None) => {
+                error!("{} not present in Redis", key);
+                continue;
+            }
+            Err(e) => {
+                error!("Error getting total shards from Redis: {:?}", e);
+                continue;
+            }
+        };
 
         let alive = if let Some(runner) = runners.get(&ShardId(shard_id)) {
             runner.info.read().stage == ConnectionStage::Connected
