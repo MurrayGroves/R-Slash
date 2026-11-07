@@ -359,6 +359,30 @@ pub async fn subscribe_custom<'a>(
         &format!("user_{}", command.user.id.get()),
     )
     .await;
+
+    let options = &command.data.options;
+    let subreddit = options[0].value.clone();
+    let subreddit = subreddit.as_str().unwrap().to_string().to_lowercase();
+    let data = ctx.data::<ShardState>();
+    if let SubredditStatus::Invalid(reason) = data
+        .reddit_proxy
+        .check_subreddit_valid(context::current(), subreddit.clone())
+        .await??
+    {
+        debug!("Subreddit response not 200: {}", reason);
+        return tracker
+            .send_response(CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new().embed(
+                    CreateEmbed::default()
+                        .title("Subreddit Inaccessible")
+                        .description(format!("r/{} is private or does not exist.", subreddit))
+                        .color(0xff0000)
+                        .to_owned(),
+                ),
+            ))
+            .await;
+    }
+
     subscribe(command, ctx, tracker).await
 }
 

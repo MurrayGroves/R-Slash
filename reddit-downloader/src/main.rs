@@ -282,7 +282,8 @@ async fn get_subreddit(
 
                 if let Some(err) = results.get("error") {
                     if let Some(err_code) = err.as_u64() {
-                        if err_code == 404 {
+                        if err_code == 404 || err_code == 302 {
+                            // Reddit likes to return 302 to the search page for some reason
                             debug!("Subreddit doesn't exist.");
                             return Ok((SubredditExists::DoesntExist, None));
                         } else if err_code == 403 {
