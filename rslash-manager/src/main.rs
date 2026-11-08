@@ -33,7 +33,7 @@ async fn fetch_guild_config(
     cache: Arc<Cache>,
     mongodb_client: &mut mongodb::Client,
 ) -> Document {
-    let db = mongodb_client.database("config");
+    let db = mongodb_client.database("configuration");
     let coll = db.collection::<Document>("servers");
 
     let filter = doc! {"id": guild_id.get().to_string()};
@@ -90,7 +90,7 @@ impl EventHandler for Handler {
 
         let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
 
-        let db = mongodb_client.database("config");
+        let db = mongodb_client.database("configuration");
         let coll = db.collection::<Document>("settings");
 
         let filter = doc! {"id": "subreddit_list".to_string()};

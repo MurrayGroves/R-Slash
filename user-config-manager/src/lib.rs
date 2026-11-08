@@ -25,7 +25,7 @@ impl GuildConfig {
 /// Retrieve a guild config from MongoDB
 pub async fn get_guild_config(mongodb: Client, guild_id: GuildId) -> Result<GuildConfig> {
     let collection = mongodb
-        .database("config")
+        .database("configuration")
         .collection::<GuildConfig>("servers");
 
     let filter = doc! { "guild_id": guild_id.get().to_string() };
@@ -39,7 +39,7 @@ pub async fn get_guild_config(mongodb: Client, guild_id: GuildId) -> Result<Guil
 /// Save a guild config to MongoDB
 pub async fn save_guild_config(mongodb: Client, config: GuildConfig) -> Result<()> {
     let collection = mongodb
-        .database("config")
+        .database("configuration")
         .collection::<GuildConfig>("servers");
 
     let filter = doc! {
@@ -116,7 +116,7 @@ pub async fn get_channel_config(
     channel_id: GenericChannelId,
 ) -> Result<ChannelConfig> {
     let collection = mongodb
-        .database("config")
+        .database("configuration")
         .collection::<ChannelConfig>("channels");
 
     let filter = doc! { "channel_id": channel_id.get().to_string() };
@@ -130,7 +130,7 @@ pub async fn get_channel_config(
 /// Save a channel config to MongoDB
 pub async fn save_channel_config(mongodb: &mut Client, config: &ChannelConfig) -> Result<()> {
     let collection = mongodb
-        .database("config")
+        .database("configuration")
         .collection::<ChannelConfig>("channels");
 
     let filter = doc! {

@@ -315,6 +315,10 @@ impl Subscriber for SubscriberServer {
             return Ok(());
         }
 
+        debug!("Num subscriptions: {:?}", filtered.len());
+
+        let filtered = filtered.into_iter().map(|x| (*x).clone()).collect();
+        drop(subscriptions);
         let mut redis = self.redis.clone();
 
         debug!("Getting post {}", post_id);
@@ -333,7 +337,6 @@ impl Subscriber for SubscriberServer {
         };
 
         debug!("Got post {:?}", post);
-        debug!("Num subscriptions: {:?}", filtered.len());
 
         let text_allow_level = match get_post_content_type(
             &mut self.redis.clone(),
@@ -350,11 +353,10 @@ impl Subscriber for SubscriberServer {
 
         let alert = PostAlert {
             post,
-            subscriptions: filtered.into_iter().map(|x| (*x).clone()).collect(),
+            subscriptions: filtered,
             timestamp: Instant::now(),
             text_level: text_allow_level,
         };
-        drop(subscriptions);
 
         let mut queued_alerts = self.queued_alerts.lock().await;
         queued_alerts.push_back(alert);

@@ -455,7 +455,7 @@ async fn download_loop<'a>() -> Result<(), Error> {
     println!("Starting loop");
     let mut subreddits: HashMap<String, SubredditState> = HashMap::new();
     if do_custom != "true".to_string() {
-        let db = mongodb_client.database("config");
+        let db = mongodb_client.database("configuration");
         let coll = db.collection::<Document>("settings");
 
         let filter = doc! {"id": "subreddit_list".to_string()};

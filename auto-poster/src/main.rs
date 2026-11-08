@@ -410,7 +410,7 @@ async fn async_main() {
         .unwrap();
     listener.config_mut().max_frame_length(usize::MAX);
 
-    let db = mongodb_client.database("config");
+    let db = mongodb_client.database("configuration");
     let coll = db.collection::<Document>("settings");
 
     let filter = doc! {"id": "subreddit_list".to_string()};

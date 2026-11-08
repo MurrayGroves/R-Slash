@@ -951,7 +951,7 @@ fn main() {
 			client_options.app_name = Some(format!("Shard {}", shard_id));
 
 			let mongodb_client = mongodb::Client::with_options(client_options).unwrap();
-			let db = mongodb_client.database("config");
+			let db = mongodb_client.database("configuration");
 			let coll = db.collection::<Document>("settings");
 
 			let filter = doc! {"id": "subreddit_list".to_string()};

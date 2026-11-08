@@ -39,7 +39,7 @@ macro_rules! error_if_no_premium {
                             .title("Premium Feature")
                             .description(
                                 "You must have premium in order to use this command.
-                    Get it [here](https://ko-fi.com/rslash)",
+                    Get it [here](https://ko-fi.com/rslash), for only £1.30 a month!",
                             )
                             .color(0xff0000)
                             .to_owned(),
@@ -53,7 +53,9 @@ macro_rules! error_if_no_premium {
 #[macro_export]
 macro_rules! error_if_user_no_manage_channels_perm {
     ($ctx:expr, $member:expr, $tracker:expr) => {
-        if let Some(member) = $member && let Some(perms) = member.permissions {
+        if let Some(member) = $member
+            && let Some(perms) = member.permissions
+        {
             if !perms.manage_channels() {
                 return $tracker
                     .send_response(CreateInteractionResponse::Message(
